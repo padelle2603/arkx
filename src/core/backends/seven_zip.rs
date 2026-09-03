@@ -13,16 +13,20 @@ use std::time::{Duration, Instant};
 
 pub struct SevenZipBackend {
     bin: PathBuf,
+    cancel: Arc<AtomicBool>,
 }
 
 /// Progress callback shared between the 7z reader and the dest poller.
 type SharedCallback = Arc<Mutex<Box<dyn Fn(ProgressInfo) + Send>>>;
 
 impl SevenZipBackend {
-    pub fn new() -> Self {
-        // Locate the 7z binary
+    pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
         let bin = which_7z();
-        Self { bin }
+        Self { bin, cancel }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 }
 
@@ -324,7 +328,7 @@ impl SevenZipBackend {
         sources: &[PathBuf],
         level: u8,
         password: Option<&str>,
-        _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(ArkxError::Io)?;
@@ -334,8 +338,6 @@ impl SevenZipBackend {
         let mut cmd = Command::new(&self.bin);
         cmd.arg("a")
             .arg(format!("-mmt={}", threads))
-            .arg("-bsp0")
-            .arg("-bso0")
             .arg("-y");
 
         // Compression level
@@ -364,18 +366,223 @@ impl SevenZipBackend {
             cmd.arg(s);
         }
 
-        let output = cmd.output().map_err(|e| ArkxError::Backend(e.to_string()))?;
-        if !output.status.success() {
-            let msg = String::from_utf8_lossy(&output.stderr);
-            return Err(ArkxError::Backend(msg.to_string()));
+        let Some(cb) = progress else {
+            // No progress sink: plain blocking run (CLI text mode drives its
+            // own spinner; Ctrl-C kills the whole process tree anyway).
+            let output = cmd
+                .arg("-bsp0")
+                .arg("-bso0")
+                .output()
+                .map_err(|e| ArkxError::Backend(e.to_string()))?;
+            if !output.status.success() {
+                let msg = String::from_utf8_lossy(&output.stderr);
+                return Err(ArkxError::Backend(msg.to_string()));
+            }
+            return Ok(());
+        };
+
+        // Progress mode (file-manager window): stream 7z's own % like the
+        // extract path does. total = input bytes so the bar, the Written
+        // counter, speed and ETA stay byte-based and honest.
+        cmd.arg("-bsp1").arg("-bso1");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(format!("spawn 7z: {}", e)))?;
+
+        let total = create_input_size(sources);
+        cb(ProgressInfo::new("Preparing…".to_string(), 0, total));
+
+        // Drain stderr on a separate thread to avoid pipe deadlock (64KB).
+        let stderr_handle = std::thread::spawn({
+            let mut stderr = child.stderr.take();
+            move || {
+                if let Some(mut err) = stderr.take() {
+                    let mut buf = vec![0u8; 8192];
+                    use std::io::Read;
+                    while let Ok(n) = err.read(&mut buf) {
+                        if n == 0 { break; }
+                    }
+                }
+            }
+        });
+
+        let mut last_pct = 0u32;
+        let mut cancelled = false;
+        if let Some(stdout) = child.stdout.take() {
+            use std::io::Read;
+            let mut reader = stdout;
+            let mut buf = vec![0u8; 8192];
+            let mut chunk = Vec::new();
+            let mut last_emit = Instant::now();
+            let mut last_label = String::new();
+            // Returns true when the caller should abort the read loop.
+            let feed = |line: &str, last_emit: &mut Instant, last_label: &mut String, last_pct: &mut u32| {
+                if self.cancelled() {
+                    return true;
+                }
+                emit_add_line(line, total, last_emit, last_label, last_pct, &cb);
+                false
+            };
+            'read: loop {
+                if self.cancelled() {
+                    cancelled = true;
+                    break 'read;
+                }
+                let n = reader.read(&mut buf).unwrap_or(0);
+                if n == 0 { break; }
+                for &b in &buf[..n] {
+                    if b == b'\r' || b == b'\n' {
+                        if !chunk.is_empty() {
+                            if let Ok(s) = String::from_utf8(std::mem::take(&mut chunk)) {
+                                if feed(&s, &mut last_emit, &mut last_label, &mut last_pct) {
+                                    cancelled = true;
+                                    break 'read;
+                                }
+                            } else {
+                                chunk.clear();
+                            }
+                        }
+                    } else {
+                        chunk.push(b);
+                    }
+                }
+            }
+            if !cancelled && !chunk.is_empty() {
+                if let Ok(s) = String::from_utf8(chunk) {
+                    if feed(&s, &mut last_emit, &mut last_label, &mut last_pct) {
+                        cancelled = true;
+                    }
+                }
+            }
         }
+
+        if cancelled || self.cancelled() {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_handle.join();
+            let _ = std::fs::remove_file(dest);
+            return Err(ArkxError::Cancelled);
+        }
+
+        let status = child.wait().map_err(ArkxError::Io)?;
+        let _ = stderr_handle.join();
+        let code = status.code().unwrap_or(-1);
+        if !status.success() && code != 1 {
+            return Err(ArkxError::Backend(format!("7z create failed (code {})", code)));
+        }
+        if code == 1 {
+            eprintln!("[7z] warning code 1 in create path, treated as success");
+        }
+        // Final 100% (the only allowed jump: last value → 100).
+        cb(ProgressInfo::new("Completed".to_string(), total.max(1), total.max(1)));
         Ok(())
     }
 }
 
-/// Matches a " 12%" token. Tests/debug only: the bar no longer uses 7z's %,
-/// unreliable with -mmt=N due to lzma2-mt buffering — see extract().
-#[cfg(test)]
+/// Total input bytes for the create progress bar (best effort: unreadable
+/// files and symlinks count 0 instead of failing the whole job).
+fn create_input_size(sources: &[PathBuf]) -> u64 {
+    fn file_size(p: &Path) -> u64 {
+        if let Ok(m) = std::fs::metadata(p) {
+            if m.is_file() {
+                return m.len();
+            }
+            if m.is_dir() {
+                let mut total = 0u64;
+                if let Ok(walk) = std::fs::read_dir(p) {
+                    for entry in walk.flatten() {
+                        total = total.saturating_add(file_size(&entry.path()));
+                    }
+                }
+                return total;
+            }
+        }
+        0
+    }
+    sources.iter().map(|s| file_size(s)).fold(0u64, |a, b| a.saturating_add(b))
+}
+
+/// Handle one `7z a -bsp1` output line: forward a throttled, monotonic
+/// byte-based progress event. Returns true if anything was emitted.
+fn emit_add_line(
+    line: &str,
+    total: u64,
+    last_emit: &mut Instant,
+    last_label: &mut String,
+    last_pct: &mut u32,
+    cb: &dyn Fn(ProgressInfo),
+) -> bool {
+    let pct = match parse_percent(line) {
+        Some(p) => (*last_pct).max(p.min(100)),
+        None => *last_pct,
+    };
+    let label = label_from_7z_add_line(line);
+    let show_label = if label.is_empty() { last_label.clone() } else { label.clone() };
+    let fresh_label = !label.is_empty() && label != *last_label;
+    if pct <= *last_pct && !fresh_label && last_emit.elapsed().as_millis() <= 500 {
+        return false;
+    }
+    *last_pct = pct;
+    if !label.is_empty() {
+        *last_label = label;
+    }
+    *last_emit = Instant::now();
+    let done = total * pct as u64 / 100;
+    let file = if show_label.is_empty() { "Compressing…".to_string() } else { show_label };
+    cb(ProgressInfo::new(file, done, total));
+    true
+}
+
+/// Filename from a `7z a -bsp1` line, dropping the percentage and the
+/// operation markers (`Compressing  a.txt`, `+ a.txt`, `12% + a.txt`).
+fn label_from_7z_add_line(line: &str) -> String {
+    let t = line.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    // Drop a leading percentage token ("12% rest..." → "rest...").
+    let mut s = t;
+    if let Some(ws) = s.find(char::is_whitespace) {
+        let (first, rest) = s.split_at(ws);
+        if first.ends_with('%') {
+            s = rest.trim();
+        }
+    } else if s.ends_with('%') {
+        return String::new();
+    }
+    // Status lines without a file.
+    for prefix in ["Everything is Ok", "Scanning", "Creating archive"] {
+        if s.starts_with(prefix) {
+            return String::new();
+        }
+    }
+    // Drive-scan lines ("0M Scan  /path").
+    {
+        let mut parts = s.splitn(2, char::is_whitespace);
+        if let (Some(a), Some(b)) = (parts.next(), parts.next()) {
+            if a.ends_with('M')
+                && !a[..a.len() - 1].is_empty()
+                && a[..a.len() - 1].chars().all(|c| c.is_ascii_digit())
+                && b.trim_start().starts_with("Scan")
+            {
+                return String::new();
+            }
+        }
+    }
+    // Operation markers 7z prints while adding.
+    for prefix in ["Compressing", "Adding"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest.trim();
+            break;
+        }
+    }
+    // Per-file markers (`+ path`, `- path`).
+    s = s.strip_prefix('+').or_else(|| s.strip_prefix('-')).map(|r| r.trim()).unwrap_or(s);
+    s.to_string()
+}
+
+/// Matches a " 12%" token. The extract bar ignores 7z's % (unreliable with
+/// -mmt=N due to lzma2-mt buffering — see extract()); the create bar uses it
+/// clamped and monotonic, as there is no better live signal for `7z a`.
 fn parse_percent(s: &str) -> Option<u32> {
     for token in s.split_whitespace() {
         if token.ends_with('%') {
@@ -594,7 +801,8 @@ fn parse_7z_date(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{label_from_7z_line, parse_percent};
+    use super::{create_input_size, emit_add_line, label_from_7z_add_line, label_from_7z_line, parse_percent};
+    use std::time::Instant;
     #[test]
     fn test_pct() {
         assert_eq!(parse_percent(" 12% 3 - file.txt"), Some(12));
@@ -607,5 +815,41 @@ mod tests {
         assert_eq!(label_from_7z_line("  7%"), "");
         assert_eq!(label_from_7z_line("Everything is Ok"), "");
         assert_eq!(label_from_7z_line("Extracting  dir/file.txt"), "dir/file.txt");
+    }
+    #[test]
+    fn test_add_label() {
+        assert_eq!(label_from_7z_add_line(" 12% + docs/a.txt"), "docs/a.txt");
+        assert_eq!(label_from_7z_add_line("Compressing  docs/a.txt"), "docs/a.txt");
+        assert_eq!(label_from_7z_add_line("Adding  docs/a.txt"), "docs/a.txt");
+        assert_eq!(label_from_7z_add_line("  7%"), "");
+        assert_eq!(label_from_7z_add_line("Everything is Ok"), "");
+        assert_eq!(label_from_7z_add_line("Scanning the drive:"), "");
+        assert_eq!(label_from_7z_add_line("0M Scan  /tmp/x"), "");
+    }
+    #[test]
+    fn test_add_progress_is_monotonic() {
+        let total = 1000u64;
+        let mut last_emit = Instant::now() - std::time::Duration::from_secs(1);
+        let mut last_label = String::new();
+        let mut last_pct = 0u32;
+        let events = std::cell::RefCell::new(Vec::new());
+        let cb = |info: crate::core::archive::ProgressInfo| events.borrow_mut().push(info);
+        // 30% then a regressed 12% (mt jitter): bar must not go back.
+        emit_add_line(" 30% + a.txt", total, &mut last_emit, &mut last_label, &mut last_pct, &cb);
+        // Force throttle expiry for the second line.
+        last_emit = Instant::now() - std::time::Duration::from_secs(1);
+        emit_add_line(" 12% + b.txt", total, &mut last_emit, &mut last_label, &mut last_pct, &cb);
+        assert_eq!(last_pct, 30);
+        let events = events.borrow();
+        assert!(events.iter().all(|e| e.percent <= 30.1));
+        assert_eq!(events.last().unwrap().current, 300);
+    }
+    #[test]
+    fn test_create_input_size() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), vec![0u8; 100]).unwrap();
+        std::fs::write(dir.path().join("b.txt"), vec![0u8; 50]).unwrap();
+        assert_eq!(create_input_size(&[dir.path().to_path_buf()]), 150);
+        assert_eq!(create_input_size(&[dir.path().join("missing")]), 0);
     }
 }

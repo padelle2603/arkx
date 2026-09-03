@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.1.1 — Dolphin integration: Comprimi/Estrai menus + progress window
+
+Restores the right-click **Compress** entry lost when uninstalling Ark,
+with Ark parity and the in-app progress window.
+
+### File-manager integration
+
+- **Comprimi submenu** (Dolphin ServiceMenu): Comprimi in zip... / tar.gz... /
+  7zip... with Italian translations, no-overwrite naming (`docs.zip`, `docs-2.zip`…)
+- **Estrai submenu**: Estrai qui / Estrai in... / Apri con Arkx
+- New CLI: `arkx compress [--here] [--format zip|tar.gz|7z] [--to DEST] [--dialog]`
+  and `arkx extract --here/--dialog` (multi-archive aware, `file://` URI decoding)
+- **Progress window** (`--progress`): same bar as the app (speed, ETA, Details),
+  auto-closes on success with notification + highlight in Dolphin, stays open on
+  error, Cancel kills the backend and deletes partials
+- Real 7z creation progress (previously silent 0→100%); cancellable creates
+  across native and 7z backends
+- AppImage-only setup: `./appimage/install-menus.sh` registers the menus
+  user-locally for upkeep-managed AppImages (no sudo); AppImage bundles the
+  ServiceMenus as reference
+
 ## v1.0.1 — Full MIME coverage: 33 archive types
 
 This release extends Arkx to every archive MIME type used by Linux file

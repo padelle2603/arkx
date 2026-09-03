@@ -6,20 +6,37 @@ use super::archive::{ArchiveBackend, ArchiveInfo, ProgressInfo};
 use super::detector::{ArchiveFormat, BackendKind};
 use super::error::{ArkxError, Result};
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 pub struct BackendManager {
     native: native::NativeBackend,
     seven: seven_zip::SevenZipBackend,
     bsdtar: bsdtar::BsdtarBackend,
+    cancel: Arc<AtomicBool>,
 }
 
 impl BackendManager {
     pub fn new() -> Self {
+        Self::with_cancel(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// Share an external cancel flag (file-manager progress window):
+    /// `cancel_all()` then aborts running `create` jobs and deletes partials.
+    pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
         Self {
-            native: native::NativeBackend,
-            seven: seven_zip::SevenZipBackend::new(),
+            native: native::NativeBackend::with_cancel(cancel.clone()),
+            seven: seven_zip::SevenZipBackend::with_cancel(cancel.clone()),
             bsdtar: bsdtar::BsdtarBackend::new(),
+            cancel,
         }
+    }
+
+    /// Best-effort abort of a running `create` (the progress window's Cancel).
+    pub fn cancel_all(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
     }
 
     /// Primary backend from the format table (`detector::BackendKind`).

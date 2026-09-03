@@ -22,9 +22,38 @@ arkx l archive.7z                 # list contents
 arkx x archive.7z ~/Downloads    # extract (all CPU threads)
 arkx x archive.rar . -p secret   # RAR with password
 arkx a archive.7z docs/ -l 9     # create an archive
+arkx c --here --format=zip docs/ # compress (Dolphin-style, no overwrite)
 arkx --help                      # everything else
 ```
 
+## Dolphin integration (replaces Ark's Compress menu)
+
+Uninstalling Ark removes its right-click **Compress** entry (it was an Ark
+plugin, not a Dolphin feature). `./install.sh` restores it with Arkx:
+
+* Right-click folder/file → **Comprimi** → Comprimi in zip... / tar.gz... / 7zip...
+* Right-click archive → **Estrai** → Estrai qui / Estrai in...
+
+Headless by default (no window, no overwrite: `docs.zip`, `docs-2.zip`, …),
+with desktop notification + highlight in Dolphin when done.
+From the context menu Arkx shows the same progress window as the app
+(bar with speed, ETA and Details); on success it closes itself, on error
+it stays open with the message. `arkx compress --no-progress` forces
+text mode (scripts, ssh).
+
+### AppImage-only setup (upkeep workflow)
+
+If you run Arkx as an AppImage managed by upkeep (no system install),
+Dolphin can't see inside the AppImage — register the menus user-locally:
+
+```bash
+upkeep update arkx                       # needs a release with --progress support
+./appimage/install-menus.sh              # reads the path from upkeep's .desktop, no sudo
+./appimage/install-menus.sh --uninstall  # remove them again
+```
+
+The script points the menus at the upkeep AppImage path (stable across
+updates) with its real icon. Re-run it only if you move the AppImage.
 Right-click files inside an archive to extract just what you selected. Wrong password? Arkx asks again instead of failing.
 
 ## Features

@@ -14,6 +14,9 @@ pub enum ArkxError {
     #[error("Password required or incorrect")]
     WrongPassword,
 
+    #[error("Cancelled")]
+    Cancelled,
+
     #[error("Backend error: {0}")]
     Backend(String),
 }

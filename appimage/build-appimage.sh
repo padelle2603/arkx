@@ -44,6 +44,11 @@ cp data/arkx.desktop "${APPDIR}/"
 cp "data/icons/hicolor/256x256/apps/arkx.png" "${APPDIR}/arkx.png"
 mkdir -p "${APPDIR}/usr/share/doc/arkx"
 cp LEGAL.md PRIVACY.md README.md "${APPDIR}/usr/share/doc/arkx/"
+# Dolphin service menus ship as reference (AppImages can't register them
+# automatically — copy to ~/.local/share/kio/servicemenus/ to enable
+# Comprimi/Estrai right-click menus).
+mkdir -p "${APPDIR}/usr/share/kio/servicemenus"
+cp data/servicemenus/*.desktop "${APPDIR}/usr/share/kio/servicemenus/"
 
 echo "==> Smoke test inside AppDir..."
 "${APPDIR}/usr/bin/arkx" --version

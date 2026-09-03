@@ -1,0 +1,30 @@
+[Desktop Entry]
+Type=Service
+TryExec=arkx
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;inode/directory;
+Actions=compressZip;compressTarGz;compress7z;
+X-KDE-Submenu=Compress
+X-KDE-Submenu[it]=Comprimi
+X-KDE-Priority=TopLevel
+X-KDE-Protocols=file
+X-KDE-MinNumberOfUrls=1
+Icon=arkx
+
+[Desktop Action compressZip]
+Name=Compress to zip...
+Name[it]=Comprimi in zip...
+Icon=arkx
+Exec=arkx compress --progress --here --format=zip %F
+
+[Desktop Action compressTarGz]
+Name=Compress to tar.gz...
+Name[it]=Comprimi in tar.gz...
+Icon=arkx
+Exec=arkx compress --progress --here --format=tar.gz %F
+
+[Desktop Action compress7z]
+Name=Compress to 7zip...
+Name[it]=Comprimi in 7zip...
+Icon=arkx
+Exec=arkx compress --progress --here --format=7z %F

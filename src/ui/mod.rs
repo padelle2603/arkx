@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod dialogs;
+pub mod fm_progress;
 pub mod progress_window;
 pub mod window;
 

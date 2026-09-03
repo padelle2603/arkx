@@ -4,9 +4,30 @@ use crate::core::error::{ArkxError, Result};
 use std::path::{Path, PathBuf};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::time::Instant;
 
-pub struct NativeBackend;
+pub struct NativeBackend {
+    cancel: Arc<AtomicBool>,
+}
+
+impl NativeBackend {
+    pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
+        Self { cancel }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// Drop the partial destination after a cancel (best effort).
+    fn discard_partial(dest: &Path) {
+        let _ = std::fs::remove_file(dest);
+    }
+}
 
 impl ArchiveBackend for NativeBackend {
     fn supports(&self, fmt: &ArchiveFormat) -> bool {
@@ -472,6 +493,11 @@ impl NativeBackend {
         let total = files.len() as u64;
 
         for (i, path) in files.iter().enumerate() {
+            if self.cancelled() {
+                drop(zip);
+                Self::discard_partial(dest);
+                return Err(ArkxError::Cancelled);
+            }
             let rel = path.strip_prefix(base).unwrap_or(path);
             let name = rel.to_string_lossy().to_string();
             if let Some(cb) = &progress {
@@ -514,6 +540,11 @@ impl NativeBackend {
         };
 
         for (i, path) in files.iter().enumerate() {
+            if self.cancelled() {
+                drop(tar);
+                Self::discard_partial(dest);
+                return Err(ArkxError::Cancelled);
+            }
             let rel = path.strip_prefix(&base).unwrap_or(path);
             if let Some(cb) = &progress {
                 cb(ProgressInfo::new(rel.to_string_lossy().to_string(), i as u64 + 1, total.max(1)));

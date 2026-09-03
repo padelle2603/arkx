@@ -25,19 +25,50 @@ pub struct ProgressWindow {
     finished: Rc<Cell<bool>>,
     last_sample: RefCell<(u64, Instant)>,
     speed_ema: Cell<f64>,
+    /// Operation verb shown in the title ("Extracting" / "Compressing").
+    verb: RefCell<String>,
 }
 
 impl ProgressWindow {
     pub fn new(parent: &impl IsA<gtk::Window>, title: &str, subtitle: &str) -> Rc<RefCell<Self>> {
-        let window = gtk::Window::builder()
-            .transient_for(parent)
+        Self::build_with_verb(Some(parent), title, subtitle, "Extracting")
+    }
+
+    /// Top-level window without a parent: used by the standalone
+    /// file-manager progress app (`arkx compress --progress` from Dolphin).
+    pub fn new_standalone(title: &str, subtitle: &str) -> Rc<RefCell<Self>> {
+        Self::build_with_verb::<gtk::Window>(None, title, subtitle, "Compressing")
+    }
+
+    /// Switch the operation verb after creation ("Extracting" / "Compressing").
+    pub fn set_operation(&self, verb: &str) {
+        *self.verb.borrow_mut() = verb.to_string();
+    }
+
+    /// Register the window with an application so `GApplication::run` stays
+    /// alive while it is open (standalone file-manager mode: the window
+    /// would otherwise hold nothing and the app would quit instantly).
+    pub fn register_with_app(&self, app: &impl IsA<gtk::Application>) {
+        app.upcast_ref().add_window(&self.window);
+    }
+
+    fn build_with_verb<W: IsA<gtk::Window>>(
+        parent: Option<&W>,
+        title: &str,
+        subtitle: &str,
+        verb: &str,
+    ) -> Rc<RefCell<Self>> {
+        let mut builder = gtk::Window::builder()
             .modal(false)
             .resizable(false)
             .decorated(true)
             .title(title)
             .default_width(480)
-            .default_height(160)
-            .build();
+            .default_height(160);
+        if let Some(p) = parent {
+            builder = builder.transient_for(p);
+        }
+        let window: gtk::Window = builder.build();
 
         // Header
         let header = adw::HeaderBar::new();
@@ -180,6 +211,7 @@ impl ProgressWindow {
             finished,
             last_sample: RefCell::new((0, Instant::now())),
             speed_ema: Cell::new(0.0),
+            verb: RefCell::new(verb.to_string()),
         }))
     }
 
@@ -205,7 +237,7 @@ impl ProgressWindow {
         self.bar.set_fraction((pct / 100.0) as f64);
         self.bar.set_text(Some(&format!("{:.0}%", pct)));
         self.file_label.set_text(&truncate_middle(&info.file, 60));
-        self.title_label.set_text(&format!("Extracting… {:.0}%", pct));
+        self.title_label.set_text(&format!("{}… {:.0}%", self.verb.borrow(), pct));
 
         let now = Instant::now();
         let (prev_bytes, prev_time) = *self.last_sample.borrow();
@@ -260,7 +292,7 @@ impl ProgressWindow {
         self.bar.pulse();
         self.bar.set_text(Some("…"));
         self.file_label.set_text(&truncate_middle(file, 60));
-        self.title_label.set_text("Extracting…");
+        self.title_label.set_text(&format!("{}…", self.verb.borrow()));
         self.detail_file.set_text(file);
     }
 

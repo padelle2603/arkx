@@ -1,6 +1,6 @@
 # Maintainer: padelle <padelle@github>
 pkgname=arkx
-pkgver=1.0.0
+pkgver=1.1.1
 pkgrel=1
 pkgdesc="Fast multi-threaded Linux archive manager, PeaZip-inspired — ZIP, 7Z, RAR, TAR.GZ, ISO"
 arch=('x86_64')
@@ -23,6 +23,9 @@ package() {
   # Backwards-compatible symlink for the old binary name
   ln -sf arkx "$pkgdir/usr/bin/extractor"
   install -Dm644 "data/arkx.desktop" "$pkgdir/usr/share/applications/arkx.desktop"
+  # Dolphin service menus (Ark parity: Comprimi / Estrai)
+  install -Dm644 "data/servicemenus/arkx-compress.desktop" "$pkgdir/usr/share/kio/servicemenus/arkx-compress.desktop"
+  install -Dm644 "data/servicemenus/arkx-extract.desktop" "$pkgdir/usr/share/kio/servicemenus/arkx-extract.desktop"
   # App icons (SVG + rendered PNGs)
   install -Dm644 "data/icons/hicolor/scalable/apps/arkx.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/arkx.svg"
   for s in 16 32 48 64 128 256; do

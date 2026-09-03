@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "arkx"
-version = "1.0.1"
+version = "1.1.1"
 dependencies = [
  "anyhow",
  "bytes",
