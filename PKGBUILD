@@ -1,0 +1,36 @@
+# Maintainer: padelle <padelle@github>
+pkgname=arkx
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Fast multi-threaded Linux archive manager, PeaZip-inspired — ZIP, 7Z, RAR, TAR.GZ, ISO"
+arch=('x86_64')
+url="https://github.com/padelle2603/arkx"
+license=('GPL3')
+depends=('gtk4' 'libadwaita' 'hicolor-icon-theme' '7zip')
+makedepends=('cargo' 'rust' 'pkgconf')
+optdepends=('unrar: for optimized RAR extraction')
+source=('arkx.desktop' 'arkx.svg')
+sha256sums=('SKIP' 'SKIP')
+
+build() {
+  cd "$srcdir/../"
+  cargo build --release --locked
+}
+
+package() {
+  cd "$srcdir/../"
+  install -Dm755 "target/release/arkx" "$pkgdir/usr/bin/arkx"
+  # Backwards-compatible symlink for the old binary name
+  ln -sf arkx "$pkgdir/usr/bin/extractor"
+  install -Dm644 "data/arkx.desktop" "$pkgdir/usr/share/applications/arkx.desktop"
+  # App icons (SVG + rendered PNGs)
+  install -Dm644 "data/icons/hicolor/scalable/apps/arkx.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/arkx.svg"
+  for s in 16 32 48 64 128 256; do
+    install -Dm644 "data/icons/hicolor/${s}x${s}/apps/arkx.png" "$pkgdir/usr/share/icons/hicolor/${s}x${s}/apps/arkx.png"
+  done
+  install -Dm644 "README.md" "$pkgdir/usr/share/doc/arkx/README.md"
+  install -Dm644 "LEGAL.md" "$pkgdir/usr/share/doc/arkx/LEGAL.md"
+  install -Dm644 "PRIVACY.md" "$pkgdir/usr/share/doc/arkx/PRIVACY.md"
+}
+
+# For AUR: makepkg -si

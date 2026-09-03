@@ -1,0 +1,47 @@
+[package]
+name = "arkx"
+version = "1.0.0"
+edition = "2021"
+description = "Fast multi-threaded Linux archive manager (PeaZip-inspired)"
+authors = ["padelle"]
+license = "GPL-3.0-or-later"
+repository = "https://github.com/padelle2603/arkx"
+
+[dependencies]
+gtk4 = { version = "0.9", features = ["v4_12"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+glib = "0.20"
+gio = "0.20"
+gdk4 = "0.9"
+pango = "0.20"
+rayon = "1.10"
+tokio = { version = "1.40", features = ["full"] }
+futures = "0.3"
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+infer = "0.16"
+mime_guess = "2.0"
+walkdir = "2.5"
+zip = { version = "2.2", default-features = false, features = ["deflate", "bzip2", "zstd", "xz", "time"] }
+tar = "0.4"
+flate2 = "1.0"
+bzip2 = "0.4"
+xz2 = "0.1.7"
+zstd = "0.13"
+memmap2 = "0.9"
+bytes = "1.5"
+chrono = { version = "0.4", features = ["clock", "serde"] }
+humansize = "2.1"
+open = "5.0"
+
+[dev-dependencies]
+tempfile = "3.12"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

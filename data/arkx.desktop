@@ -1,0 +1,21 @@
+[Desktop Entry]
+Version=1.0
+Name=Arkx
+GenericName=Archive Manager
+Comment=Fast multi-threaded archive manager (ZIP, 7Z, RAR, TAR.GZ…)
+X-AppVersion=1.0.0
+Exec=arkx %F
+Icon=arkx
+Terminal=false
+Type=Application
+Categories=Utility;Archiving;Compression;GTK;
+Keywords=zip;rar;7z;tar;archive;compress;extract;unzip;unrar;peazip;ark;
+MimeType=application/zip;application/x-7z-compressed;application/vnd.rar;application/x-tar;application/x-compressed-tar;application/x-bzip-compressed-tar;application/x-xz-compressed-tar;application/x-lz4-compressed-tar;application/x-zstd-compressed-tar;application/gzip;application/x-bzip2;application/x-xz;application/zstd;application/x-lz4;application/x-iso9660-image;application/vnd.ms-cab-compressed;application/x-deb;application/x-rpm;application/x-archive;application/x-cd-image;
+StartupNotify=true
+StartupWMClass=arkx
+SingleMainWindow=true
+Actions=ExtractHere;
+
+[Desktop Action ExtractHere]
+Name=Extract here
+Exec=arkx x %F
