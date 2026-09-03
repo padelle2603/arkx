@@ -21,7 +21,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libgtk-4-dev libadwaita-1-dev pkg-config \
-            p7zip-full file desktop-file-utils zsync
+            p7zip-full libarchive-tools file desktop-file-utils zsync
 
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,4 +55,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: Arkx-*-x86_64.AppImage
-          generate_release_notes: true
+          body_path: CHANGELOG.md

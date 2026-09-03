@@ -38,7 +38,7 @@ Right-click files inside an archive to extract just what you selected. Wrong pas
 ## Build from source
 
 ```bash
-sudo pacman -S gtk4 libadwaita 7zip   # or apt/dnf equivalents
+sudo pacman -S gtk4 libadwaita 7zip libarchive   # or apt/dnf equivalents
 cargo build --release
 ./target/release/arkx
 ```

@@ -20,8 +20,10 @@ cargo build --release --locked
 echo "==> Deploying to ${APPDIR}..."
 rm -rf "${APPDIR}"
 # First pass populates AppDir (no --output yet: 7z + icons go in next).
+BSDTAR="$(command -v bsdtar || true)"
 "${LINUXDEPLOY}" --appdir "${APPDIR}" \
   -e target/release/arkx \
+  ${BSDTAR:+-e "${BSDTAR}"} \
   -d data/arkx.desktop \
   -i data/icons/hicolor/256x256/apps/arkx.png \
   --plugin gtk

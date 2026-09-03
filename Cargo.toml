@@ -1,6 +1,6 @@
 [package]
 name = "arkx"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Fast multi-threaded Linux archive manager (PeaZip-inspired)"
 authors = ["padelle"]
@@ -30,6 +30,7 @@ flate2 = "1.0"
 bzip2 = "0.4"
 xz2 = "0.1.7"
 zstd = "0.13"
+lz4_flex = "0.11"
 memmap2 = "0.9"
 bytes = "1.5"
 chrono = { version = "0.4", features = ["clock", "serde"] }

@@ -77,7 +77,7 @@ Examples:
   arkx a archive.7z file1.txt folder/ -l 9 -p pwd
   arkx archive.tar.gz              # open GUI
 
-Formats: ZIP, 7Z, RAR (extract only), TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, GZ, BZ2, XZ, ZST, ISO, CAB...
+Formats: ZIP, 7Z, RAR (extract only), TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, TAR.LZ4, TAR.LZMA, TAR.Z, TAR.LZIP, TAR.LZO, TAR.LRZIP, GZ, BZ2, XZ, ZST, LZ4, LZMA, COMPRESS, ISO, APPIMAGE, CAB, CPIO, XAR, AR, LHA...
 CPU: uses every available thread ({} on this machine) with -mmt=on, streaming, zero-copy.
 "#,
         env!("CARGO_PKG_VERSION"), crate::core::util::num_cpus());

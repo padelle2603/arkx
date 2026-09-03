@@ -42,15 +42,17 @@ impl ArchiveBackend for NativeBackend {
 
 impl NativeBackend {
     fn supports_format(fmt: &ArchiveFormat) -> bool {
-        matches!(fmt, ArchiveFormat::Zip | ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst | ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst)
+        matches!(fmt, ArchiveFormat::Zip | ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst | ArchiveFormat::TarLz4 | ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst | ArchiveFormat::Lz4)
     }
 
     fn list_inner(&self, path: &Path) -> Result<ArchiveInfo> {
         let fmt = crate::core::detector::detect_format(path);
         match fmt {
             ArchiveFormat::Zip => self.list_zip(path),
-            ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst => self.list_tar(path),
-            ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst => self.list_single(path, &fmt),
+            ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst | ArchiveFormat::TarLz4 => self.list_tar(path),
+            // Solo lista sintetica: la decodifica di Lzma/Compress avviene via 7z
+            // (extract_inner li rifiuta e scatta il fallback).
+            ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst | ArchiveFormat::Lz4 | ArchiveFormat::Lzma | ArchiveFormat::Compress => self.list_single(path, &fmt),
             _ => Err(ArkxError::UnsupportedFormat(format!("{:?}", fmt))),
         }
     }
@@ -189,8 +191,8 @@ impl NativeBackend {
 
         match fmt {
             ArchiveFormat::Zip => self.extract_zip(archive, dest, entries, progress),
-            ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst => self.extract_tar(archive, dest, entries, progress),
-            ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst => self.extract_single(archive, dest, progress),
+            ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst | ArchiveFormat::TarLz4 => self.extract_tar(archive, dest, entries, progress),
+            ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst | ArchiveFormat::Lz4 => self.extract_single(archive, dest, progress),
             _ => Err(ArkxError::UnsupportedFormat(format!("{:?}", fmt))),
         }
     }
@@ -435,7 +437,7 @@ impl NativeBackend {
         let fmt = crate::core::detector::detect_format(dest);
         match fmt {
             ArchiveFormat::Zip => self.create_zip(dest, sources, level, progress),
-            ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst => self.create_tar(dest, sources, &fmt, level, progress),
+            ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst | ArchiveFormat::TarLz4 => self.create_tar(dest, sources, &fmt, level, progress),
             _ => Err(ArkxError::UnsupportedFormat(format!("create {:?}", fmt))),
         }
     }
@@ -537,8 +539,9 @@ fn create_tar_reader(file: File, path: &Path) -> Result<Box<dyn std::io::Read>> 
         ArchiveFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(BufReader::with_capacity(1024*1024, file))),
         ArchiveFormat::TarXz => Box::new(xz2::read::XzDecoder::new(BufReader::with_capacity(1024*1024, file))),
         ArchiveFormat::TarZst => Box::new(zstd::stream::read::Decoder::new(BufReader::with_capacity(1024*1024, file)).map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?),
-        ArchiveFormat::Tar | ArchiveFormat::TarLz4 => Box::new(BufReader::with_capacity(1024*1024, file)),
-        _ => Box::new(BufReader::with_capacity(1024*1024, file)),
+        ArchiveFormat::TarLz4 => Box::new(lz4_flex::frame::FrameDecoder::new(BufReader::with_capacity(1024*1024, file))),
+        ArchiveFormat::Tar => Box::new(BufReader::with_capacity(1024*1024, file)),
+        _ => return Err(ArkxError::UnsupportedFormat(format!("tar reader {:?}", fmt))),
     };
     Ok(reader)
 }
@@ -550,7 +553,8 @@ fn create_single_reader(file: File, path: &Path) -> Result<Box<dyn std::io::Read
         ArchiveFormat::Bz2 => Box::new(bzip2::read::BzDecoder::new(BufReader::with_capacity(1024*1024, file))),
         ArchiveFormat::Xz => Box::new(xz2::read::XzDecoder::new(BufReader::with_capacity(1024*1024, file))),
         ArchiveFormat::Zst => Box::new(zstd::stream::read::Decoder::new(BufReader::with_capacity(1024*1024, file)).map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?),
-        _ => Box::new(BufReader::with_capacity(1024*1024, file)),
+        ArchiveFormat::Lz4 => Box::new(lz4_flex::frame::FrameDecoder::new(BufReader::with_capacity(1024*1024, file))),
+        _ => return Err(ArkxError::UnsupportedFormat(format!("single reader {:?}", fmt))),
     };
     Ok(reader)
 }
@@ -561,6 +565,7 @@ fn create_tar_writer(file: File, fmt: &ArchiveFormat) -> Result<Box<dyn std::io:
         ArchiveFormat::TarBz2 => Box::new(bzip2::write::BzEncoder::new(BufWriter::with_capacity(1024*1024, file), bzip2::Compression::best())),
         ArchiveFormat::TarXz => Box::new(xz2::write::XzEncoder::new(BufWriter::with_capacity(1024*1024, file), 6)),
         ArchiveFormat::TarZst => Box::new(zstd::stream::write::Encoder::new(BufWriter::with_capacity(1024*1024, file), 3).map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?),
+        ArchiveFormat::TarLz4 => Box::new(lz4_flex::frame::FrameEncoder::new(BufWriter::with_capacity(1024*1024, file)).auto_finish()),
         _ => Box::new(BufWriter::with_capacity(1024*1024, file)),
     };
     Ok(writer)
