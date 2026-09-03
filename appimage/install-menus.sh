@@ -76,8 +76,10 @@ echo "AppImage: $APPIMAGE"
 
 # 2. Verifica supporto --progress (introdotto dopo la v1.0.1).
 # Nota: le AppImage vecchie ignorano 'compress' e aprono la GUI (che resta
-# appesa): timeout per non bloccarsi mai.
-if ! timeout 15 "$APPIMAGE" compress --help 2>&1 | grep -q -- "--progress"; then
+# appesa): timeout per non bloccarsi mai. L'output va catturato prima del
+# grep perché lo script gira con 'pipefail' e la AppImage esce 1 sul --help.
+HELP_OUT="$(timeout 15 "$APPIMAGE" compress --help 2>&1 || true)"
+if ! printf '%s\n' "$HELP_OUT" | grep -q -- "--progress"; then
     echo "Error: this AppImage is too old (no 'compress --progress')." >&2
     echo "Run 'upkeep update arkx' first to fetch a release with file-manager support." >&2
     [ "$FORCE" -eq 1 ] || exit 1
