@@ -1,5 +1,5 @@
 /target
-/Cargo.lock
+# NOTE: Cargo.lock is intentionally committed (binary crate → reproducible builds)
 *.swp
 *~
 .DS_Store
