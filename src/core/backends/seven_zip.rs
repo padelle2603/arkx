@@ -2,7 +2,7 @@ use crate::core::archive::{ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressIn
 use crate::core::detector::ArchiveFormat;
 use crate::core::error::{ArkxError, Result};
 use crate::core::paths;
-use crate::core::util::num_cpus;
+use crate::core::util::effective_threads;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -27,6 +27,17 @@ impl SevenZipBackend {
 
     fn cancelled(&self) -> bool {
         self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// True if the 7z binary exists (absolute path or in PATH).
+    /// Without 7z adaptive routing stays on native instead of failing.
+    pub fn is_available(&self) -> bool {
+        if self.bin.components().count() > 1 {
+            return self.bin.is_file();
+        }
+        std::env::var_os("PATH").map(|paths| {
+            std::env::split_paths(&paths).any(|dir| dir.join(&self.bin).is_file())
+        }).unwrap_or(false)
     }
 }
 
@@ -121,7 +132,7 @@ impl SevenZipBackend {
     ) -> Result<()> {
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
 
-        let threads = num_cpus();
+        let threads = effective_threads();
         let mut cmd = Command::new(&self.bin);
         cmd.arg("x")
             .arg(format!("-mmt={}", threads))
@@ -266,7 +277,7 @@ impl SevenZipBackend {
                 }
             }
         } else {
-            // Senza progress, drena comunque output per evitare deadlock e poi wait
+            // Without progress, still drain output to avoid deadlock then wait
             let stderr_handle = std::thread::spawn({
                 let mut stderr = child.stderr.take();
                 move || {
@@ -333,7 +344,7 @@ impl SevenZipBackend {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(ArkxError::Io)?;
         }
-        let threads = num_cpus();
+        let threads = effective_threads();
         let fmt = crate::core::detector::detect_format(dest);
         let mut cmd = Command::new(&self.bin);
         cmd.arg("a")
@@ -388,7 +399,8 @@ impl SevenZipBackend {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(format!("spawn 7z: {}", e)))?;
 
-        let total = create_input_size(sources);
+        let sizes = crate::core::util::input_file_sizes(sources);
+        let total: u64 = crate::core::util::total_input_size(sources);
         cb(ProgressInfo::new("Preparing…".to_string(), 0, total));
 
         // Drain stderr on a separate thread to avoid pipe deadlock (64KB).
@@ -405,21 +417,54 @@ impl SevenZipBackend {
             }
         });
 
-        let mut last_pct = 0u32;
+        let cb_shared: SharedCallback = std::sync::Arc::new(Mutex::new(cb));
+        let tracker: std::sync::Arc<std::sync::Mutex<CreateProgress>> =
+            std::sync::Arc::new(std::sync::Mutex::new(CreateProgress::new(total, sizes)));
         let mut cancelled = false;
+
+        // Independent poll of bytes READ by 7z (/proc/PID/io): MB granularity
+        // from the first seconds even inside a single 10GB file,
+        // where neither 7z's integer % nor the per-file floor would move.
+        // Best-effort (Linux only): if unreadable, % + floor applies.
+        let pid = child.id();
+        let io_stop = std::sync::Arc::new(AtomicBool::new(false));
+        let io_handle = std::thread::spawn({
+            let tracker = tracker.clone();
+            let cb_shared = cb_shared.clone();
+            let stop = io_stop.clone();
+            move || {
+                let mut baseline: Option<u64> = None;
+                while !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(250));
+                    let io_done = match proc_read_bytes(pid) {
+                        Some(r) => {
+                            let b = *baseline.get_or_insert(r);
+                            Some(r.saturating_sub(b))
+                        }
+                        None => None,
+                    };
+                    if let (Some(done), Ok(mut t), Ok(g)) =
+                        (io_done, tracker.lock(), cb_shared.lock())
+                    {
+                        t.feed_io(done, &*g);
+                    }
+                }
+            }
+        });
+
         if let Some(stdout) = child.stdout.take() {
             use std::io::Read;
             let mut reader = stdout;
             let mut buf = vec![0u8; 8192];
             let mut chunk = Vec::new();
-            let mut last_emit = Instant::now();
-            let mut last_label = String::new();
             // Returns true when the caller should abort the read loop.
-            let feed = |line: &str, last_emit: &mut Instant, last_label: &mut String, last_pct: &mut u32| {
+            let feed = |line: &str| {
                 if self.cancelled() {
                     return true;
                 }
-                emit_add_line(line, total, last_emit, last_label, last_pct, &cb);
+                if let (Ok(mut t), Ok(g)) = (tracker.lock(), cb_shared.lock()) {
+                    t.feed(line, &*g);
+                }
                 false
             };
             'read: loop {
@@ -433,7 +478,7 @@ impl SevenZipBackend {
                     if b == b'\r' || b == b'\n' {
                         if !chunk.is_empty() {
                             if let Ok(s) = String::from_utf8(std::mem::take(&mut chunk)) {
-                                if feed(&s, &mut last_emit, &mut last_label, &mut last_pct) {
+                                if feed(&s) {
                                     cancelled = true;
                                     break 'read;
                                 }
@@ -448,12 +493,14 @@ impl SevenZipBackend {
             }
             if !cancelled && !chunk.is_empty() {
                 if let Ok(s) = String::from_utf8(chunk) {
-                    if feed(&s, &mut last_emit, &mut last_label, &mut last_pct) {
+                    if feed(&s) {
                         cancelled = true;
                     }
                 }
             }
         }
+        io_stop.store(true, Ordering::Relaxed);
+        let _ = io_handle.join();
 
         if cancelled || self.cancelled() {
             let _ = child.kill();
@@ -473,63 +520,134 @@ impl SevenZipBackend {
             eprintln!("[7z] warning code 1 in create path, treated as success");
         }
         // Final 100% (the only allowed jump: last value → 100).
-        cb(ProgressInfo::new("Completed".to_string(), total.max(1), total.max(1)));
+        if let Ok(g) = cb_shared.lock() {
+            g(ProgressInfo::new("Completed".to_string(), total.max(1), total.max(1)));
+        }
         Ok(())
     }
 }
 
-/// Total input bytes for the create progress bar (best effort: unreadable
-/// files and symlinks count 0 instead of failing the whole job).
-fn create_input_size(sources: &[PathBuf]) -> u64 {
-    fn file_size(p: &Path) -> u64 {
-        if let Ok(m) = std::fs::metadata(p) {
-            if m.is_file() {
-                return m.len();
-            }
-            if m.is_dir() {
-                let mut total = 0u64;
-                if let Ok(walk) = std::fs::read_dir(p) {
-                    for entry in walk.flatten() {
-                        total = total.saturating_add(file_size(&entry.path()));
-                    }
-                }
-                return total;
-            }
-        }
-        0
-    }
-    sources.iter().map(|s| file_size(s)).fold(0u64, |a, b| a.saturating_add(b))
+/// Byte-based progress tracker for `7z a -bsp1` (create path).
+///
+/// 7z's % with -mmt stalls on huge files (lzma2-mt buffering):
+/// on top of that, this tracker keeps a *monotonic floor* equal to
+/// the sum of already completed files (when 7z moves to the next
+/// `+ file` marker, the previous one is done). So the bar never stays
+/// stuck at 0% for tens of minutes on multi-GB archives.
+/// If nothing new arrives for >2s, it still re-emits the state
+/// (keepalive: the window stays alive instead of looking dead).
+struct CreateProgress {
+    total: u64,
+    sizes: std::collections::HashMap<String, u64>,
+    completed: u64,
+    current: String,
+    last_pct: u32,
+    last_io: u64,
+    last_done: u64,
+    last_emit: Instant,
+    last_label: String,
 }
 
-/// Handle one `7z a -bsp1` output line: forward a throttled, monotonic
-/// byte-based progress event. Returns true if anything was emitted.
-fn emit_add_line(
-    line: &str,
-    total: u64,
-    last_emit: &mut Instant,
-    last_label: &mut String,
-    last_pct: &mut u32,
-    cb: &dyn Fn(ProgressInfo),
-) -> bool {
-    let pct = match parse_percent(line) {
-        Some(p) => (*last_pct).max(p.min(100)),
-        None => *last_pct,
-    };
-    let label = label_from_7z_add_line(line);
-    let show_label = if label.is_empty() { last_label.clone() } else { label.clone() };
-    let fresh_label = !label.is_empty() && label != *last_label;
-    if pct <= *last_pct && !fresh_label && last_emit.elapsed().as_millis() <= 500 {
-        return false;
+impl CreateProgress {
+    fn new(total: u64, sizes: std::collections::HashMap<String, u64>) -> Self {
+        Self {
+            total,
+            sizes,
+            completed: 0,
+            current: String::new(),
+            last_pct: 0,
+            last_io: 0,
+            last_done: 0,
+            last_emit: Instant::now(),
+            last_label: String::new(),
+        }
     }
-    *last_pct = pct;
-    if !label.is_empty() {
-        *last_label = label;
+
+    /// Current estimate: max(7z %, completed-files floor, bytes read).
+    fn done(&self) -> u64 {
+        let from_pct = self.total * self.last_pct as u64 / 100;
+        from_pct
+            .max(self.completed.min(self.total))
+            .max(self.last_io.min(self.total))
+            .min(self.total)
     }
-    *last_emit = Instant::now();
-    let done = total * pct as u64 / 100;
-    let file = if show_label.is_empty() { "Compressing…".to_string() } else { show_label };
-    cb(ProgressInfo::new(file, done, total));
-    true
+
+    fn display_label(&self) -> String {
+        if self.last_label.is_empty() {
+            "Compressing…".to_string()
+        } else {
+            self.last_label.clone()
+        }
+    }
+
+    fn emit(&mut self, cb: &dyn Fn(ProgressInfo)) {
+        let done = self.done();
+        self.last_done = done;
+        self.last_emit = Instant::now();
+        cb(ProgressInfo::new(self.display_label(), done, self.total));
+    }
+
+    fn keepalive_due(&self) -> bool {
+        self.last_emit.elapsed().as_millis() > 2000
+    }
+
+    /// Handle one `7z a -bsp1` output line. Returns true if emitted.
+    fn feed(&mut self, line: &str, cb: &dyn Fn(ProgressInfo)) -> bool {
+        if let Some(p) = parse_percent(line) {
+            self.last_pct = self.last_pct.max(p.min(100));
+        }
+        let label = label_from_7z_add_line(line);
+        if !label.is_empty() && label != self.current {
+            // 7z moved on: the previous file is completed.
+            if !self.current.is_empty() {
+                self.completed = self
+                    .completed
+                    .saturating_add(self.sizes.get(&self.current).copied().unwrap_or(0));
+            }
+            self.current = label.clone();
+        }
+        let mut fresh = false;
+        if !label.is_empty() && label != self.last_label {
+            self.last_label = label;
+            fresh = true;
+        }
+        if self.done() <= self.last_done && !fresh && !self.keepalive_due() {
+            return false;
+        }
+        self.emit(cb);
+        true
+    }
+
+    /// Update from bytes read by the 7z process (/proc poll). Returns true
+    /// if emitted. `io_done` is already relative to the startup baseline.
+    fn feed_io(&mut self, io_done: u64, cb: &dyn Fn(ProgressInfo)) -> bool {
+        let capped = io_done.min(self.total);
+        if capped > self.last_io {
+            self.last_io = capped;
+        }
+        if self.done() <= self.last_done && !self.keepalive_due() {
+            return false;
+        }
+        self.emit(cb);
+        true
+    }
+}
+
+/// Bytes read by the process (Linux `/proc/PID/io`): MB granularity of
+/// creation progress even inside a single huge file.
+/// `None` outside Linux or when the process ended (fallback to % + floor).
+fn proc_read_bytes(pid: u32) -> Option<u64> {
+    let text = std::fs::read_to_string(format!("/proc/{}/io", pid)).ok()?;
+    parse_proc_io(&text)
+}
+
+fn parse_proc_io(s: &str) -> Option<u64> {
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("read_bytes:") {
+            return rest.trim().parse().ok();
+        }
+    }
+    None
 }
 
 /// Filename from a `7z a -bsp1` line, dropping the percentage and the
@@ -550,7 +668,7 @@ fn label_from_7z_add_line(line: &str) -> String {
         return String::new();
     }
     // Status lines without a file.
-    for prefix in ["Everything is Ok", "Scanning", "Creating archive"] {
+    for prefix in ["Everything is Ok", "Scanning", "Creating archive", "Add new data to archive", "7-Zip", "64-bit", "Files read", "Archive size"] {
         if s.starts_with(prefix) {
             return String::new();
         }
@@ -689,7 +807,7 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
                 });
                 continue;
             }
-            // Ignora header globale prima del primo ----------
+            // Ignore global header before the first ----------
             continue;
         }
         if line == "----------" {
@@ -727,7 +845,7 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
                             total_packed += prev.packed_size;
                             if prev.encrypted { has_encrypted = true; }
                             entries.push(prev);
-                            // nuova entry
+                            // new entry
                             current = Some(ArchiveEntry {
                                 path: v.to_string(),
                                 is_dir: false,
@@ -771,7 +889,7 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
         }
     }
 
-    // Se non abbiamo parsed nulla, prova fallback parsing semplice l
+    // If we parsed nothing, try simple fallback parsing
     if entries.is_empty() {
                 return Err(ArkxError::Corrupted("Cannot parse archive contents (empty or protected)".into()));
     }
@@ -801,8 +919,8 @@ fn parse_7z_date(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{create_input_size, emit_add_line, label_from_7z_add_line, label_from_7z_line, parse_percent};
-    use std::time::Instant;
+    use super::{label_from_7z_add_line, label_from_7z_line, parse_percent, parse_proc_io, CreateProgress};
+    use std::collections::HashMap;
     #[test]
     fn test_pct() {
         assert_eq!(parse_percent(" 12% 3 - file.txt"), Some(12));
@@ -825,31 +943,77 @@ mod tests {
         assert_eq!(label_from_7z_add_line("Everything is Ok"), "");
         assert_eq!(label_from_7z_add_line("Scanning the drive:"), "");
         assert_eq!(label_from_7z_add_line("0M Scan  /tmp/x"), "");
+        assert_eq!(label_from_7z_add_line("Add new data to archive: 24 folders, 318 files,"), "");
+        assert_eq!(label_from_7z_add_line("Add new data to archive:"), "");
+        assert_eq!(label_from_7z_add_line("7-Zip 26.02 (x64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-06-25"), "");
+        assert_eq!(label_from_7z_add_line("64-bit locale=it_IT.UTF-8 Threads:12 OPEN_MAX:1048576, ASM"), "");
+        assert_eq!(label_from_7z_add_line("Files read from disk: 60"), "");
+        assert_eq!(label_from_7z_add_line("Archive size: 984497 bytes (962 KiB)"), "");
     }
     #[test]
     fn test_add_progress_is_monotonic() {
         let total = 1000u64;
-        let mut last_emit = Instant::now() - std::time::Duration::from_secs(1);
-        let mut last_label = String::new();
-        let mut last_pct = 0u32;
+        let mut sizes = HashMap::new();
+        sizes.insert("a.txt".to_string(), 300u64);
+        sizes.insert("b.txt".to_string(), 700u64);
+        let mut tracker = CreateProgress::new(total, sizes);
+        // Backdate to skip the throttle in the first feed.
+        tracker.last_emit = std::time::Instant::now() - std::time::Duration::from_secs(5);
         let events = std::cell::RefCell::new(Vec::new());
         let cb = |info: crate::core::archive::ProgressInfo| events.borrow_mut().push(info);
         // 30% then a regressed 12% (mt jitter): bar must not go back.
-        emit_add_line(" 30% + a.txt", total, &mut last_emit, &mut last_label, &mut last_pct, &cb);
-        // Force throttle expiry for the second line.
-        last_emit = Instant::now() - std::time::Duration::from_secs(1);
-        emit_add_line(" 12% + b.txt", total, &mut last_emit, &mut last_label, &mut last_pct, &cb);
-        assert_eq!(last_pct, 30);
+        tracker.feed(" 30% + a.txt", &cb);
+        tracker.last_emit = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        tracker.feed(" 12% + b.txt", &cb);
+        assert_eq!(tracker.last_pct, 30);
         let events = events.borrow();
         assert!(events.iter().all(|e| e.percent <= 30.1));
+        // Floor: a.txt (300B) completed when moving to b.txt.
         assert_eq!(events.last().unwrap().current, 300);
     }
     #[test]
-    fn test_create_input_size() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a.txt"), vec![0u8; 100]).unwrap();
-        std::fs::write(dir.path().join("b.txt"), vec![0u8; 50]).unwrap();
-        assert_eq!(create_input_size(&[dir.path().to_path_buf()]), 150);
-        assert_eq!(create_input_size(&[dir.path().join("missing")]), 0);
+    fn test_add_progress_floor_rises_per_file() {
+        // 318 files, 7z % stuck at 0: the floor must still rise.
+        let total = 1000u64;
+        let mut sizes = HashMap::new();
+        sizes.insert("a.txt".to_string(), 400u64);
+        sizes.insert("b.txt".to_string(), 600u64);
+        let mut tracker = CreateProgress::new(total, sizes);
+        tracker.last_emit = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        let events = std::cell::RefCell::new(Vec::new());
+        let cb = |info: crate::core::archive::ProgressInfo| events.borrow_mut().push(info);
+        tracker.feed("  0% + a.txt", &cb);
+        tracker.last_emit = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        tracker.feed("  0% + b.txt", &cb);
+        let events = events.borrow();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].current, 400);
+    }
+    #[test]
+    fn test_parse_proc_io() {
+        let sample = "rchar: 123\nwchar: 45\nread_bytes: 67890\nwrite_bytes: 11\n";
+        assert_eq!(parse_proc_io(sample), Some(67890));
+        assert_eq!(parse_proc_io("rchar: 1\n"), None);
+        assert_eq!(parse_proc_io(""), None);
+    }
+    #[test]
+    fn test_feed_io_moves_inside_huge_file() {
+        // A single 10GB file, 7z % at 0, no file change:
+        // bytes read must still move the bar (0.xx%).
+        let total = 10_000u64;
+        let mut sizes = HashMap::new();
+        sizes.insert("huge.bin".to_string(), 10_000u64);
+        let mut tracker = CreateProgress::new(total, sizes);
+        tracker.last_emit = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        let events = std::cell::RefCell::new(Vec::new());
+        let cb = |info: crate::core::archive::ProgressInfo| events.borrow_mut().push(info);
+        tracker.feed("  0% + huge.bin", &cb);
+        tracker.last_emit = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        assert!(tracker.feed_io(42, &cb));
+        assert_eq!(events.borrow().last().unwrap().current, 42);
+        // Monotonic even if /proc reports less (PID reuse): never goes back.
+        tracker.last_emit = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        assert!(tracker.feed_io(10, &cb));
+        assert_eq!(events.borrow().last().unwrap().current, 42);
     }
 }

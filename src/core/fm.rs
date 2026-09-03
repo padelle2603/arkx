@@ -1,27 +1,27 @@
 //! File-manager integration helpers (Dolphin ServiceMenus, Ark parity).
 //!
-//! Ark (KDE) offriva la voce `Comprimi` come plugin `KFileItemAction`:
-//! sottomenu con `Qui (come TAR.GZ)`, `Qui (come ZIP)` e `Comprimi in...`.
-//! Con ServiceMenu `.desktop` statici non possiamo nascondere
-//! dinamicamente la voce per i singoli archivi (bug Ark #268163), ma
-//! replichiamo il resto: naming automatico, no-sovrascrittura, dialoghi
-//! nativi KDE (kdialog) e reveal nel file manager.
+//! Ark (KDE) offered the `Compress` entry as a `KFileItemAction` plugin:
+//! submenu with `Here (as TAR.GZ)`, `Here (as ZIP)` and `Compress to...`.
+//! With static `.desktop` ServiceMenus we cannot hide
+//! the entry dynamically for single archives (Ark bug #268163), but
+//! we replicate the rest: automatic naming, no-overwrite, native
+//! KDE dialogs (kdialog) and reveal in the file manager.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Decode un argomento proveniente da `%F`/`%U` di Dolphin:
-/// accetta path locali e URI `file://` (con percent-encoding).
+/// Decode an argument coming from Dolphin's `%F`/`%U`:
+/// accepts local paths and `file://` URIs (with percent-encoding).
 pub fn decode_input_arg(s: &str) -> PathBuf {
     let s = s.trim();
     if let Some(rest) = s.strip_prefix("file://") {
-        // file://[host]/path — per i file locali host è vuoto o localhost
+        // file://[host]/path — for local files host is empty or localhost
         let path_part = if let Some(idx) = rest.find('/') {
             let (host, path) = rest.split_at(idx);
             if host.is_empty() || host == "localhost" {
                 path
             } else {
-                // host remoto (smb:/...): non supportato, ritorna il path comunque
+                // remote host (smb:/...): unsupported, still return the path
                 path
             }
         } else {
@@ -33,23 +33,26 @@ pub fn decode_input_arg(s: &str) -> PathBuf {
     }
 }
 
-/// Minimal percent-decoding (`%20` → spazio). Errori lasciati intatti.
+/// Minimal percent-decoding (`%20` → space, `%C3%A0` → `à`).
+/// Decodes to bytes then UTF-8 (Dolphin passes `file://` URIs with UTF-8
+/// percent-encoded): the old version converted each byte to `char`
+/// and corrupted accents/emoji in names ("caffè" → mojibake → "Not found").
 fn percent_decode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let bytes = s.as_bytes();
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+    let raw = s.as_bytes();
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((h * 16 + l) as char);
+    while i < raw.len() {
+        if raw[i] == b'%' && i + 2 < raw.len() {
+            if let (Some(h), Some(l)) = (hex_val(raw[i + 1]), hex_val(raw[i + 2])) {
+                bytes.push(h * 16 + l);
                 i += 3;
                 continue;
             }
         }
-        out.push(bytes[i] as char);
+        bytes.push(raw[i]);
         i += 1;
     }
-    out
+    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -61,7 +64,7 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-/// Estensione canonica per `--format`. Accetta alias comuni.
+/// Canonical extension for `--format`. Accepts common aliases.
 pub fn format_extension(format: &str) -> String {
     match format.to_lowercase().as_str() {
         "zip" => "zip".to_string(),
@@ -75,7 +78,7 @@ pub fn format_extension(format: &str) -> String {
     }
 }
 
-/// Parent comune dei sorgenti (o cwd se non determinabile).
+/// Common parent of sources (or cwd if undeterminable).
 pub fn common_parent(sources: &[PathBuf]) -> PathBuf {
     if sources.is_empty() {
         return std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -84,7 +87,7 @@ pub fn common_parent(sources: &[PathBuf]) -> PathBuf {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    // Normalizza "" (file relativi senza dir) → "."
+    // Normalize "" (relative files without dir) → "."
     let first_parent = if first_parent.as_os_str().is_empty() {
         PathBuf::from(".")
     } else {
@@ -101,25 +104,25 @@ pub fn common_parent(sources: &[PathBuf]) -> PathBuf {
             p
         };
         if p != first_parent {
-            // Sorgenti da cartelle diverse: usa la cwd come Ark (dest = cwd)
+            // Sources from different folders: use cwd like Ark (dest = cwd)
             return std::env::current_dir().unwrap_or(first_parent);
         }
     }
     first_parent
 }
 
-/// Nome base per l'archivio: singolo → stem del file/cartella;
-/// multi-selezione → nome della cartella genitore (come Ark).
+/// Base name for the archive: single → file/folder stem;
+/// multi-selection → parent folder name (like Ark).
 fn base_name_for(sources: &[PathBuf], parent: &Path) -> String {
     if sources.len() == 1 {
         let p = &sources[0];
         let name = p
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "archivio".to_string());
-        // Per i file togli l'estensione (a.txt → a); per le dir tieni tutto.
-        // `file_stem` su "docs" ritorna "docs", ok per entrambi.
-        // Su file nascosti (".bashrc") file_stem è vuoto → fallback al nome.
+            .unwrap_or_else(|| "archive".to_string());
+        // For files strip the extension (a.txt → a); for dirs keep everything.
+        // `file_stem` on "docs" returns "docs", ok for both.
+        // On hidden files (".bashrc") file_stem is empty → fallback to the name.
         let stem = Path::new(&name)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -131,25 +134,25 @@ fn base_name_for(sources: &[PathBuf], parent: &Path) -> String {
             sanitize_name(stem)
         }
     } else {
-        // Multi: nome della cartella che li contiene
+        // Multi: name of the folder containing them
         parent
             .file_name()
             .map(|s| sanitize_name(&s.to_string_lossy()))
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "archivio".to_string())
+            .unwrap_or_else(|| "archive".to_string())
     }
 }
 
 fn sanitize_name(s: &str) -> String {
     let s = s.trim();
     if s.is_empty() {
-        return "archivio".to_string();
+        return "archive".to_string();
     }
     s.to_string()
 }
 
-/// Percorso di destinazione di default, con anti-sovrascrittura
-/// (`docs.zip`, `docs-2.zip`, …) come fa Ark.
+/// Default destination path, with anti-overwrite
+/// (`docs.zip`, `docs-2.zip`, …) like Ark does.
 pub fn default_archive_path(sources: &[PathBuf], format: &str) -> PathBuf {
     let parent = common_parent(sources);
     let ext = format_extension(format);
@@ -158,7 +161,7 @@ pub fn default_archive_path(sources: &[PathBuf], format: &str) -> PathBuf {
     uniquify(&candidate)
 }
 
-/// Se `path` esiste, prova `nome-2.ext`, `nome-3.ext`, …
+/// If `path` exists, try `name-2.ext`, `name-3.ext`, …
 pub fn uniquify(path: &Path) -> PathBuf {
     if !path.exists() {
         return path.to_path_buf();
@@ -167,8 +170,8 @@ pub fn uniquify(path: &Path) -> PathBuf {
     let filename = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "archivio.zip".to_string());
-    // Splitta solo l'ultima estensione composta nota (tar.gz → stem + tar.gz)
+        .unwrap_or_else(|| "archive.zip".to_string());
+    // Split only the last known compound extension (tar.gz → stem + tar.gz)
     let (stem, ext) = split_archive_extension(&filename);
     for n in 2..10000 {
         let cand = parent.join(format!("{}-{}.{}", stem, n, ext));
@@ -193,8 +196,8 @@ fn split_archive_extension(filename: &str) -> (String, String) {
     }
 }
 
-/// Dialogo nativo "Comprimi in..." (stile Ark): prova kdialog (Plasma),
-/// poi zenity (GNOME), altrimenti `None` → il chiamante usa `--here`.
+/// Native "Compress to..." dialog (Ark style): try kdialog (Plasma),
+/// then zenity (GNOME), otherwise `None` → the caller uses `--here`.
 pub fn ask_save_destination(suggested: &Path) -> Option<PathBuf> {
     let suggested_str = suggested.to_string_lossy().to_string();
     // kdialog --getsavefilename <start> [filter]
@@ -207,7 +210,7 @@ pub fn ask_save_destination(suggested: &Path) -> Option<PathBuf> {
             if !p.is_empty() {
                 return Some(PathBuf::from(p));
             }
-            return None; // annullato
+            return None; // cancelled
         }
     }
     // zenity --file-selection --save --filename=<suggested> --confirm-overwrite
@@ -230,7 +233,7 @@ pub fn ask_save_destination(suggested: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Dialogo "Estrai in...": chiede una cartella di destinazione.
+/// "Extract to..." dialog: asks for a destination folder.
 pub fn ask_directory(initial: &Path) -> Option<PathBuf> {
     let initial_str = initial.to_string_lossy().to_string();
     if let Ok(out) = Command::new("kdialog")
@@ -263,17 +266,17 @@ pub fn ask_directory(initial: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Notifica desktop best-effort (ignora errori: CLI resta usabile via ssh).
+/// Best-effort desktop notification (ignore errors: CLI stays usable over ssh).
 pub fn notify_created(path: &Path) {
-    let msg = format!("Creato {}", path.display());
+    let msg = format!("Created {}", path.display());
     let _ = Command::new("notify-send")
         .args(["Arkx", &msg, "--icon=arkx"])
         .output();
 }
 
-/// Evidenzia il file nel file manager (come `highlightInFileManager` di Ark).
-/// Usa solo il portale freedesktop (nessuna nuova finestra): se fallisce,
-/// non fa nulla — la CLI resta silenziosa e adatta agli script.
+/// Highlight the file in the file manager (like Ark's `highlightInFileManager`).
+/// Uses only the freedesktop portal (no new window): if it fails,
+/// do nothing — the CLI stays silent and script-friendly.
 pub fn reveal_in_file_manager(path: &Path) {
     let uri = format!(
         "file://{}",
@@ -281,7 +284,7 @@ pub fn reveal_in_file_manager(path: &Path) {
             .unwrap_or_else(|_| path.to_path_buf())
             .to_string_lossy()
     );
-    // org.freedesktop.FileManager1.ShowItems (supportato da Dolphin/Nautilus)
+    // org.freedesktop.FileManager1.ShowItems (supported by Dolphin/Nautilus)
     let _ = Command::new("dbus-send")
         .args([
             "--session",
@@ -312,6 +315,20 @@ mod tests {
         assert_eq!(
             decode_input_arg("file://localhost/tmp/a.txt"),
             PathBuf::from("/tmp/a.txt")
+        );
+    }
+
+    #[test]
+    fn decodes_utf8_percent_encoding() {
+        // Dolphin passes file:// URIs with UTF-8 percent-encoded: each %XX is a
+        // BYTE, not a char (the old version corrupted accents/emoji).
+        assert_eq!(
+            decode_input_arg("file:///home/user/caff%C3%A8/relazione.txt"),
+            PathBuf::from("/home/user/caffè/relazione.txt")
+        );
+        assert_eq!(
+            decode_input_arg("/tmp/cartella%20con%20spazi"),
+            PathBuf::from("/tmp/cartella con spazi")
         );
     }
 
@@ -359,7 +376,7 @@ mod tests {
             unique.file_name().unwrap().to_string_lossy(),
             "docs-2.zip"
         );
-        // tar.gz composto mantiene l'estensione intera
+        // compound tar.gz keeps the whole extension
         let tgz = dir.path().join("foto.tar.gz");
         std::fs::write(&tgz, "x").unwrap();
         let unique = uniquify(&tgz);

@@ -71,7 +71,7 @@ Commands:
                                    the sources without overwriting.
                                    --progress shows the in-app progress
                                    window (auto-closes, then notifies).
-                                   (Ark parity: Comprimi in zip.../tar.gz.../7zip...)
+                                    (Ark parity: Compress to zip.../tar.gz.../7zip...)
 
   (no arguments)                   Launch the GUI
   arkx <archive>                   Launch the GUI and open the archive
@@ -80,6 +80,8 @@ Options:
   -h, --help                       Show this help
   -V, --version                    Show version
   -p <password>                    Password
+  --threads <N>                    Cap worker threads (default: auto from CPU/RAM;
+                                   also ARKX_THREADS=N)
 
 Examples:
   arkx l archive.zip
@@ -87,14 +89,14 @@ Examples:
   arkx x archive.rar . -p secret
   arkx a archive.7z file1.txt folder/ -l 9 -p pwd
   arkx compress --here --format=zip docs/        # docs.zip next to docs/
-  arkx compress --dialog foto/                   # Comprimi in... (kdialog)
-  arkx extract --here download.zip               # Estrai qui
+  arkx compress --dialog photos/                  # Compress to... (kdialog)
+  arkx extract --here download.zip               # Extract here
   arkx archive.tar.gz              # open GUI
 
 Formats: ZIP, 7Z, RAR (extract only), TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, TAR.LZ4, TAR.LZMA, TAR.Z, TAR.LZIP, TAR.LZO, TAR.LRZIP, GZ, BZ2, XZ, ZST, LZ4, LZMA, COMPRESS, ISO, APPIMAGE, CAB, CPIO, XAR, AR, LHA...
 CPU: uses every available thread ({} on this machine) with -mmt=on, streaming, zero-copy.
 "#,
-        env!("CARGO_PKG_VERSION"), crate::core::util::num_cpus());
+        env!("CARGO_PKG_VERSION"), crate::core::util::effective_threads());
 }
 
 fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
@@ -108,7 +110,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         return Ok(());
     }
     if args.len() >= 2 && matches!(args[1].as_str(), "--version" | "-V" | "version") {
-        println!("arkx {} (7zip 26.02, libarchive, rayon, gtk4 {})", env!("CARGO_PKG_VERSION"), crate::core::util::num_cpus());
+        println!("arkx {} (7zip 26.02, libarchive, rayon, gtk4 {})", env!("CARGO_PKG_VERSION"), crate::core::util::effective_threads());
         return Ok(());
     }
 
@@ -147,12 +149,13 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
         }
         "x" | "extract" => {
-            let (archives, dest_arg, here, dialog, password) = parse_extract_args(&args)?;
+            let (archives, dest_arg, here, dialog, password, threads) = parse_extract_args(&args)?;
+            crate::core::util::set_thread_override(threads);
             if archives.is_empty() {
                 eprintln!("Usage: arkx x <archive> [dest] [--here] [--dialog] [-p password]");
                 std::process::exit(1);
             }
-            // --dialog: chiedi una volta sola (come Ark "Estrai in...")
+            // --dialog: ask only once (like Ark "Extract to...")
             let dialog_dest: Option<PathBuf> = if dialog {
                 let initial = archives.first()
                     .and_then(|a| a.parent().map(|p| p.to_path_buf()))
@@ -160,7 +163,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 match crate::core::fm::ask_directory(&initial) {
                     Some(d) => Some(d),
                     None => {
-                        eprintln!("Annullato.");
+                        eprintln!("Cancelled.");
                         return Ok(());
                     }
                 }
@@ -169,37 +172,37 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             };
             for archive in &archives {
                 if !archive.exists() {
-                    eprintln!("Non trovato: {}", archive.display());
+                    eprintln!("Not found: {}", archive.display());
                     std::process::exit(1);
                 }
                 let dest = if let Some(d) = &dialog_dest {
                     d.clone()
                 } else if here || (dest_arg.is_none() && archives.len() > 1) {
-                    // --here (modalità file-manager): estrai accanto all'archivio,
-                    // non nella cwd del processo lanciato da Dolphin.
+                    // --here (file-manager mode): extract next to the archive,
+                    // not in the cwd of the Dolphin-launched process.
                     archive.parent()
                         .map(|p| if p.as_os_str().is_empty() { PathBuf::from(".") } else { p.to_path_buf() })
                         .unwrap_or_else(|| PathBuf::from("."))
                 } else if let Some(d) = &dest_arg {
-                    // Solo con un singolo archivio ha senso una dest posizionale
+                    // Only with a single archive does a positional dest make sense
                     if archives.len() > 1 {
-                        eprintln!("Con più archivi usa --here o --dialog invece di una singola dest.");
+                        eprintln!("With multiple archives use --here or --dialog instead of a single dest.");
                         std::process::exit(1);
                     }
                     d.clone()
                 } else {
-                    // Compat: `arkx x archivio` → cwd (uso terminale storico)
-                    // Da Dolphin usare sempre --here (vedi ServiceMenu).
+                    // Compat: `arkx x archive` → cwd (historic terminal usage)
+                    // From Dolphin always use --here (see ServiceMenu).
                     std::env::current_dir()?
                 };
-                println!("Extracting {} -> {} ({} threads)...", archive.display(), dest.display(), crate::core::util::num_cpus());
+                println!("Extracting {} -> {} ({} threads)...", archive.display(), dest.display(), crate::core::util::effective_threads());
                 let start = std::time::Instant::now();
                 backend.extract(archive, &dest, None, password.as_deref(), Some(Box::new(|p| {
                     if p.total == 0 {
                         print!("\r... {}", p.file);
                     } else {
-                        print!("\r{:>3.0}% {} ({}/{})",
-                            p.percent, p.file,
+                        print!("\r{:>7} {} ({}/{})",
+                            crate::core::util::format_percent(p.percent, p.current, p.total), p.file,
                             humansize::format_size(p.current, humansize::BINARY),
                             humansize::format_size(p.total, humansize::BINARY));
                     }
@@ -222,6 +225,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             let mut sources = Vec::new();
             let mut level = 6u8;
             let mut password: Option<String> = None;
+            let mut threads: Option<usize> = None;
             let mut i = 3;
             while i < args.len() {
                 match args[i].as_str() {
@@ -232,12 +236,24 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                             continue;
                         }
                     }
+                    "--threads" => {
+                        if let Some(v) = args.get(i+1) {
+                            threads = crate::core::util::parse_threads_value(v);
+                            i += 2;
+                            continue;
+                        }
+                    }
                     "-p" | "--password" => {
                         if let Some(v) = args.get(i+1) {
                             password = Some(v.clone());
                             i += 2;
                             continue;
                         }
+                    }
+                    s if s.starts_with("--threads=") => {
+                        threads = crate::core::util::parse_threads_value(s.trim_start_matches("--threads="));
+                        i += 1;
+                        continue;
                     }
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
@@ -254,10 +270,11 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 eprintln!("No source files specified");
                 std::process::exit(1);
             }
-            println!("Creating {} ({} files, level {}, {} threads)...", dest.display(), sources.len(), level, crate::core::util::num_cpus());
+            crate::core::util::set_thread_override(threads);
+            println!("Creating {} ({} files, level {}, {} threads)...", dest.display(), sources.len(), level, crate::core::util::effective_threads());
             let start = std::time::Instant::now();
             backend.create(&dest, &sources, level, password.as_deref(), Some(Box::new(|p| {
-                print!("\r{:>3.0}% {}", p.percent, p.file);
+                print!("\r{:>7} {}", crate::core::util::format_percent(p.percent, p.current, p.total), p.file);
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
             }))).map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -272,7 +289,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-type ExtractArgs = (Vec<PathBuf>, Option<PathBuf>, bool, bool, Option<String>);
+type ExtractArgs = (Vec<PathBuf>, Option<PathBuf>, bool, bool, Option<String>, Option<usize>);
 
 fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
     let mut archives = Vec::new();
@@ -280,31 +297,39 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
     let mut here = false;
     let mut dialog = false;
     let mut password: Option<String> = None;
+    let mut threads: Option<usize> = None;
     let mut i = 2;
     while i < args.len() {
         match args[i].as_str() {
             "--here" => here = true,
             "--dialog" | "--ask-dest" => dialog = true,
+            "--threads" => {
+                threads = args.get(i + 1).and_then(|v| crate::core::util::parse_threads_value(v));
+                i += 1;
+            }
             "-p" | "--password" => {
                 password = args.get(i + 1).cloned();
                 i += 1;
             }
+            s if s.starts_with("--threads=") => {
+                threads = crate::core::util::parse_threads_value(s.trim_start_matches("--threads="));
+            }
             s if s.starts_with('-') && archives.is_empty() && s != "-" => {
-                // Flag sconosciuto prima degli archivi: errore chiaro
-                // (dopo gli archivi, un file che inizia con - è quasi mai voluto)
+                // Unknown flag before archives: clear error
+                // (after archives, a file starting with - is almost never intended)
                 eprintln!("Unknown flag: {}", s);
             }
             _ => {
                 let p = crate::core::fm::decode_input_arg(&args[i]);
                 if dest_arg.is_none() && !archives.is_empty() && !here && !dialog
                     && !args[i].starts_with("file://") && {
-                        // Euristica compat: `arkx x archivio dest` (dest non esistente
-                        // o cartella esistente, ma non secondo archivio esistente)
+                        // Compat heuristic: `arkx x archive dest` (non-existent dest
+                        // or existing folder, but not a second existing archive)
                         !p.exists() || p.is_dir()
                     } && archives.len() == 1
                 {
-                    // Potrebbe essere la dest posizionale storica; ma se il path
-                    // esiste come file regolare è più probabile un 2° archivio.
+                    // Could be the historic positional dest; but if the path
+                    // exists as a regular file it is more likely a 2nd archive.
                     if !(p.exists() && p.is_file()) {
                         dest_arg = Some(p);
                         i += 1;
@@ -318,13 +343,13 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
         }
         i += 1;
     }
-    Ok((archives, dest_arg, here, dialog, password))
+    Ok((archives, dest_arg, here, dialog, password, threads))
 }
 
-/// `arkx compress` — parità Ark per i ServiceMenu Dolphin.
+/// `arkx compress` — Ark parity for Dolphin ServiceMenus.
 ///
-///   arkx compress --here --format=zip <file...>   # Qui (come ZIP)
-///   arkx compress --dialog <file...>              # Comprimi in... (kdialog)
+///   arkx compress --here --format=zip <file...>   # Here (as ZIP)
+///   arkx compress --dialog <file...>              # Compress to... (kdialog)
 ///   arkx compress --to out.7z <file...> [-l 9] [-p pwd]
 fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> anyhow::Result<()> {
     let mut format = "zip".to_string();
@@ -335,6 +360,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
     let mut password: Option<String> = None;
     let mut progress = false;
     let mut no_progress = false;
+    let mut threads: Option<usize> = None;
     let mut sources = Vec::new();
     let mut i = 2;
     while i < args.len() {
@@ -343,6 +369,12 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             "--dialog" => dialog = true,
             "--progress" | "--gui" => progress = true,
             "--no-progress" | "--text" => no_progress = true,
+            "--threads" => {
+                if let Some(v) = args.get(i + 1) {
+                    threads = crate::core::util::parse_threads_value(v);
+                    i += 1;
+                }
+            }
             "-f" | "--format" => {
                 if let Some(v) = args.get(i + 1) {
                     format = v.clone();
@@ -370,6 +402,9 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             s if s.starts_with("--format=") => {
                 format = s.trim_start_matches("--format=").to_string();
             }
+            s if s.starts_with("--threads=") => {
+                threads = crate::core::util::parse_threads_value(s.trim_start_matches("--threads="));
+            }
             s if s.starts_with("--to=") => {
                 to = Some(crate::core::fm::decode_input_arg(s.trim_start_matches("--to=")));
             }
@@ -381,34 +416,35 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
         i += 1;
     }
     if sources.is_empty() {
-        eprintln!("Usage: arkx compress [--here] [--format zip|tar.gz|7z] [--to <dest>] [--dialog] [--progress] <file...>");
+        eprintln!("Usage: arkx compress [--here] [--format zip|tar.gz|7z] [--to <dest>] [--dialog] [--progress] [--threads N] <file...>");
         std::process::exit(1);
     }
-    // Solo file locali (come Ark: disabilita su URL remoti)
+    crate::core::util::set_thread_override(threads);
+    // Only local files (like Ark: disabled on remote URLs)
     for s in &sources {
         let str = s.to_string_lossy();
         if str.starts_with("http://") || str.starts_with("https://") || str.starts_with("smb://") {
-            eprintln!("Solo file locali supportati: {}", s.display());
+            eprintln!("Only local files supported: {}", s.display());
             std::process::exit(1);
         }
         if !s.exists() {
-            eprintln!("Non trovato: {}", s.display());
+            eprintln!("Not found: {}", s.display());
             std::process::exit(1);
         }
     }
 
     let dest = if dialog {
-        // Comprimi in... (stile Ark): dialogo nativo con nome suggerito
+        // Compress to... (Ark style): native dialog with suggested name
         let suggested = crate::core::fm::default_archive_path(&sources, &format);
         match crate::core::fm::ask_save_destination(&suggested) {
             Some(d) => ensure_archive_extension(d, &format),
             None => {
-                eprintln!("Annullato.");
+                eprintln!("Cancelled.");
                 return Ok(());
             }
         }
     } else if let Some(t) = to {
-        // --to cartella/ → crea dentro; --to senza estensione → aggiungi formato
+        // --to folder/ → create inside; --to without extension → add format
         if t.is_dir() {
             let file = crate::core::fm::default_archive_path(&sources, &format)
                 .file_name().map(|s| s.to_owned()).unwrap();
@@ -417,24 +453,24 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             crate::core::fm::uniquify(&ensure_archive_extension(t, &format))
         }
     } else {
-        // --here o default: accanto ai sorgenti, senza sovrascrivere (come Ark)
-        let _ = here; // default equivale a --here
+        // --here or default: next to sources, without overwriting (like Ark)
+        let _ = here; // default is equivalent to --here
         crate::core::fm::default_archive_path(&sources, &format)
     };
 
-    // Finestra di progresso stile app (voce Dolphin): auto-chiusura a fine
-    // lavoro + notifica; senza display si ricade sul modo testuale.
+    // App-style progress window (Dolphin entry): auto-close when done
+    // + notification; without display fall back to text mode.
     if progress && !no_progress {
         if crate::ui::fm_progress::has_display() {
             return crate::ui::fm_progress::run_compress_with_progress(dest, sources, level, password);
         }
-        eprintln!("(nessun display: uso il progresso testuale)");
+        eprintln!("(no display: using text progress)");
     }
 
-    println!("Creating {} ({} files, level {}, {} threads)...", dest.display(), sources.len(), level, crate::core::util::num_cpus());
+    println!("Creating {} ({} files, level {}, {} threads)...", dest.display(), sources.len(), level, crate::core::util::effective_threads());
     let start = std::time::Instant::now();
     backend.create(&dest, &sources, level, password.as_deref(), Some(Box::new(|p| {
-        print!("\r{:>3.0}% {}", p.percent, p.file);
+        print!("\r{:>7} {}", crate::core::util::format_percent(p.percent, p.current, p.total), p.file);
         use std::io::Write;
         let _ = std::io::stdout().flush();
     }))).map_err(|e| anyhow::anyhow!(e.to_string()))?;
@@ -445,7 +481,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
     Ok(())
 }
 
-/// Se l'utente ha scelto un nome senza estensione archivio, aggiungi il formato.
+/// If the user chose a name without archive extension, add the format.
 fn ensure_archive_extension(dest: PathBuf, format: &str) -> PathBuf {
     let ext = crate::core::fm::format_extension(format);
     let name = dest.file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();

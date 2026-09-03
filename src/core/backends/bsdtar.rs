@@ -293,11 +293,20 @@ impl BsdtarBackend {
 
 fn map_tar_error(stderr: &str) -> ArkxError {
     let m = stderr.trim();
+    // Known libarchive bug (< 3.9.0): on truncated archives or with non
+    // UTF-8 names `archive_error_string()` returns NULL and bsdtar prints "(null)".
+    // Translate to a human message instead of showing "(null)" to the user.
+    if m.contains("(null)") {
+        return ArkxError::Corrupted(
+            "cannot open archive (damaged file or unsupported names; try `7z l` for details)".into(),
+        );
+    }
     if m.contains("Cannot allocate memory") {
         return ArkxError::Backend("not enough memory to open archive".into());
     }
     if m.contains("Unrecognized archive format")
         || m.contains("not seem to be a tar archive")
+        || m.contains("does not look like a tar archive")
         || m.contains("non sembra un archivio tar")
         || m.contains("Error opening archive")
         || m.contains("Is not archive")
@@ -336,7 +345,7 @@ fn parse_tvf(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
         }
     }
     if entries.is_empty() {
-        return Err(ArkxError::Corrupted("cannot parse archive contents (empty list)".into()));
+        return Err(ArkxError::Corrupted("cannot list archive (empty output: file may be empty or damaged)".into()));
     }
     let num_files = entries.iter().filter(|e| !e.is_dir).count();
     let num_dirs = entries.len() - num_files;
@@ -509,6 +518,30 @@ mod tests {
         let e = parse_tvf_line("lrwxrwxrwx  0 root    root       7 Sep  3 16:34 link -> target").unwrap();
         assert_eq!(e.path, "link");
         assert_eq!(parse_mode("drwxr-xr-x"), Some(0o755));
-        assert!(parse_tvf_line("totale 123").is_none());
+        assert!(parse_tvf_line("total 123").is_none());
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::map_tar_error;
+    use crate::core::error::ArkxError;
+
+    #[test]
+    fn null_error_becomes_human_message() {
+        // Bug libarchive < 3.9: error string NULL → "bsdtar: (null)".
+        let err = map_tar_error("bsdtar: (null)\nbsdtar: Error exit delayed from previous errors.");
+        match err {
+            ArkxError::Corrupted(msg) => {
+                assert!(!msg.contains("(null)"), "cryptic message: {}", msg);
+            }
+            other => panic!("expected Corrupted, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn gnu_english_not_a_tar_is_corrupted() {
+        let err = map_tar_error("tar: This does not look like a tar archive\ntar: Exiting with failure status");
+        assert!(matches!(err, ArkxError::Corrupted(_)), "got: {}", err);
     }
 }

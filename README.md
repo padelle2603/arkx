@@ -22,6 +22,7 @@ arkx l archive.7z                 # list contents
 arkx x archive.7z ~/Downloads    # extract (all CPU threads)
 arkx x archive.rar . -p secret   # RAR with password
 arkx a archive.7z docs/ -l 9     # create an archive
+arkx a archive.tar.zst docs/ --threads 4  # cap worker threads (or ARKX_THREADS=4)
 arkx c --here --format=zip docs/ # compress (Dolphin-style, no overwrite)
 arkx --help                      # everything else
 ```
@@ -31,8 +32,8 @@ arkx --help                      # everything else
 Uninstalling Ark removes its right-click **Compress** entry (it was an Ark
 plugin, not a Dolphin feature). `./install.sh` restores it with Arkx:
 
-* Right-click folder/file → **Comprimi** → Comprimi in zip... / tar.gz... / 7zip...
-* Right-click archive → **Estrai** → Estrai qui / Estrai in...
+* Right-click folder/file → **Compress** → Compress to zip... / tar.gz... / 7zip...
+* Right-click archive → **Extract** → Extract here / Extract to...
 
 Headless by default (no window, no overwrite: `docs.zip`, `docs-2.zip`, …),
 with desktop notification + highlight in Dolphin when done.
@@ -55,7 +56,7 @@ upkeep update arkx                       # needs a release with --progress suppo
 The script points the menus at the upkeep AppImage path (stable across
 updates) with its real icon. Re-run it after every `upkeep update arkx`
 (the update can drop the executable bit) and if you move the AppImage —
-otherwise Dolphin denies the launch ("non autorizzato ad eseguire").
+otherwise Dolphin denies the launch ("not authorized to run the application").
 Right-click files inside an archive to extract just what you selected. Wrong password? Arkx asks again instead of failing.
 
 ## Features
@@ -75,6 +76,7 @@ cargo build --release
 ```
 
 Tests: `cargo test` · Lint: `cargo clippy` · Install: `./install.sh`
+Bench (any machine): `./bench.sh` — adaptive threads/levels compared on a synthetic corpus.
 
 ## Privacy & Legal
 

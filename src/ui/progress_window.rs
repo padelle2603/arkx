@@ -235,9 +235,10 @@ impl ProgressWindow {
     pub fn set_progress(&self, info: &ProgressInfo) {
         let pct = info.percent.clamp(0.0, 100.0);
         self.bar.set_fraction((pct / 100.0) as f64);
-        self.bar.set_text(Some(&format!("{:.0}%", pct)));
+        let pct_s = crate::core::util::format_percent(pct, info.current, info.total);
+        self.bar.set_text(Some(&pct_s));
         self.file_label.set_text(&truncate_middle(&info.file, 60));
-        self.title_label.set_text(&format!("{}… {:.0}%", self.verb.borrow(), pct));
+        self.title_label.set_text(&format!("{}… {}", self.verb.borrow(), pct_s));
 
         let now = Instant::now();
         let (prev_bytes, prev_time) = *self.last_sample.borrow();

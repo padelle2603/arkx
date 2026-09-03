@@ -816,7 +816,7 @@ pub fn build_ui(app: &adw::Application) {
                     if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
                         pw.borrow().set_progress(&info);
                     }
-                    status_left.set_text(&format!("{} — {:.0}%", truncate_middle(&info.file, 40), pct));
+                    status_left.set_text(&format!("{} — {}", truncate_middle(&info.file, 40), crate::core::util::format_percent(pct, info.current, info.total)));
                 }
                 WorkerEvent::Finished { result } => {
                     *ui_poll.last_progress.borrow_mut() = (100.0, Instant::now());

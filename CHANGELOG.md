@@ -1,15 +1,34 @@
 # Changelog
 
-## v1.1.1 — Dolphin integration: Comprimi/Estrai menus + progress window
+## Unreleased — adaptive performance + huge archives
+
+- **Adaptive threads**: `--threads N` (or `ARKX_THREADS=N`) on `a`/`c`/`x`;
+  auto default from CPU/RAM (reserve for the system on small machines,
+  RAM cap for hungry codecs). No more fixed per-machine values.
+- **Honored levels**: `-l 0-9` applies to all tars (gz/bz2/xz/zstd,
+  previously ignored with fixed levels).
+- **Multithreaded zstd** on `tar.zst` (e.g. 69MB mixed: 5.6s → 0.09s at same ratio).
+- **Large zips via 7z** (`-mmt`) above adaptive threshold with fallback to native.
+- **Honest creation progress on huge archives**: byte-based floor
+  for completed files (7z % with `-mmt` stalls), polling bytes
+  read from `/proc` (moves even inside a single 10GB file),
+  size map with double key (absolute + relative: 7z prints relative
+  names), keepalive, 7z status lines filtered by filename;
+  percentages with adaptive decimals (`0.42%` below 1%, locale decimal
+  separator, never 100% early); disk-space preflight with clear error.
+- Removed unused dependencies (`tokio`, `futures`, `memmap2`, `bytes`);
+  new reproducible `./bench.sh` on any machine.
+
+## v1.1.1 — Dolphin integration: Compress/Extract menus + progress window
 
 Restores the right-click **Compress** entry lost when uninstalling Ark,
 with Ark parity and the in-app progress window.
 
 ### File-manager integration
 
-- **Comprimi submenu** (Dolphin ServiceMenu): Comprimi in zip... / tar.gz... /
+- **Compress submenu** (Dolphin ServiceMenu): Compress to zip... / tar.gz... /
   7zip... with Italian translations, no-overwrite naming (`docs.zip`, `docs-2.zip`…)
-- **Estrai submenu**: Estrai qui / Estrai in... / Apri con Arkx
+- **Extract submenu**: Extract here / Extract to... / Open with Arkx
 - New CLI: `arkx compress [--here] [--format zip|tar.gz|7z] [--to DEST] [--dialog]`
   and `arkx extract --here/--dialog` (multi-archive aware, `file://` URI decoding)
 - **Progress window** (`--progress`): same bar as the app (speed, ETA, Details),

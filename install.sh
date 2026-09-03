@@ -14,8 +14,8 @@ done
 sudo ln -sf /usr/local/bin/arkx /usr/local/bin/extractor || true
 # Remove the legacy desktop entry if present
 sudo rm -f /usr/share/applications/extractor.desktop || true
-# Dolphin integration (Ark parity): Comprimi / Estrai service menus.
-# Replaces the "Comprimi" entry lost when uninstalling Ark.
+# Dolphin integration (Ark parity): Compress / Extract service menus.
+# Replaces the "Compress" entry lost when uninstalling Ark.
 sudo install -Dm644 data/servicemenus/arkx-compress.desktop /usr/share/kio/servicemenus/arkx-compress.desktop
 sudo install -Dm644 data/servicemenus/arkx-extract.desktop /usr/share/kio/servicemenus/arkx-extract.desktop
 sudo update-desktop-database /usr/share/applications || true
@@ -28,5 +28,5 @@ arkx --help | head -n 20
 echo "==> CLI smoke test..."
 arkx l /tmp/test_arkx.zip 2>&1 | head -n 10 || echo "create a test zip: 7z a /tmp/test.zip file..."
 echo "==> Done! Launch with: arkx  or  arkx archive.zip"
-echo "    Dolphin: right click a folder -> Comprimi -> Comprimi in zip... / tar.gz... / 7zip..."
-echo "             right click an archive -> Estrai -> Estrai qui"
+echo "    Dolphin: right click a folder -> Compress -> Compress to zip... / tar.gz... / 7zip..."
+echo "             right click an archive -> Extract -> Extract here"

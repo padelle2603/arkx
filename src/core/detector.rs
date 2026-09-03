@@ -76,10 +76,10 @@ impl ArchiveFormat {
 
     pub fn backend(&self) -> BackendKind {
         match self {
-            // Letture sequenziali veloci senza fork. Lzma/Compress singoli:
-            // la lista è sintetica (native) mentre la decodifica cade su 7z.
+            // Fast sequential reads without fork. Single Lzma/Compress:
+            // listing is synthetic (native) while decoding falls back to 7z.
             Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::TarZst | Self::TarLz4 | Self::Gz | Self::Bz2 | Self::Xz | Self::Zst | Self::Lz4 | Self::Lzma | Self::Compress => BackendKind::Native,
-            // 7z non apre questi tar.* (né elenca tar.Z/tar.lzma): libarchive.
+            // 7z does not open these tar.* (nor list tar.Z/tar.lzma): libarchive.
             Self::TarZ | Self::TarLzma | Self::TarLzip | Self::TarLzo | Self::TarLrzip => BackendKind::Libarchive,
             _ => BackendKind::SevenZip,
         }
@@ -93,9 +93,9 @@ pub enum BackendKind {
     Libarchive,
 }
 
-/// Rileva formato da magic bytes + estensione (estensione come fallback per tar.*)
+/// Detect format from magic bytes + extension (extension as fallback for tar.*)
 pub fn detect_format(path: &Path) -> ArchiveFormat {
-    // 1. Magic bytes via infer + manuale per tar
+    // 1. Magic bytes via infer + manual for tar
     if let Ok(Some(kind)) = infer::get_from_path(path) {
         let mime = kind.mime_type();
         if let Some(fmt) = from_mime(mime) {
@@ -109,7 +109,7 @@ pub fn detect_format(path: &Path) -> ArchiveFormat {
         }
     }
 
-    // 2. Fallback manuale header
+    // 2. Manual header fallback
     if let Ok(fmt) = detect_by_header(path) {
         if !matches!(fmt, ArchiveFormat::Unknown(_)) {
             if let Some(tar_fmt) = detect_tar_composite(path) {
@@ -122,7 +122,7 @@ pub fn detect_format(path: &Path) -> ArchiveFormat {
         }
     }
 
-    // 3. Estensione
+    // 3. Extension
     detect_by_extension(path)
 }
 
@@ -132,7 +132,7 @@ fn from_mime(mime: &str) -> Option<ArchiveFormat> {
         "application/x-7z-compressed" => Some(ArchiveFormat::SevenZip),
         "application/vnd.rar" | "application/x-rar" | "application/x-rar-compressed" => Some(ArchiveFormat::Rar),
         "application/x-tar" => Some(ArchiveFormat::Tar),
-        // Alias dei file manager per i tar compressi (es. Nautilus/Dolphin)
+        // File-manager aliases for compressed tars (e.g. Nautilus/Dolphin)
         "application/x-compressed-tar" => Some(ArchiveFormat::TarGz),
         "application/x-bzip-compressed-tar" => Some(ArchiveFormat::TarBz2),
         "application/x-tarz" => Some(ArchiveFormat::TarZ),
@@ -251,7 +251,7 @@ fn detect_by_header(path: &Path) -> Result<ArchiveFormat, std::io::Error> {
                 return Ok(tar_fmt);
             }
         }
-        // Nessun formato singolo dedicato: lascia all'estensione/mime.
+        // No dedicated single format: leave to extension/mime.
     }
     // ar (.a): "!<arch>\n"
     if buf.starts_with(b"!<arch>") {
@@ -261,7 +261,7 @@ fn detect_by_header(path: &Path) -> Result<ArchiveFormat, std::io::Error> {
     if buf.starts_with(b"xar!") {
         return Ok(ArchiveFormat::Xar);
     }
-    // cpio: new ascii "070701"/"070702", old odc "070707", binario C7 71 / 71 C7
+    // cpio: new ascii "070701"/"070702", old odc "070707", binary C7 71 / 71 C7
     if buf.starts_with(b"070701") || buf.starts_with(b"070702") || buf.starts_with(b"070707") {
         return Ok(ArchiveFormat::Cpio);
     }
@@ -291,7 +291,7 @@ fn detect_by_extension(path: &Path) -> ArchiveFormat {
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    // Ordine importante: tar.* prima
+    // Important order: tar.* first
     if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
         return ArchiveFormat::TarGz;
     }
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_ext_new_formats() {
-        // Tar compositi esotici
+        // Exotic composite tars
         assert_eq!(detect_by_extension(&PathBuf::from("a.tar.Z")), ArchiveFormat::TarZ);
         assert_eq!(detect_by_extension(&PathBuf::from("a.taz")), ArchiveFormat::TarZ);
         assert_eq!(detect_by_extension(&PathBuf::from("a.tar.lzma")), ArchiveFormat::TarLzma);
@@ -422,11 +422,11 @@ mod tests {
         assert_eq!(detect_by_extension(&PathBuf::from("a.tar.lrz")), ArchiveFormat::TarLrzip);
         assert_eq!(detect_by_extension(&PathBuf::from("a.tar.lz4")), ArchiveFormat::TarLz4);
         assert_eq!(detect_by_extension(&PathBuf::from("a.tar.zst")), ArchiveFormat::TarZst);
-        // Singoli
+        // Singles
         assert_eq!(detect_by_extension(&PathBuf::from("a.Z")), ArchiveFormat::Compress);
         assert_eq!(detect_by_extension(&PathBuf::from("a.lzma")), ArchiveFormat::Lzma);
         assert_eq!(detect_by_extension(&PathBuf::from("a.lz4")), ArchiveFormat::Lz4);
-        // Archivi via 7z
+        // Archives via 7z
         assert_eq!(detect_by_extension(&PathBuf::from("a.cpio")), ArchiveFormat::Cpio);
         assert_eq!(detect_by_extension(&PathBuf::from("a.bcpio")), ArchiveFormat::Cpio);
         assert_eq!(detect_by_extension(&PathBuf::from("a.xar")), ArchiveFormat::Xar);
@@ -435,7 +435,7 @@ mod tests {
         assert_eq!(detect_by_extension(&PathBuf::from("a.AppImage")), ArchiveFormat::AppImage);
         assert_eq!(detect_by_extension(&PathBuf::from("a.lha")), ArchiveFormat::Lzh);
         assert_eq!(detect_by_extension(&PathBuf::from("a.src.rpm")), ArchiveFormat::Rpm);
-        // Nessun falso positivo per .a a lettera singola
+        // No false positive for single-letter .a
         assert_eq!(detect_by_extension(&PathBuf::from("opera")), ArchiveFormat::Unknown("unknown".into()));
     }
 
@@ -466,7 +466,7 @@ mod tests {
         assert_eq!(from_mime("application/x-bzip"), Some(ArchiveFormat::Bz2));
         assert_eq!(from_mime("application/x-lzma"), Some(ArchiveFormat::Lzma));
         assert_eq!(from_mime("application/x-lha"), Some(ArchiveFormat::Lzh));
-        // I dialetti tar.* non devono restare Unknown
+        // tar.* dialects must not stay Unknown
         for fmt in [from_mime("application/x-tar"), from_mime("application/zip"),
                     from_mime("application/x-7z-compressed"), from_mime("application/vnd.rar"),
                     from_mime("application/gzip"), from_mime("application/x-xz"),
@@ -478,19 +478,19 @@ mod tests {
     #[test]
     fn test_backend_routing() {
         use super::BackendKind;
-        // Native veloci senza fork
+        // Fast natives without fork
         for fmt in [ArchiveFormat::Zip, ArchiveFormat::Tar, ArchiveFormat::TarGz,
                     ArchiveFormat::TarXz, ArchiveFormat::TarLz4,
                     ArchiveFormat::Gz, ArchiveFormat::Lz4,
                     ArchiveFormat::Lzma, ArchiveFormat::Compress] {
             assert_eq!(fmt.backend(), BackendKind::Native);
         }
-        // Esotici via libarchive (7z non li apre / non ne elenca il contenuto)
+        // Exotics via libarchive (7z does not open them / list their contents)
         for fmt in [ArchiveFormat::TarZ, ArchiveFormat::TarLzma, ArchiveFormat::TarLzip,
                     ArchiveFormat::TarLzo, ArchiveFormat::TarLrzip] {
             assert_eq!(fmt.backend(), BackendKind::Libarchive);
         }
-        // Resto via 7z
+        // Rest via 7z
         for fmt in [ArchiveFormat::SevenZip, ArchiveFormat::Rar, ArchiveFormat::Iso,
                     ArchiveFormat::AppImage, ArchiveFormat::Cpio, ArchiveFormat::Xar,
                     ArchiveFormat::Ar, ArchiveFormat::Cab] {

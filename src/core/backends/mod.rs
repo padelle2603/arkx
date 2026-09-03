@@ -88,10 +88,10 @@ impl BackendManager {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let fmt = super::detector::detect_format(archive);
-        // Large ZIPs go multithreaded 7z even though the table says native:
-        // zero-fork only pays off below ~100MB.
+        // Large zips → multithreaded 7z even if the table says native:
+        // zero-fork only pays off below threshold (adaptive on RAM).
         let big_zip = fmt == ArchiveFormat::Zip
-            && std::fs::metadata(archive).map(|m| m.len() >= 100 * 1024 * 1024).unwrap_or(false);
+            && std::fs::metadata(archive).map(|m| m.len() >= crate::core::util::big_archive_threshold_bytes()).unwrap_or(false);
         if big_zip {
             return self.seven.extract(archive, dest, entries, password, progress);
         }
@@ -141,7 +141,39 @@ impl BackendManager {
                 fmt
             )));
         }
+        // Disk-space preflight: a 68GB failing halfway with ENOSPC after
+        // hours is worse than an immediate error. Worst-case estimate (total input,
+        // incompressible data); if `df` does not respond the check is skipped.
+        let total = crate::core::util::total_input_size(sources);
+        if total > 0 {
+            if let Some(free) = crate::core::util::filesystem_free_bytes(dest) {
+                if total > free {
+                    return Err(ArkxError::Backend(format!(
+                        "not enough disk space for {}: need {} free, have {} on {}",
+                        dest.display(),
+                        humansize::format_size(total, humansize::BINARY),
+                        humansize::format_size(free, humansize::BINARY),
+                        dest.parent().unwrap_or(std::path::Path::new(".")).display()
+                    )));
+                }
+            }
+        }
         if self.native.supports(&fmt) && password.is_none() {
+            // Large zips → multithreaded 7z (-mmt) with fallback to native:
+            // above threshold (adaptive on RAM) parallel beats zero-fork.
+            if matches!(fmt, ArchiveFormat::Zip)
+                && self.seven.is_available()
+                && total >= crate::core::util::zip_seven_threshold_bytes()
+            {
+                eprintln!("[core] big zip ({} threads): using 7z", crate::core::util::effective_threads());
+                match self.seven.create(dest, sources, level, password, progress) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        eprintln!("[core] 7z create failed, falling back to native: {}", e);
+                        return self.native.create(dest, sources, level, None, None);
+                    }
+                }
+            }
             // Native has no password support yet.
             self.native.create(dest, sources, level, password, progress)
         } else {

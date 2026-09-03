@@ -71,8 +71,8 @@ impl NativeBackend {
         match fmt {
             ArchiveFormat::Zip => self.list_zip(path),
             ArchiveFormat::Tar | ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst | ArchiveFormat::TarLz4 => self.list_tar(path),
-            // Solo lista sintetica: la decodifica di Lzma/Compress avviene via 7z
-            // (extract_inner li rifiuta e scatta il fallback).
+            // Synthetic listing only: Lzma/Compress decoding happens via 7z
+            // (extract_inner rejects them and the fallback kicks in).
             ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst | ArchiveFormat::Lz4 | ArchiveFormat::Lzma | ArchiveFormat::Compress => self.list_single(path, &fmt),
             _ => Err(ArkxError::UnsupportedFormat(format!("{:?}", fmt))),
         }
@@ -127,7 +127,7 @@ impl NativeBackend {
     }
 
     fn list_tar(&self, path: &Path) -> Result<ArchiveInfo> {
-        // Streaming tar list con decompressione parallela se necessario
+        // Streaming tar listing with parallel decompression if needed
         let file = File::open(path).map_err(ArkxError::Io)?;
         let reader: Box<dyn std::io::Read> = create_tar_reader(file, path)?;
 
@@ -261,7 +261,13 @@ impl NativeBackend {
                     continue;
                 }
             }
-            let out_path = dest.join(&name);
+            let out_path = match secure_join(dest, &name) {
+                Some(p) => p,
+                None => {
+                    eprintln!("[native] skipped unsafe entry: {}", name);
+                    continue;
+                }
+            };
             if f.is_dir() {
                 std::fs::create_dir_all(&out_path).map_err(ArkxError::Io)?;
                 if let Some(cb) = &progress {
@@ -291,6 +297,7 @@ impl NativeBackend {
                         last_bytes = processed_bytes;
                     }
                 }
+                out.flush().map_err(ArkxError::Io)?;
                 // preserve permissions
                 #[cfg(unix)]
                 {
@@ -360,7 +367,13 @@ impl NativeBackend {
             // Regular files: chunked copy with throttled progress (not per-file)
             let is_file = entry.header().entry_type().is_file();
             if is_file {
-                let out_path = dest.join(&path_norm);
+                let out_path = match secure_join(dest, &path_norm) {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("[native] skipped unsafe entry: {}", path_raw);
+                        continue;
+                    }
+                };
                 if let Some(parent) = out_path.parent() {
                     std::fs::create_dir_all(parent).map_err(ArkxError::Io)?;
                 }
@@ -382,6 +395,7 @@ impl NativeBackend {
                         last_bytes = processed_bytes;
                     }
                 }
+                out.flush().map_err(ArkxError::Io)?;
                 // preserve permissions/mtime
                 #[cfg(unix)]
                 {
@@ -440,9 +454,11 @@ impl NativeBackend {
             } else {
                 cb(ProgressInfo::new("Completed".to_string(), 100, 100));
             }
+            out.flush().map_err(ArkxError::Io)?;
         } else {
             let mut reader = BufReader::with_capacity(1024 * 1024, reader);
             std::io::copy(&mut reader, &mut out).map_err(ArkxError::Io)?;
+            out.flush().map_err(ArkxError::Io)?;
         }
         Ok(())
     }
@@ -464,6 +480,50 @@ impl NativeBackend {
     }
 
     fn create_zip(&self, dest: &Path, sources: &[PathBuf], level: u8, progress: Option<Box<dyn Fn(ProgressInfo) + Send>>) -> Result<()> {
+        // Collect BEFORE creating dest: if dest falls inside the sources
+        // (e.g. --to <subfolder>) it must not include itself mid-write.
+        let dest_abs = absolutize(dest);
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        let mut skipped = 0u32;
+        for src in sources {
+            // is_file()/is_dir() follow symlinks (unlike
+            // DirEntry::file_type()): a link to a file is archived with
+            // the target's content instead of silently disappearing.
+            if src.is_dir() {
+                for entry in walkdir::WalkDir::new(src).min_depth(0).into_iter() {
+                    let entry = match entry {
+                        Ok(e) => e,
+                        Err(_) => { skipped += 1; continue; }
+                    };
+                    let p = entry.path().to_path_buf();
+                    if is_same_path(&p, &dest_abs) {
+                        continue;
+                    }
+                    if p.is_file() {
+                        files.push(p);
+                    } else if p.is_dir() {
+                        dirs.push(p);
+                    } else {
+                        skipped += 1; // broken symlink, socket, fifo, ...
+                    }
+                }
+            } else if src.is_file() {
+                if is_same_path(src, &dest_abs) {
+                    continue;
+                }
+                files.push(src.clone());
+            } else {
+                skipped += 1;
+            }
+        }
+        if files.is_empty() && dirs.is_empty() {
+            return Err(ArkxError::Backend(format!(
+                "nothing to archive ({} skipped: empty, unreadable or special files only)",
+                skipped
+            )));
+        }
+
         let file = File::create(dest).map_err(ArkxError::Io)?;
         let writer = BufWriter::with_capacity(1024 * 1024, file);
         let mut zip = zip::ZipWriter::new(writer);
@@ -475,33 +535,36 @@ impl NativeBackend {
             })
             .compression_level(Some(level as i64));
 
-        // Collect files recursively with walkdir
-        let mut files: Vec<PathBuf> = Vec::new();
-        for src in sources {
-            if src.is_dir() {
-                for entry in walkdir::WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
-                    if entry.file_type().is_file() {
-                        files.push(entry.path().to_path_buf());
-                    }
-                }
-            } else {
-                files.push(src.clone());
-            }
-        }
-
         let base = sources.first().and_then(|p| p.parent()).unwrap_or(Path::new("."));
-        let total = files.len() as u64;
+        // Dirs first (sorted, stable structure), then files: empty folders
+        // are thus preserved as in tar.
+        dirs.sort();
+        let total = (dirs.len() + files.len()) as u64;
+        let mut done = 0u64;
 
-        for (i, path) in files.iter().enumerate() {
+        for path in dirs.iter().chain(files.iter()) {
             if self.cancelled() {
                 drop(zip);
                 Self::discard_partial(dest);
                 return Err(ArkxError::Cancelled);
             }
-            let rel = path.strip_prefix(base).unwrap_or(path);
-            let name = rel.to_string_lossy().to_string();
+            let rel = prefixed_name(path, base);
+            let is_dir = path.is_dir();
+            let name = if is_dir {
+                if rel.ends_with('/') { rel } else { format!("{}/", rel) }
+            } else {
+                rel
+            };
+            if name.is_empty() || name == "/" {
+                continue;
+            }
+            done += 1;
             if let Some(cb) = &progress {
-                cb(ProgressInfo::new(name.clone(), i as u64 + 1, total.max(1)));
+                cb(ProgressInfo::new(name.clone(), done, total.max(1)));
+            }
+            if is_dir {
+                zip.add_directory(name, options).map_err(|e| ArkxError::Backend(e.to_string()))?;
+                continue;
             }
             zip.start_file(name, options).map_err(|e| ArkxError::Backend(e.to_string()))?;
             let mut f = File::open(path).map_err(ArkxError::Io)?;
@@ -510,25 +573,55 @@ impl NativeBackend {
         if let Some(cb) = &progress {
             cb(ProgressInfo::new("Completed".to_string(), total.max(1), total.max(1)));
         }
-        zip.finish().map_err(|e| ArkxError::Backend(e.to_string()))?;
+        // finish() writes the central directory but does NOT flush the BufWriter:
+        // without explicit flush small zips (<1MB) stay truncated/empty.
+        let writer = zip.finish().map_err(|e| ArkxError::Backend(e.to_string()))?;
+        let mut file = writer.into_inner().map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+        use std::io::Write as _WriteFlush;
+        file.flush().map_err(ArkxError::Io)?;
+        if skipped > 0 {
+            eprintln!("[native] zip: skipped {} unreadable/special entries", skipped);
+        }
         Ok(())
     }
 
-    fn create_tar(&self, dest: &Path, sources: &[PathBuf], fmt: &ArchiveFormat, _level: u8, progress: Option<Box<dyn Fn(ProgressInfo) + Send>>) -> Result<()> {
-        let file = File::create(dest).map_err(ArkxError::Io)?;
-        let writer: Box<dyn std::io::Write> = create_tar_writer(file, fmt)?;
-        let mut tar = tar::Builder::new(writer);
-
+    fn create_tar(&self, dest: &Path, sources: &[PathBuf], fmt: &ArchiveFormat, level: u8, progress: Option<Box<dyn Fn(ProgressInfo) + Send>>) -> Result<()> {
+        // As for zip: collect first, create dest after (anti self-inclusion).
+        let dest_abs = absolutize(dest);
         let mut files: Vec<PathBuf> = Vec::new();
         for src in sources {
             if src.is_dir() {
-                for entry in walkdir::WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
-                    files.push(entry.path().to_path_buf());
+                for entry in walkdir::WalkDir::new(src).min_depth(0).into_iter() {
+                    match entry {
+                        Ok(e) => {
+                            if !is_same_path(e.path(), &dest_abs) {
+                                files.push(e.path().to_path_buf());
+                            }
+                        }
+                        Err(e) => {
+                            return Err(ArkxError::Backend(format!("cannot read {}: {}", src.display(), e)));
+                        }
+                    }
                 }
             } else {
-                files.push(src.clone());
+                if !src.exists() {
+                    return Err(ArkxError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        format!("not found: {}", src.display()),
+                    )));
+                }
+                if !is_same_path(src, &dest_abs) {
+                    files.push(src.clone());
+                }
             }
         }
+        if files.is_empty() {
+            return Err(ArkxError::Backend("nothing to archive (empty or unreadable sources)".into()));
+        }
+
+        let file = File::create(dest).map_err(ArkxError::Io)?;
+        let writer = create_tar_writer(file, fmt, level)?;
+        let mut tar = tar::Builder::new(writer);
 
         let total = files.len() as u64;
         // Single source directory: keep its parent as base so the folder
@@ -558,7 +651,11 @@ impl NativeBackend {
         if let Some(cb) = &progress {
             cb(ProgressInfo::new("Completed".to_string(), total.max(1), total.max(1)));
         }
+        // Tar trailer (1024 zeros), then MANDATORY codec finish():
+        // zstd (and in theory the others) leaves incomplete frames without finish.
         tar.finish().map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+        let writer = tar.into_inner().map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+        writer.finish()?;
         Ok(())
     }
 }
@@ -590,14 +687,272 @@ fn create_single_reader(file: File, path: &Path) -> Result<Box<dyn std::io::Read
     Ok(reader)
 }
 
-fn create_tar_writer(file: File, fmt: &ArchiveFormat) -> Result<Box<dyn std::io::Write>> {
-    let writer: Box<dyn std::io::Write> = match fmt {
-        ArchiveFormat::TarGz => Box::new(flate2::write::GzEncoder::new(BufWriter::with_capacity(1024*1024, file), flate2::Compression::new(6))),
-        ArchiveFormat::TarBz2 => Box::new(bzip2::write::BzEncoder::new(BufWriter::with_capacity(1024*1024, file), bzip2::Compression::best())),
-        ArchiveFormat::TarXz => Box::new(xz2::write::XzEncoder::new(BufWriter::with_capacity(1024*1024, file), 6)),
-        ArchiveFormat::TarZst => Box::new(zstd::stream::write::Encoder::new(BufWriter::with_capacity(1024*1024, file), 3).map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?),
-        ArchiveFormat::TarLz4 => Box::new(lz4_flex::frame::FrameEncoder::new(BufWriter::with_capacity(1024*1024, file)).auto_finish()),
-        _ => Box::new(BufWriter::with_capacity(1024*1024, file)),
+/// Intermediate writer for `create_tar`: enum (not `Box<dyn Write>`) so at the end
+/// of the archive the REAL `finish()` of each codec can be called. Without finish,
+/// zstd leaves incomplete frames and the archive ends up corrupted (verified:
+/// `tar tzf` failed and bsdtar said "Truncated input file").
+enum TarWriter {
+    Plain(BufWriter<File>),
+    Gz(flate2::write::GzEncoder<BufWriter<File>>),
+    Bz(bzip2::write::BzEncoder<BufWriter<File>>),
+    Xz(xz2::write::XzEncoder<BufWriter<File>>),
+    Zst(zstd::stream::write::Encoder<'static, BufWriter<File>>),
+    Lz4(lz4_flex::frame::FrameEncoder<BufWriter<File>>),
+}
+
+impl std::io::Write for TarWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            TarWriter::Plain(w) => w.write(buf),
+            TarWriter::Gz(w) => w.write(buf),
+            TarWriter::Bz(w) => w.write(buf),
+            TarWriter::Xz(w) => w.write(buf),
+            TarWriter::Zst(w) => w.write(buf),
+            TarWriter::Lz4(w) => w.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            TarWriter::Plain(w) => w.flush(),
+            TarWriter::Gz(w) => w.flush(),
+            TarWriter::Bz(w) => w.flush(),
+            TarWriter::Xz(w) => w.flush(),
+            TarWriter::Zst(w) => w.flush(),
+            TarWriter::Lz4(w) => w.flush(),
+        }
+    }
+}
+
+impl TarWriter {
+    fn finish(self) -> Result<()> {
+        match self {
+            TarWriter::Plain(mut w) => w.flush().map_err(ArkxError::Io),
+            TarWriter::Gz(e) => {
+                let mut w = e.finish().map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+                w.flush().map_err(ArkxError::Io)
+            }
+            TarWriter::Bz(e) => {
+                let mut w = e.finish().map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+                w.flush().map_err(ArkxError::Io)
+            }
+            TarWriter::Xz(e) => {
+                let mut w = e.finish().map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+                w.flush().map_err(ArkxError::Io)
+            }
+            TarWriter::Zst(e) => {
+                let mut w = e.finish().map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+                w.flush().map_err(ArkxError::Io)
+            }
+            TarWriter::Lz4(e) => {
+                let mut w = e.finish().map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+                w.flush().map_err(ArkxError::Io)
+            }
+        }
+    }
+}
+
+fn create_tar_writer(file: File, fmt: &ArchiveFormat, level: u8) -> Result<TarWriter> {
+    let buf = BufWriter::with_capacity(1024*1024, file);
+    // The user -l flag applies to all codecs (previously ignored:
+    // fixed levels gz6/best/xz6/zst3). 0 = fast, 9 = max ratio.
+    let writer = match fmt {
+        ArchiveFormat::TarGz => TarWriter::Gz(flate2::write::GzEncoder::new(buf, flate2::Compression::new(level.clamp(0, 9) as u32))),
+        ArchiveFormat::TarBz2 => TarWriter::Bz(bzip2::write::BzEncoder::new(buf, bzip2::Compression::new(level.clamp(1, 9) as u32))),
+        ArchiveFormat::TarXz => TarWriter::Xz(xz2::write::XzEncoder::new(buf, level.clamp(0, 9) as u32)),
+        ArchiveFormat::TarZst => {
+            let mut enc = zstd::stream::write::Encoder::new(buf, zstd_level(level)).map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+            // Adaptive multithreaded zstd compression (workers scaled on
+            // CPU/RAM): the frame stays standard, any decoder can read it.
+            let workers = crate::core::util::zstd_workers();
+            if workers >= 1 {
+                // on 1 thread it still separates IO and compression
+                enc.multithread(workers).map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+            }
+            TarWriter::Zst(enc)
+        }
+        ArchiveFormat::TarLz4 => TarWriter::Lz4(lz4_flex::frame::FrameEncoder::new(buf)),
+        _ => TarWriter::Plain(buf),
     };
     Ok(writer)
+}
+
+/// Maps user level 0-9 onto the zstd 1-22 scale.
+pub fn zstd_level(user: u8) -> i32 {
+    const TABLE: [i32; 10] = [1, 3, 5, 7, 9, 12, 15, 17, 19, 22];
+    TABLE[user.clamp(0, 9) as usize]
+}
+
+/// Safe join under `dest`: normalizes and rejects `..` (zip-slip from hostile
+/// archives) and empty names. Returns `None` for entries to discard.
+fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
+    let norm = crate::core::paths::normalize(name);
+    if norm.is_empty() {
+        return None;
+    }
+    if Path::new(&norm)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return None;
+    }
+    Some(dest.join(norm))
+}
+
+/// Absolutizes without touching the fs (dest may not exist yet).
+fn absolutize(p: &Path) -> PathBuf {
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(p)
+    }
+}
+
+/// True if `p` is the destination (textual comparison + canonical when possible).
+fn is_same_path(p: &Path, dest_abs: &Path) -> bool {
+    if absolutize(p) == *dest_abs {
+        return true;
+    }
+    match (std::fs::canonicalize(p), std::fs::canonicalize(dest_abs)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Name inside the zip: strip of `base`, with fallback to file_name only
+/// (never absolute paths: `dest.join("/abs")` during extraction would point
+/// outside dest — zip-slip — and odd names confuse the browser).
+fn prefixed_name(path: &Path, base: &Path) -> String {
+    if let Ok(rel) = path.strip_prefix(base) {
+        let s = rel.to_string_lossy().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    path.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "file".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::archive::ArchiveBackend;
+    use std::sync::{Arc, atomic::AtomicBool};
+
+    fn backend() -> NativeBackend {
+        NativeBackend::with_cancel(Arc::new(AtomicBool::new(false)))
+    }
+
+    #[test]
+    fn zip_keeps_symlink_target_and_empty_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cartella = dir.path().join("cartella");
+        std::fs::create_dir(&cartella).unwrap();
+        std::fs::write(cartella.join("file.txt"), b"ciao").unwrap();
+        std::fs::create_dir(cartella.join("subvuota")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("file.txt", cartella.join("link.txt")).unwrap();
+
+        let dest = dir.path().join("cartella.zip");
+        backend().create(&dest, std::slice::from_ref(&cartella), 6, None, None).unwrap();
+
+        let info = backend().list(&dest).unwrap();
+        let names: Vec<&str> = info.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(names.contains(&"cartella/file.txt"), "missing file: {:?}", names);
+        assert!(names.contains(&"cartella/subvuota/"), "missing empty dir: {:?}", names);
+        #[cfg(unix)]
+        assert!(names.contains(&"cartella/link.txt"), "symlink discarded: {:?}", names);
+
+        // Round-trip: the extracted content must match.
+        let out = dir.path().join("out");
+        backend().extract(&dest, &out, None, None, None).unwrap();
+        assert_eq!(std::fs::read(out.join("cartella/file.txt")).unwrap(), b"ciao");
+        assert!(out.join("cartella/subvuota").is_dir());
+    }
+
+    #[test]
+    fn zip_folder_with_only_empty_subdirs_is_not_empty() {
+        // Regression DL.zip: folder with only empty subfolders.
+        // The old code collected only files → valid 22-byte zip
+        // with 0 entries without errors. Now the dir entries must be there.
+        let dir = tempfile::tempdir().unwrap();
+        let dl = dir.path().join("DL");
+        std::fs::create_dir(&dl).unwrap();
+        std::fs::create_dir(dl.join("Games")).unwrap();
+        std::fs::create_dir(dl.join("Movies")).unwrap();
+
+        let dest = dir.path().join("DL.zip");
+        backend().create(&dest, std::slice::from_ref(&dl), 6, None, None).unwrap();
+
+        assert!(
+            std::fs::metadata(&dest).unwrap().len() > 22,
+            "suspiciously empty zip"
+        );
+        let info = backend().list(&dest).unwrap();
+        assert!(!info.entries.is_empty(), "no entries in {:?}", dest);
+        let names: Vec<&str> = info.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(names.contains(&"DL/"), "missing DL/: {:?}", names);
+        assert!(names.contains(&"DL/Games/"), "missing Games/: {:?}", names);
+        assert!(names.contains(&"DL/Movies/"), "missing Movies/: {:?}", names);
+    }
+
+    #[test]
+    fn tar_zst_roundtrip_is_valid() {
+        // Regression: the ZstEncoder was never finalized and the frame
+        // ended up incomplete ("Truncated input file" from bsdtar).
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("dati");
+        std::fs::create_dir(&src).unwrap();
+        let big: Vec<u8> = (0..200_000u32).map(|i| i.wrapping_mul(2654435761).wrapping_rem(251) as u8).collect();
+        std::fs::write(src.join("grosso.bin"), &big).unwrap();
+
+        for fmt in [ArchiveFormat::TarZst, ArchiveFormat::TarGz, ArchiveFormat::Tar] {
+            let ext = match fmt {
+                ArchiveFormat::TarZst => "tar.zst",
+                ArchiveFormat::TarGz => "tar.gz",
+                _ => "tar",
+            };
+            let dest = dir.path().join(format!("a.{}", ext));
+            backend().create(&dest, std::slice::from_ref(&src), 6, None, None).unwrap();
+            let info = backend().list(&dest).unwrap();
+            assert!(info.entries.iter().any(|e| e.path == "dati/grosso.bin"));
+            let out = dir.path().join(format!("out-{}", ext));
+            backend().extract(&dest, &out, None, None, None).unwrap();
+            assert_eq!(std::fs::read(out.join("dati/grosso.bin")).unwrap(), big);
+        }
+    }
+
+    #[test]
+    fn secure_join_rejects_traversal() {
+        let dest = Path::new("/tmp/dest");
+        assert!(secure_join(dest, "../../etc/passwd").is_none());
+        assert!(secure_join(dest, "a/../../x").is_none());
+        assert!(secure_join(dest, "").is_none());
+        assert_eq!(secure_join(dest, "a/b.txt").unwrap(), dest.join("a/b.txt"));
+        // Normalized absolute paths stay inside dest (no zip-slip).
+        assert_eq!(secure_join(dest, "/abs.txt").unwrap(), dest.join("abs.txt"));
+    }
+
+    #[test]
+    fn prefixed_name_never_absolute() {
+        let base = Path::new("/tmp/base");
+        assert_eq!(prefixed_name(Path::new("/tmp/base/a.txt"), base), "a.txt");
+        assert_eq!(prefixed_name(Path::new("/altrove/b.txt"), base), "b.txt");
+    }
+
+    #[test]
+    fn zstd_level_maps_full_range() {
+        assert_eq!(zstd_level(0), 1);
+        assert_eq!(zstd_level(5), 12);
+        assert_eq!(zstd_level(9), 22);
+        assert_eq!(zstd_level(99), 22);
+        let mut prev = 0;
+        for l in 0..=9u8 {
+            let v = zstd_level(l);
+            assert!(v >= prev, "non-monotonic levels");
+            prev = v;
+        }
+    }
 }
