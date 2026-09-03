@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   appimage:
-    runs-on: ubuntu-22.04
+    # Needs GTK >= 4.12 for gtk4-rs 0.9 (22.04 ships 4.6) and a recent
+    # glibc baseline for the portable bundle.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
