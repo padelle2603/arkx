@@ -53,7 +53,9 @@ upkeep update arkx                       # needs a release with --progress suppo
 ```
 
 The script points the menus at the upkeep AppImage path (stable across
-updates) with its real icon. Re-run it only if you move the AppImage.
+updates) with its real icon. Re-run it after every `upkeep update arkx`
+(the update can drop the executable bit) and if you move the AppImage —
+otherwise Dolphin denies the launch ("non autorizzato ad eseguire").
 Right-click files inside an archive to extract just what you selected. Wrong password? Arkx asks again instead of failing.
 
 ## Features

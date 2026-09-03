@@ -57,22 +57,59 @@ if [ "$UNINSTALL" -eq 1 ]; then
 fi
 
 # 1. Trova la AppImage: .desktop di upkeep > --appimage > ricerca.
+# Parsing robusto con shlex (gestisce path con spazi e virgolette).
 if [ -z "$APPIMAGE" ] && [ -f "$UPKEEP_DESKTOP" ]; then
-    # Exec="/path/Arkx.AppImage" (upkeep lo virgoletta sempre)
-    APPIMAGE="$(sed -n 's/^Exec=//p' "$UPKEEP_DESKTOP" | head -n1 | sed 's/^"//; s/"$//; s/ .*//')"
+    APPIMAGE="$(python3 -c '
+import shlex, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        for line in fh:
+            if line.startswith("Exec="):
+                parts = shlex.split(line[len("Exec="):].strip())
+                if parts:
+                    print(parts[0])
+                    break
+except Exception:
+    pass
+' "$UPKEEP_DESKTOP" | head -n1)"
 fi
 if [ -z "$APPIMAGE" ]; then
     for cand in "$HOME/Applicazioni"/Arkx*.AppImage "$DATA_HOME/applications/Appimages/Arkx.AppImage"; do
         if [ -x "$cand" ]; then APPIMAGE="$cand"; break; fi
     done
 fi
-if [ -z "$APPIMAGE" ] || [ ! -x "$APPIMAGE" ]; then
+if [ -z "$APPIMAGE" ]; then
     echo "Error: Arkx AppImage not found (tried upkeep desktop + --appimage)." >&2
     echo "Run: $(basename "$0") --appimage /path/to/Arkx.AppImage" >&2
     exit 1
 fi
+# L'AppImage deve essere eseguibile: dopo `upkeep update` il file viene
+# rimpiazzato e può perdere il +x (su NTFS/exFAT/noexec non sarà mai
+# eseguibile). Senza +x Dolphin mostra il menu ma poi fallisce con
+# "non autorizzato ad eseguire l'applicazione".
+if [ ! -e "$APPIMAGE" ]; then
+    echo "Error: AppImage not found: $APPIMAGE" >&2
+    exit 1
+fi
+if [ ! -x "$APPIMAGE" ]; then
+    echo "AppImage not executable, trying chmod +x: $APPIMAGE"
+    chmod +x "$APPIMAGE" 2>/dev/null || true
+fi
+if [ ! -x "$APPIMAGE" ]; then
+    echo "Error: AppImage is not executable: $APPIMAGE" >&2
+    echo "If it is on NTFS/exFAT or a noexec mount, move it to an ext4" >&2
+    echo "directory (e.g. ~/.local/share/applications/Appimages/) and re-run." >&2
+    exit 1
+fi
 APPIMAGE="$(realpath "$APPIMAGE")"
 echo "AppImage: $APPIMAGE"
+
+# FUSE è obbligatorio per le AppImage type-2: senza, il lancio da Dolphin
+# fallisce mentre da terminale si vedrebbe l'errore FUSE vero.
+if [ ! -e /dev/fuse ] && ! command -v fusermount3 >/dev/null 2>&1 && ! command -v fusermount >/dev/null 2>&1; then
+    echo "Warning: FUSE non trovato (/dev/fuse o fusermount assenti)." >&2
+    echo "L'AppImage potrebbe non avviarsi: installa fuse/libfuse2 per la tua distro." >&2
+fi
 
 # 2. Verifica supporto --progress (introdotto dopo la v1.0.1).
 # Nota: le AppImage vecchie ignorano 'compress' e aprono la GUI (che resta
@@ -116,16 +153,28 @@ if [ "$WITH_ICON" -eq 1 ] && [ -f "$UPKEEP_DESKTOP" ]; then
 fi
 
 # 5. Genera i file (trasformazione in python3: robusta a spazi e caratteri speciali).
+# Nota KDE/Plasma 6: i ServiceMenu user-local NON owned by root devono avere
+# il flag eseguibile, altrimenti Dolphin logga
+# `Access ... denied, not owned by root and executable flag not set`
+# e mostra "non autorizzato ad eseguire l'applicazione".
 mkdir -p "$DEST_DIR"
 export APPIMAGE ICON TEMPLATE_DIR DEST_DIR FILES
 python3 - <<'EOF'
-import glob, os
+import glob, os, stat
 
 appimage = os.environ["APPIMAGE"]
 icon = os.environ.get("ICON") or ""
 dest_dir = os.environ["DEST_DIR"]
 files = os.environ["FILES"].split()
 template_dir = os.environ["TEMPLATE_DIR"]
+
+def quote(p: str) -> str:
+    # Quota solo se serve (spazi, virgolette, backslash): TryExec resta nudo da spec.
+    if any(c in p for c in ' \t"\'' + "\\"):
+        return '"' + p.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return p
+
+exec_prefix = "Exec=" + quote(appimage)
 
 names = sorted(glob.glob(os.path.join(template_dir, "*.desktop")))
 wanted = {os.path.join(template_dir, f) for f in files}
@@ -138,20 +187,31 @@ for src in sorted(wanted):
     with open(src, encoding="utf-8") as fh:
         for line in fh.read().splitlines():
             if line.startswith("TryExec="):
-                continue  # re-added below with the real path
+                continue  # re-added below (nudo, senza virgolette; omesso se path con spazi)
             if line == "Exec=arkx" or line.startswith("Exec=arkx "):
-                line = 'Exec="' + appimage + '"' + line[len("Exec=arkx"):]
+                line = exec_prefix + line[len("Exec=arkx"):]
             elif line.startswith("Icon=arkx") and icon:
                 line = "Icon=" + icon
             out_lines.append(line)
-    # TryExec col path reale: se la AppImage sparisce, il menu si nasconde da solo.
-    out_lines.insert(3, f'TryExec="{appimage}"')
+    # TryExec col path reale nudo (da spec: path singolo, senza quoting).
+    # Se il path contiene spazi non è rappresentabile in TryExec -> omettilo
+    # (l'Exec quotato sopra resta valido e il menu resta visibile).
+    if any(c in appimage for c in ' \t"'):
+        pass
+    else:
+        # Se la AppImage sparisce, il menu si nasconde da solo.
+        out_lines.insert(3, f'TryExec={appimage}')
     dst = os.path.join(dest_dir, os.path.basename(src))
     with open(dst, "w", encoding="utf-8") as fh:
         fh.write("\n".join(out_lines) + "\n")
+    # Fiducia KDE: +x obbligatorio per i .desktop user-local (vedi nota sopra).
+    st = os.stat(dst)
+    os.chmod(dst, st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"installed {dst}")
 EOF
 
 refresh_dolphin
 echo "Done. Right-click a folder in Dolphin -> Comprimi."
-echo "(If Dolphin was open, restart it. Re-run after moving the AppImage.)"
+echo "(If Dolphin was open, restart it. Re-run after moving the AppImage or after 'upkeep update arkx'.)"
+echo "Trust check (devono essere -rwxr-xr-x, altrimenti Dolphin nega il lancio):"
+ls -l "$DEST_DIR"/arkx-*.desktop
