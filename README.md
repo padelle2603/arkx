@@ -4,12 +4,6 @@ Fast, multi-threaded archive manager for Linux — open, browse and extract ZIP,
 
 ![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue) ![Rust](https://img.shields.io/badge/Rust-1.90-orange) ![GTK4](https://img.shields.io/badge/GTK4-blue)
 
-## Download
-
-Grab the latest portable build from the [Releases page](https://github.com/padelle2603/arkx/releases):
-
-- **Arkx-x86_64.AppImage** — download, `chmod +x`, double-click. No install, no dependencies.
-
 ## Use
 
 ```bash
