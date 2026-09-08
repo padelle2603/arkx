@@ -10,6 +10,15 @@ use std::sync::{
 };
 use std::time::Instant;
 
+/// Final "Completed" progress: unknown total (0 bytes) reports a clean 100/100.
+fn completed(total: u64) -> ProgressInfo {
+    if total > 0 {
+        ProgressInfo::new("Completed".to_string(), total, total)
+    } else {
+        ProgressInfo::new("Completed".to_string(), 100, 100)
+    }
+}
+
 pub struct NativeBackend {
     cancel: Arc<AtomicBool>,
 }
@@ -312,13 +321,8 @@ impl NativeBackend {
                 }
             }
         }
-        if total_bytes > 0 {
-            if let Some(cb) = &progress {
-                cb(ProgressInfo::new("Completed".to_string(), total_bytes, total_bytes));
-            }
-        } else if let Some(cb) = &progress {
-            // Empty / zero-size archive: 0% during, 100% at the end.
-            cb(ProgressInfo::new("Completed".to_string(), 100, 100));
+        if let Some(cb) = &progress {
+            cb(completed(total_bytes));
         }
         Ok(())
     }
@@ -418,11 +422,7 @@ impl NativeBackend {
         }
         // Final 100% (even when total is 0).
         if let Some(cb) = &progress {
-            if total_bytes > 0 {
-                cb(ProgressInfo::new("Completed".to_string(), total_bytes, total_bytes));
-            } else {
-                cb(ProgressInfo::new("Completed".to_string(), 100, 100));
-            }
+            cb(completed(total_bytes));
         }
         Ok(())
     }
@@ -449,11 +449,7 @@ impl NativeBackend {
                     cb(ProgressInfo::new(out_name.to_string(), extracted.min(total), total));
                 }
             }
-            if total > 0 {
-                cb(ProgressInfo::new("Completed".to_string(), total, total));
-            } else {
-                cb(ProgressInfo::new("Completed".to_string(), 100, 100));
-            }
+            cb(completed(total));
             out.flush().map_err(ArkxError::Io)?;
         } else {
             let mut reader = BufReader::with_capacity(1024 * 1024, reader);

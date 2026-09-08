@@ -2,7 +2,7 @@ use crate::core::archive::{ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressIn
 use crate::core::detector::ArchiveFormat;
 use crate::core::error::{ArkxError, Result};
 use crate::core::paths;
-use crate::core::util::effective_threads;
+use crate::core::util::{dir_size, effective_threads};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -198,62 +198,32 @@ impl SevenZipBackend {
             // Drain stderr on a separate thread to avoid pipe deadlock (64KB)
             let stderr = child.stderr.take();
             let stderr_handle = std::thread::spawn(move || {
-                if let Some(mut err) = stderr {
-                    let mut buf = vec![0u8; 8192];
-                    use std::io::Read;
-                    while let Ok(n) = err.read(&mut buf) {
-                        if n == 0 { break; }
-                    }
+                if let Some(err) = stderr {
+                    crate::core::util::drain_reader(err);
                 }
             });
 
             if let Some(stdout) = child.stdout.take() {
                 // 7z with -bsp1 writes both filenames and percentages to stdout with '\r'.
                 // Percentages are discarded (see above); only the file label is kept.
-                use std::io::Read;
-                let mut reader = stdout;
-                let mut buf = vec![0u8; 8192];
-                let mut chunk = Vec::new();
                 let mut last_emit = Instant::now();
                 let mut last_label = String::new();
-                let emit_label = |line: &str, last_emit: &mut Instant, last_label: &mut String| {
+                crate::core::util::read_lines_until(stdout, |line| {
                     let label = label_from_7z_line(line);
                     if label.is_empty() {
-                        return;
+                        return false;
                     }
-                    let now_fresh = label != *last_label;
+                    let now_fresh = label != last_label;
                     if now_fresh || last_emit.elapsed().as_millis() > 500 {
-                        *last_emit = Instant::now();
-                        *last_label = label.clone();
+                        last_emit = Instant::now();
+                        last_label = label.clone();
                         let d = done.load(Ordering::Relaxed);
                         if let Ok(guard) = cb_arc.lock() {
                             guard(ProgressInfo::new(label, d, total));
                         }
                     }
-                };
-                loop {
-                    let n = reader.read(&mut buf).unwrap_or(0);
-                    if n == 0 { break; }
-                    for &b in &buf[..n] {
-                        if b == b'\r' || b == b'\n' {
-                            if !chunk.is_empty() {
-                                if let Ok(s) = String::from_utf8(std::mem::take(&mut chunk)) {
-                                    emit_label(&s, &mut last_emit, &mut last_label);
-                                } else {
-                                    chunk.clear();
-                                }
-                            }
-                        } else {
-                            chunk.push(b);
-                        }
-                    }
-                }
-                // Flush any remainder without terminator
-                if !chunk.is_empty() {
-                    if let Ok(s) = String::from_utf8(chunk) {
-                        emit_label(&s, &mut last_emit, &mut last_label);
-                    }
-                }
+                    false
+                });
             }
             stop.store(true, Ordering::Relaxed);
             let _ = poll_handle.join();
@@ -281,22 +251,14 @@ impl SevenZipBackend {
             let stderr_handle = std::thread::spawn({
                 let mut stderr = child.stderr.take();
                 move || {
-                    if let Some(mut err) = stderr.take() {
-                        let mut buf = vec![0u8; 8192];
-                        use std::io::Read;
-                        while let Ok(n) = err.read(&mut buf) {
-                            if n == 0 { break; }
-                        }
+                    if let Some(err) = stderr.take() {
+                        crate::core::util::drain_reader(err);
                     }
                 }
             });
             // drain stdout if present
-            if let Some(mut out) = child.stdout.take() {
-                let mut buf = vec![0u8; 8192];
-                use std::io::Read;
-                while let Ok(n) = out.read(&mut buf) {
-                    if n == 0 { break; }
-                }
+            if let Some(out) = child.stdout.take() {
+                crate::core::util::drain_reader(out);
             }
             let status = child.wait().map_err(ArkxError::Io)?;
             let _ = stderr_handle.join();
@@ -400,19 +362,20 @@ impl SevenZipBackend {
         let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(format!("spawn 7z: {}", e)))?;
 
         let sizes = crate::core::util::input_file_sizes(sources);
-        let total: u64 = crate::core::util::total_input_size(sources);
+        // Total = the absolute-keyed entries of the map already walked above.
+        let total: u64 = sizes
+            .iter()
+            .filter(|(k, _)| std::path::Path::new(k.as_str()).is_absolute())
+            .map(|(_, v)| *v)
+            .sum();
         cb(ProgressInfo::new("Preparing…".to_string(), 0, total));
 
         // Drain stderr on a separate thread to avoid pipe deadlock (64KB).
         let stderr_handle = std::thread::spawn({
             let mut stderr = child.stderr.take();
             move || {
-                if let Some(mut err) = stderr.take() {
-                    let mut buf = vec![0u8; 8192];
-                    use std::io::Read;
-                    while let Ok(n) = err.read(&mut buf) {
-                        if n == 0 { break; }
-                    }
+                if let Some(err) = stderr.take() {
+                    crate::core::util::drain_reader(err);
                 }
             }
         });
@@ -453,50 +416,20 @@ impl SevenZipBackend {
         });
 
         if let Some(stdout) = child.stdout.take() {
-            use std::io::Read;
-            let mut reader = stdout;
-            let mut buf = vec![0u8; 8192];
-            let mut chunk = Vec::new();
-            // Returns true when the caller should abort the read loop.
-            let feed = |line: &str| {
-                if self.cancelled() {
-                    return true;
-                }
-                if let (Ok(mut t), Ok(g)) = (tracker.lock(), cb_shared.lock()) {
-                    t.feed(line, &*g);
-                }
-                false
-            };
-            'read: loop {
-                if self.cancelled() {
-                    cancelled = true;
-                    break 'read;
-                }
-                let n = reader.read(&mut buf).unwrap_or(0);
-                if n == 0 { break; }
-                for &b in &buf[..n] {
-                    if b == b'\r' || b == b'\n' {
-                        if !chunk.is_empty() {
-                            if let Ok(s) = String::from_utf8(std::mem::take(&mut chunk)) {
-                                if feed(&s) {
-                                    cancelled = true;
-                                    break 'read;
-                                }
-                            } else {
-                                chunk.clear();
-                            }
-                        }
-                    } else {
-                        chunk.push(b);
-                    }
-                }
-            }
-            if !cancelled && !chunk.is_empty() {
-                if let Ok(s) = String::from_utf8(chunk) {
-                    if feed(&s) {
+            if self.cancelled() {
+                cancelled = true;
+            } else {
+                // Returns true when the caller should abort the read loop.
+                crate::core::util::read_lines_until(stdout, |line| {
+                    if self.cancelled() {
                         cancelled = true;
+                        return true;
                     }
-                }
+                    if let (Ok(mut t), Ok(g)) = (tracker.lock(), cb_shared.lock()) {
+                        t.feed(line, &*g);
+                    }
+                    false
+                });
             }
         }
         io_stop.store(true, Ordering::Relaxed);
@@ -742,30 +675,6 @@ fn label_from_7z_line(line: &str) -> String {
     s.strip_prefix("Extracting")
         .map(|r| r.trim().to_string())
         .unwrap_or_else(|| s.to_string())
-}
-
-fn dir_size(path: &Path) -> u64 {
-    // Recursive file-size sum under path (used with a pre-spawn baseline:
-    // done = dir_size(dest) - baseline, so an archive already in dest cancels out).
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.is_file() {
-            return meta.len();
-        }
-    }
-    let mut total = 0u64;
-    if let Ok(walk) = std::fs::read_dir(path) {
-        for entry in walk.flatten() {
-            let p = entry.path();
-            if let Ok(m) = entry.metadata() {
-                if m.is_file() {
-                    total = total.saturating_add(m.len());
-                } else if m.is_dir() {
-                    total = total.saturating_add(dir_size(&p));
-                }
-            }
-        }
-    }
-    total
 }
 
 fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {

@@ -7,6 +7,7 @@
 use crate::core::archive::{ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressInfo};
 use crate::core::detector::ArchiveFormat;
 use crate::core::error::{ArkxError, Result};
+use crate::core::util::dir_size;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -255,21 +256,11 @@ impl BsdtarBackend {
             let mut out = child.stdout.take();
             let mut err = child.stderr.take();
             move || {
-                use std::io::Read;
-                let mut buf = vec![0u8; 8192];
-                if let Some(ref mut o) = out {
-                    while let Ok(n) = o.read(&mut buf) {
-                        if n == 0 {
-                            break;
-                        }
-                    }
+                if let Some(o) = out.take() {
+                    crate::core::util::drain_reader(o);
                 }
-                if let Some(ref mut e) = err {
-                    while let Ok(n) = e.read(&mut buf) {
-                        if n == 0 {
-                            break;
-                        }
-                    }
+                if let Some(e) = err.take() {
+                    crate::core::util::drain_reader(e);
                 }
             }
         });
@@ -464,28 +455,6 @@ fn parse_mode(perms: &str) -> Option<u32> {
         + bit(b[4], 0o40) + bit(b[5], 0o20) + bit(b[6], 0o10)
         + bit(b[7], 0o4) + bit(b[8], 0o2) + bit(b[9], 0o1);
     Some(mode)
-}
-
-fn dir_size(path: &Path) -> u64 {
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.is_file() {
-            return meta.len();
-        }
-    }
-    let mut total = 0u64;
-    if let Ok(walk) = std::fs::read_dir(path) {
-        for entry in walk.flatten() {
-            let p = entry.path();
-            if let Ok(m) = entry.metadata() {
-                if m.is_file() {
-                    total = total.saturating_add(m.len());
-                } else if m.is_dir() {
-                    total = total.saturating_add(dir_size(&p));
-                }
-            }
-        }
-    }
-    total
 }
 
 #[cfg(test)]

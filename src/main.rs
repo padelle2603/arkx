@@ -126,7 +126,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
             let path = PathBuf::from(&args[2]);
-            let info = backend.detect_and_list(&path).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            let info = backend.detect_and_list(&path)?;
             println!("Archive: {} ({})", info.path, info.format);
             println!("Files: {}  Folders: {}  Total: {} -> {}",
                 info.num_files, info.num_dirs,
@@ -208,7 +208,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     }
                     use std::io::Write;
                     let _ = std::io::stdout().flush();
-                }))).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+                })))?;
                 println!("\nCompleted in {:.2}s", start.elapsed().as_secs_f32());
             }
         }
@@ -228,6 +228,11 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             let mut threads: Option<usize> = None;
             let mut i = 3;
             while i < args.len() {
+                let consumed = parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+                if consumed > 0 {
+                    i += consumed;
+                    continue;
+                }
                 match args[i].as_str() {
                     "-l" | "--level" => {
                         if let Some(v) = args.get(i+1) {
@@ -235,25 +240,6 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                             i += 2;
                             continue;
                         }
-                    }
-                    "--threads" => {
-                        if let Some(v) = args.get(i+1) {
-                            threads = crate::core::util::parse_threads_value(v);
-                            i += 2;
-                            continue;
-                        }
-                    }
-                    "-p" | "--password" => {
-                        if let Some(v) = args.get(i+1) {
-                            password = Some(v.clone());
-                            i += 2;
-                            continue;
-                        }
-                    }
-                    s if s.starts_with("--threads=") => {
-                        threads = crate::core::util::parse_threads_value(s.trim_start_matches("--threads="));
-                        i += 1;
-                        continue;
                     }
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
@@ -277,7 +263,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 print!("\r{:>7} {}", crate::core::util::format_percent(p.percent, p.current, p.total), p.file);
                 use std::io::Write;
                 let _ = std::io::stdout().flush();
-            }))).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+            })))?;
             println!("\nCreated in {:.2}s ({})", start.elapsed().as_secs_f32(), humansize::format_size(std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0), humansize::BINARY));
         }
         _ => {
@@ -291,6 +277,32 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
 
 type ExtractArgs = (Vec<PathBuf>, Option<PathBuf>, bool, bool, Option<String>, Option<usize>);
 
+/// Handle the two flags shared by every command (`-p/--password`, `--threads`),
+/// accepting both `--flag value` and `--flag=value` forms. Returns the number of
+/// tokens consumed (0 = not a common flag, 1 = `--flag=value`, 2 = `--flag value`).
+fn parse_common_flags(
+    tok: &str,
+    next: Option<&String>,
+    password: &mut Option<String>,
+    threads: &mut Option<usize>,
+) -> usize {
+    if tok == "-p" || tok == "--password" {
+        if let Some(v) = next {
+            *password = Some(v.clone());
+        }
+        return 2;
+    }
+    if let Some(v) = tok.strip_prefix("--threads=") {
+        *threads = crate::core::util::parse_threads_value(v);
+        return 1;
+    }
+    if tok == "--threads" {
+        *threads = next.and_then(|v| crate::core::util::parse_threads_value(v));
+        return 2;
+    }
+    0
+}
+
 fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
     let mut archives = Vec::new();
     let mut dest_arg: Option<PathBuf> = None;
@@ -300,20 +312,14 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
     let mut threads: Option<usize> = None;
     let mut i = 2;
     while i < args.len() {
+        let consumed = parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+        if consumed > 0 {
+            i += consumed;
+            continue;
+        }
         match args[i].as_str() {
             "--here" => here = true,
             "--dialog" | "--ask-dest" => dialog = true,
-            "--threads" => {
-                threads = args.get(i + 1).and_then(|v| crate::core::util::parse_threads_value(v));
-                i += 1;
-            }
-            "-p" | "--password" => {
-                password = args.get(i + 1).cloned();
-                i += 1;
-            }
-            s if s.starts_with("--threads=") => {
-                threads = crate::core::util::parse_threads_value(s.trim_start_matches("--threads="));
-            }
             s if s.starts_with('-') && archives.is_empty() && s != "-" => {
                 // Unknown flag before archives: clear error
                 // (after archives, a file starting with - is almost never intended)
@@ -364,17 +370,16 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
     let mut sources = Vec::new();
     let mut i = 2;
     while i < args.len() {
+        let consumed = parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+        if consumed > 0 {
+            i += consumed;
+            continue;
+        }
         match args[i].as_str() {
             "--here" => here = true,
             "--dialog" => dialog = true,
             "--progress" | "--gui" => progress = true,
             "--no-progress" | "--text" => no_progress = true,
-            "--threads" => {
-                if let Some(v) = args.get(i + 1) {
-                    threads = crate::core::util::parse_threads_value(v);
-                    i += 1;
-                }
-            }
             "-f" | "--format" => {
                 if let Some(v) = args.get(i + 1) {
                     format = v.clone();
@@ -393,17 +398,8 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
                     i += 1;
                 }
             }
-            "-p" | "--password" => {
-                if let Some(v) = args.get(i + 1) {
-                    password = Some(v.clone());
-                    i += 1;
-                }
-            }
             s if s.starts_with("--format=") => {
                 format = s.trim_start_matches("--format=").to_string();
-            }
-            s if s.starts_with("--threads=") => {
-                threads = crate::core::util::parse_threads_value(s.trim_start_matches("--threads="));
             }
             s if s.starts_with("--to=") => {
                 to = Some(crate::core::fm::decode_input_arg(s.trim_start_matches("--to=")));
@@ -473,7 +469,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
         print!("\r{:>7} {}", crate::core::util::format_percent(p.percent, p.current, p.total), p.file);
         use std::io::Write;
         let _ = std::io::stdout().flush();
-    }))).map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    })))?;
     let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     println!("\nCreated in {:.2}s ({})", start.elapsed().as_secs_f32(), humansize::format_size(size, humansize::BINARY));
     crate::core::fm::notify_created(&dest);
@@ -498,4 +494,44 @@ fn ensure_archive_extension(dest: PathBuf, format: &str) -> PathBuf {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max { s.to_string() } else { format!("{}...", &s[..max-3]) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_common_flags;
+
+    fn default_pass() -> (Option<String>, Option<usize>) {
+        (None, None)
+    }
+
+    #[test]
+    fn common_flags_take_two_tokens() {
+        let (mut pw, mut th) = default_pass();
+        let n = parse_common_flags("--password", Some(&"s3cr3t".to_string()), &mut pw, &mut th);
+        assert_eq!(n, 2);
+        assert_eq!(pw.as_deref(), Some("s3cr3t"));
+
+        let (mut pw2, mut th2) = default_pass();
+        let n2 = parse_common_flags("--threads", Some(&"8".to_string()), &mut pw2, &mut th2);
+        assert_eq!(n2, 2);
+        assert_eq!(th2, Some(8));
+    }
+
+    #[test]
+    fn common_flags_eq_form() {
+        let (mut pw, mut th) = default_pass();
+        let n = parse_common_flags("-p", Some(&"x".to_string()), &mut pw, &mut th);
+        assert_eq!(n, 2);
+        let n2 = parse_common_flags("--threads=4", None, &mut pw, &mut th);
+        assert_eq!(n2, 1);
+        assert_eq!(th, Some(4));
+    }
+
+    #[test]
+    fn non_common_flag_unhandled() {
+        let (mut pw, mut th) = default_pass();
+        let n = parse_common_flags("--here", None, &mut pw, &mut th);
+        assert_eq!(n, 0);
+        assert!(pw.is_none() && th.is_none());
+    }
 }

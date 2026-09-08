@@ -7,6 +7,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use crate::core::archive::ProgressInfo;
+use crate::core::util::truncate_middle;
 
 /// Separate progress window: live bar during the job, permanent outcome
 /// afterwards. The user dismisses it with Close, Esc or the window X.
@@ -382,17 +383,6 @@ fn format_duration(secs: f64) -> String {
     } else {
         format!("~{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
-}
-
-fn truncate_middle(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let half = (max - 3) / 2;
-    let chars: Vec<char> = s.chars().collect();
-    let start: String = chars[..half].iter().collect();
-    let end: String = chars[chars.len() - half..].iter().collect();
-    format!("{}...{}", start, end)
 }
 
 #[cfg(test)]

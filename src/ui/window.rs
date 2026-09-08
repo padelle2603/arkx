@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, Duration};
 
 use crate::core::paths;
+use crate::core::util::truncate_middle;
 use crate::ui::browser::{
     AppState, create_empty_state, create_table_header, filter_list, get_all_descendants,
-    get_children, navigate_up, populate_current_view, truncate_middle, update_breadcrumb,
+    get_children, navigate_up, populate_current_view, update_breadcrumb,
 };
 use crate::ui::dialogs;
 use crate::worker::{WorkerPool, JobKind, WorkerEvent, JobResult};

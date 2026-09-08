@@ -208,14 +208,6 @@ pub(crate) fn navigate_up(current_path: &str) -> String {
     }
 }
 
-pub(crate) fn truncate_middle(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        return s.to_string();
-    }
-    let half = (max - 3) / 2;
-    format!("{}...{}", &s[..half], &s[s.len() - half..])
-}
-
 // ---------------------------------------------------------------------------
 // Widgets
 // ---------------------------------------------------------------------------

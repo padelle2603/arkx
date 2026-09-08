@@ -3,6 +3,8 @@
 //! Nothing is hardcoded for a specific machine: everything scales on CPU and RAM
 //! detected at runtime, with explicit override (`--threads` / `ARKX_THREADS`).
 
+use std::io::Read;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Global override (0 = auto). Set by `--threads`, read by backends.
@@ -253,9 +255,132 @@ fn input_sizes_walk(
     }
 }
 
+/// Ellipsize a string in the middle so the tail stays visible (e.g. long
+/// archive paths in the status bar). Operates on chars so it never splits a
+/// UTF-8 codepoint.
+pub fn truncate_middle(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let half = (max.saturating_sub(3)) / 2;
+    let chars: Vec<char> = s.chars().collect();
+    let start: String = chars[..half].iter().collect();
+    let end: String = chars[chars.len() - half..].iter().collect();
+    format!("{}...{}", start, end)
+}
+
+/// Recursive file-byte sum under `path` (a file returns its own size).
+/// Best-effort: unreadable entries are skipped rather than failing.
+pub fn dir_size(path: &Path) -> u64 {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.is_file() {
+            return meta.len();
+        }
+    }
+    let mut total = 0u64;
+    if let Ok(walk) = std::fs::read_dir(path) {
+        for entry in walk.flatten() {
+            let p = entry.path();
+            if let Ok(m) = entry.metadata() {
+                if m.is_file() {
+                    total = total.saturating_add(m.len());
+                } else if m.is_dir() {
+                    total = total.saturating_add(dir_size(&p));
+                }
+            }
+        }
+    }
+    total
+}
+
+/// Read `r` to EOF, discarding everything (drain a child pipe to avoid a
+/// 64KB deadlock when the parent never reads).
+pub fn drain_reader(mut r: impl Read) {
+    let mut buf = vec![0u8; 8192];
+    while let Ok(n) = r.read(&mut buf) {
+        if n == 0 {
+            break;
+        }
+    }
+}
+
+/// Read `r` streaming, splitting on `\r`/`\n`, invoking `on_line(&str)` per
+/// complete line (UTF-8-sensitive: a partial codepoint is dropped). Return
+/// `true` from `on_line` to stop early (used for cancellation).
+/// `reader` is consumed; a trailing unterminated line is still delivered.
+pub fn read_lines_until(mut reader: impl Read, mut on_line: impl FnMut(&str) -> bool) {
+    let mut buf = vec![0u8; 8192];
+    let mut chunk: Vec<u8> = Vec::new();
+    loop {
+        let n = reader.read(&mut buf).unwrap_or(0);
+        if n == 0 {
+            break;
+        }
+        for &b in &buf[..n] {
+            if b == b'\r' || b == b'\n' {
+                if !chunk.is_empty() {
+                    if let Ok(s) = String::from_utf8(std::mem::take(&mut chunk)) {
+                        if on_line(&s) {
+                            return;
+                        }
+                    } else {
+                        chunk.clear();
+                    }
+                }
+            } else {
+                chunk.push(b);
+            }
+        }
+    }
+    if !chunk.is_empty() {
+        if let Ok(s) = String::from_utf8(chunk) {
+            on_line(&s);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncate_middle_keeps_tail() {
+        assert_eq!(truncate_middle("short", 10), "short");
+        assert_eq!(truncate_middle("abcdefghijklmnop", 10), "abc...nop");
+        // Multi-byte chars never split.
+        assert_eq!(truncate_middle("àààààbcdefghij", 10), "ààà...hij");
+    }
+
+    #[test]
+    fn dir_size_sums_recursively() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), vec![1u8; 10]).unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("b"), vec![1u8; 20]).unwrap();
+        assert_eq!(dir_size(dir.path()), 30);
+        assert_eq!(dir_size(&dir.path().join("a")), 10);
+    }
+
+    #[test]
+    fn read_lines_splits_on_cr_and_lf() {
+        let mut got: Vec<String> = Vec::new();
+        read_lines_until(&b"one\rtwo\nthree\r\nfour"[..], |l| {
+            got.push(l.to_string());
+            false
+        });
+        assert_eq!(got, vec!["one", "two", "three", "four"]);
+    }
+
+    #[test]
+    fn read_lines_early_stop() {
+        let mut got: Vec<String> = Vec::new();
+        read_lines_until(&b"a\nb\nc"[..], |l| {
+            got.push(l.to_string());
+            l == "b"
+        });
+        assert_eq!(got, vec!["a", "b"]);
+    }
 
     #[test]
     fn clamp_prefers_request_capped_to_cpus() {
