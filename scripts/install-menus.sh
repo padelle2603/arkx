@@ -9,8 +9,8 @@
 # Exec/TryExec/Icon rewritten to the real path.
 #
 # Usage:
-#   ./appimage/install-menus.sh [--appimage PATH] [--force] [--no-icon]
-#   ./appimage/install-menus.sh --uninstall
+#   ./scripts/install-menus.sh [--appimage PATH] [--force] [--no-icon]
+#   ./scripts/install-menus.sh --uninstall
 set -euo pipefail
 
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
@@ -121,6 +121,11 @@ if ! printf '%s\n' "$HELP_OUT" | grep -q -- "--progress"; then
     echo "Run 'upkeep update arkx' first to fetch a release with file-manager support." >&2
     [ "$FORCE" -eq 1 ] || exit 1
     echo "(--force: installing anyway)"
+fi
+HELP_OUT_X="$(timeout 15 "$APPIMAGE" extract --help 2>&1 || true)"
+if ! printf '%s\n' "$HELP_OUT_X" | grep -q -- "--progress"; then
+    echo "Warning: this AppImage does not support 'extract --progress' (progress window for extraction)." >&2
+    echo "Run 'upkeep update arkx' first to fetch a release with extraction progress support." >&2
 fi
 
 # 3. Templates: from the AppImage itself, fallback to the repo checkout.

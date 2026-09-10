@@ -24,7 +24,7 @@ arkx --help                      # everything else
 ## Dolphin integration (replaces Ark's Compress menu)
 
 Uninstalling Ark removes its right-click **Compress** entry (it was an Ark
-plugin, not a Dolphin feature). `./install.sh` restores it with Arkx:
+plugin, not a Dolphin feature). `./scripts/install.sh` restores it with Arkx:
 
 * Right-click folder/file → **Compress** → Compress to zip... / tar.gz... / 7zip...
 * Right-click archive → **Extract** → Extract here / Extract to...
@@ -43,8 +43,8 @@ Dolphin can't see inside the AppImage — register the menus user-locally:
 
 ```bash
 upkeep update arkx                       # needs a release with --progress support
-./appimage/install-menus.sh              # reads the path from upkeep's .desktop, no sudo
-./appimage/install-menus.sh --uninstall  # remove them again
+./scripts/install-menus.sh               # reads the path from upkeep's .desktop, no sudo
+./scripts/install-menus.sh --uninstall   # remove them again
 ```
 
 The script points the menus at the upkeep AppImage path (stable across
@@ -69,8 +69,7 @@ cargo build --release
 ./target/release/arkx
 ```
 
-Tests: `cargo test` · Lint: `cargo clippy` · Install: `./install.sh`
-Bench (any machine): `./bench.sh` — adaptive threads/levels compared on a synthetic corpus.
+Tests: `cargo test` · Lint: `cargo clippy` · Install: `./scripts/install.sh` · AppImage build: `./scripts/build-appimage.sh`
 
 ## Privacy & Legal
 

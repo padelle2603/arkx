@@ -16,8 +16,7 @@
   names), keepalive, 7z status lines filtered by filename;
   percentages with adaptive decimals (`0.42%` below 1%, locale decimal
   separator, never 100% early); disk-space preflight with clear error.
-- Removed unused dependencies (`tokio`, `futures`, `memmap2`, `bytes`);
-  new reproducible `./bench.sh` on any machine.
+- Removed unused dependencies (`tokio`, `futures`, `memmap2`, `bytes`).
 
 ## v1.1.1 — Dolphin integration: Compress/Extract menus + progress window
 
@@ -36,7 +35,7 @@ with Ark parity and the in-app progress window.
   error, Cancel kills the backend and deletes partials
 - Real 7z creation progress (previously silent 0→100%); cancellable creates
   across native and 7z backends
-- AppImage-only setup: `./appimage/install-menus.sh` registers the menus
+- AppImage-only setup: `./scripts/install-menus.sh` registers the menus
   user-locally for upkeep-managed AppImages (no sudo); AppImage bundles the
   ServiceMenus as reference
 
