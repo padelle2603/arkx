@@ -130,3 +130,9 @@ impl WorkerPool {
 impl Default for WorkerPool {
     fn default() -> Self { Self::new() }
 }
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        self.cancel_flag.store(true, Ordering::Relaxed);
+    }
+}

@@ -132,7 +132,7 @@ impl SevenZipBackend {
     ) -> Result<()> {
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
 
-        let threads = effective_threads();
+        let threads = effective_threads().min(32);
         let mut cmd = Command::new(&self.bin);
         cmd.arg("x")
             .arg(format!("-mmt={}", threads))
@@ -197,9 +197,23 @@ impl SevenZipBackend {
 
             // Drain stderr on a separate thread to avoid pipe deadlock (64KB)
             let stderr = child.stderr.take();
+            let stderr_arc = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stderr_clone = stderr_arc.clone();
             let stderr_handle = std::thread::spawn(move || {
                 if let Some(err) = stderr {
-                    crate::core::util::drain_reader(err);
+                    let mut reader = err;
+                    let mut buf = vec![0u8; 8192];
+                    let mut collected = Vec::new();
+                    loop {
+                        match std::io::Read::read(&mut reader, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => collected.extend_from_slice(&buf[..n]),
+                            Err(_) => break,
+                        }
+                    }
+                    if let Ok(mut guard) = stderr_clone.lock() {
+                        *guard = collected;
+                    }
                 }
             });
 
@@ -233,7 +247,14 @@ impl SevenZipBackend {
             // 7z exit codes: 0=OK, 1=Warning (e.g. Headers Error on solid RAR),
             // 2=Fatal/WrongPassword
             if code == 2 {
-                return Err(ArkxError::WrongPassword);
+                let stderr_text = match stderr_arc.lock() {
+                    Ok(data) => String::from_utf8_lossy(&data).to_string(),
+                    Err(_) => String::new(),
+                };
+                if stderr_text.contains("Wrong password") || stderr_text.contains("Enter password") || stderr_text.contains("Can not open encrypted") {
+                    return Err(ArkxError::WrongPassword);
+                }
+                return Err(ArkxError::Backend(format!("7z extract failed (code 2): {}", stderr_text.trim())));
             }
             if !status.success() && code != 1 {
                 return Err(ArkxError::Backend(format!("7z extract failed code {:?}", status.code())));
@@ -248,11 +269,23 @@ impl SevenZipBackend {
             }
         } else {
             // Without progress, still drain output to avoid deadlock then wait
-            let stderr_handle = std::thread::spawn({
-                let mut stderr = child.stderr.take();
-                move || {
-                    if let Some(err) = stderr.take() {
-                        crate::core::util::drain_reader(err);
+            let stderr = child.stderr.take();
+            let stderr_data = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let stderr_clone = stderr_data.clone();
+            let stderr_handle = std::thread::spawn(move || {
+                if let Some(err) = stderr {
+                    let mut reader = err;
+                    let mut buf = vec![0u8; 8192];
+                    let mut collected = Vec::new();
+                    loop {
+                        match std::io::Read::read(&mut reader, &mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => collected.extend_from_slice(&buf[..n]),
+                            Err(_) => break,
+                        }
+                    }
+                    if let Ok(mut guard) = stderr_clone.lock() {
+                        *guard = collected;
                     }
                 }
             });
@@ -265,7 +298,14 @@ impl SevenZipBackend {
             let code = status.code().unwrap_or(-1);
             if !status.success() && code != 1 {
                 if code == 2 {
-                    return Err(ArkxError::WrongPassword);
+                    let stderr_text = match stderr_data.lock() {
+                        Ok(data) => String::from_utf8_lossy(&data).to_string(),
+                        Err(_) => String::new(),
+                    };
+                    if stderr_text.contains("Wrong password") || stderr_text.contains("Enter password") || stderr_text.contains("Can not open encrypted") {
+                        return Err(ArkxError::WrongPassword);
+                    }
+                    return Err(ArkxError::Backend(format!("7z extract failed (code 2): {}", stderr_text.trim())));
                 }
                 return Err(ArkxError::Backend(format!("Extraction failed (code {})", code)));
             }
@@ -306,7 +346,7 @@ impl SevenZipBackend {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(ArkxError::Io)?;
         }
-        let threads = effective_threads();
+        let threads = effective_threads().min(32);
         let fmt = crate::core::detector::detect_format(dest);
         let mut cmd = Command::new(&self.bin);
         cmd.arg("a")

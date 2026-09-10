@@ -1,8 +1,9 @@
-//! Standalone compression-progress app for file-manager launches.
+//! Standalone progress app for file-manager launches.
 //!
-//! `arkx compress --progress …` (Dolphin ServiceMenu) shows the same
-//! `ProgressWindow` as the main app: live 0%→100% bar with speed, ETA and
-//! Details pane, plus Cancel. Differences from the in-app flow:
+//! `arkx compress --progress …` and `arkx extract --progress …`
+//! (Dolphin ServiceMenu) show the same `ProgressWindow` as the main app:
+//! live 0%→100% bar with speed, ETA and Details pane, plus Cancel.
+//! Differences from the in-app flow:
 //!
 //! * no parent window — the progress window is top-level;
 //! * on success the window **auto-closes** and a desktop notification +
@@ -56,20 +57,31 @@ pub fn run_compress_with_progress(
     Ok(())
 }
 
+/// Run the extraction showing the in-app progress window. Blocks until the
+/// window is dismissed (or auto-closed on success). Never panics on headless
+/// systems — callers must check [`has_display`] first.
+pub fn run_extract_with_progress(
+    archive: PathBuf,
+    dest: PathBuf,
+    password: Option<String>,
+) -> anyhow::Result<()> {
+    let app = adw::Application::builder()
+        .application_id("io.github.padelle.arkx.fm-progress")
+        .build();
+
+    app.connect_activate(move |app| {
+        activate_extract(app, archive.clone(), dest.clone(), password.clone());
+    });
+    app.run_with_args::<&str>(&[]);
+    Ok(())
+}
+
 fn short_name(dest: &std::path::Path) -> String {
     let name = dest
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "archivio".to_string());
-    if name.chars().count() > 50 {
-        let chars: Vec<char> = name.chars().collect();
-        let half = (50 - 3) / 2;
-        let start: String = chars[..half].iter().collect();
-        let end: String = chars[chars.len() - half..].iter().collect();
-        format!("{}...{}", start, end)
-    } else {
-        name
-    }
+    crate::core::util::truncate_middle(&name, 50)
 }
 
 fn activate(
@@ -161,6 +173,112 @@ fn activate(
                                 app_c.quit();
                             } else {
                                 // Stay on screen: the user dismisses with Close.
+                                pw_c.borrow().set_error(&msg);
+                                let app_q = app_c.clone();
+                                pw_c.borrow().finish_dismiss(move || {
+                                    app_q.quit();
+                                });
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        if done {
+            gtk::glib::ControlFlow::Break
+        } else {
+            gtk::glib::ControlFlow::Continue
+        }
+    });
+}
+
+fn activate_extract(
+    app: &adw::Application,
+    archive: PathBuf,
+    dest: PathBuf,
+    password: Option<String>,
+) {
+    let pw = ProgressWindow::new_standalone("Extraction in progress", &short_name(&archive));
+    pw.borrow().reset();
+    pw.borrow().set_operation("Extracting");
+    pw.borrow().register_with_app(app);
+
+    let manager = Arc::new(BackendManager::new());
+    let (tx, rx) = mpsc::channel::<FmEvent>();
+
+    // Worker thread: identical backend call as the headless CLI path.
+    {
+        let tx_prog = tx.clone();
+        let manager = manager.clone();
+        let (archive, dest, password) = (archive.clone(), dest.clone(), password.clone());
+        std::thread::spawn(move || {
+            let res = manager.extract(
+                &archive,
+                &dest,
+                None,
+                password.as_deref(),
+                Some(Box::new(move |info| {
+                    let _ = tx_prog.send(FmEvent::Progress(info));
+                })),
+            );
+            let _ = tx.send(FmEvent::Done(res.map_err(|e| e.to_string())));
+        });
+    }
+
+    // Cancel path: abort the backend (kills 7z), then close quietly.
+    let settled = Rc::new(Cell::new(false));
+    {
+        let pw_c = pw.clone();
+        let settled_c = settled.clone();
+        let manager_c = manager.clone();
+        pw.borrow().on_cancel(move || {
+            if settled_c.get() {
+                return;
+            }
+            settled_c.set(true);
+            manager_c.cancel_all();
+            pw_c.borrow().close();
+        });
+    }
+
+    // Poll the event channel and update the progress window.
+    let app_c = app.clone();
+    let settled_c = settled.clone();
+    let pw_c = pw.clone();
+    let dest_c = dest.clone();
+    gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
+        let mut done = false;
+        while let Ok(evt) = rx.try_recv() {
+            match evt {
+                FmEvent::Progress(info) => {
+                    if info.total == 0 {
+                        pw_c.borrow().pulse(&info.file);
+                    } else {
+                        pw_c.borrow().set_progress(&info);
+                    }
+                }
+                FmEvent::Done(res) => {
+                    done = true;
+                    if settled_c.get() {
+                        break;
+                    }
+                    settled_c.set(true);
+                    match res {
+                        Ok(()) => {
+                            // Auto-close + reveal dest folder + notify.
+                            crate::core::fm::reveal_in_file_manager(&dest_c);
+                            let _ = std::process::Command::new("notify-send")
+                                .args(["Arkx", &format!("Extracted to {}", dest_c.display()), "--icon=arkx"])
+                                .output();
+                            pw_c.borrow().close();
+                            app_c.quit();
+                        }
+                        Err(msg) => {
+                            if msg.contains("Cancelled") {
+                                pw_c.borrow().close();
+                                app_c.quit();
+                            } else {
                                 pw_c.borrow().set_error(&msg);
                                 let app_q = app_c.clone();
                                 pw_c.borrow().finish_dismiss(move || {

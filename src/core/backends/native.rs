@@ -585,6 +585,7 @@ impl NativeBackend {
         // As for zip: collect first, create dest after (anti self-inclusion).
         let dest_abs = absolutize(dest);
         let mut files: Vec<PathBuf> = Vec::new();
+        let mut skipped = 0u32;
         for src in sources {
             if src.is_dir() {
                 for entry in walkdir::WalkDir::new(src).min_depth(0).into_iter() {
@@ -594,8 +595,8 @@ impl NativeBackend {
                                 files.push(e.path().to_path_buf());
                             }
                         }
-                        Err(e) => {
-                            return Err(ArkxError::Backend(format!("cannot read {}: {}", src.display(), e)));
+                        Err(_) => {
+                            skipped += 1;
                         }
                     }
                 }
@@ -613,6 +614,9 @@ impl NativeBackend {
         }
         if files.is_empty() {
             return Err(ArkxError::Backend("nothing to archive (empty or unreadable sources)".into()));
+        }
+        if skipped > 0 {
+            eprintln!("[native] tar: skipped {} unreadable entries", skipped);
         }
 
         let file = File::create(dest).map_err(ArkxError::Io)?;
@@ -792,7 +796,20 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    Some(dest.join(norm))
+    let full = dest.join(&norm);
+    // Reject if any component along the path is a symlink that resolves
+    // outside dest (zip-slip via symlinks).
+    match std::fs::canonicalize(&full) {
+        Ok(canonical) => {
+            if canonical.starts_with(dest) {
+                Some(full)
+            } else {
+                None
+            }
+        }
+        // File doesn't exist yet — safe to create.
+        Err(_) => Some(full),
+    }
 }
 
 /// Absolutizes without touching the fs (dest may not exist yet).

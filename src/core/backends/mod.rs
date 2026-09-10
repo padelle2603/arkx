@@ -93,7 +93,13 @@ impl BackendManager {
         let big_zip = fmt == ArchiveFormat::Zip
             && std::fs::metadata(archive).map(|m| m.len() >= crate::core::util::big_archive_threshold_bytes()).unwrap_or(false);
         if big_zip {
-            return self.seven.extract(archive, dest, entries, password, progress);
+            match self.seven.extract(archive, dest, entries, password, progress) {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    eprintln!("[core] 7z extract failed for big zip, falling back to native: {}", e);
+                    return self.native.extract(archive, dest, entries, password, None);
+                }
+            }
         }
         // NOTE: progress callbacks are single-shot (Fn, not clonable):
         // only the backend that actually runs receives it; fallbacks

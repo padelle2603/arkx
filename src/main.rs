@@ -149,7 +149,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
         }
         "x" | "extract" => {
-            let (archives, dest_arg, here, dialog, password, threads) = parse_extract_args(&args)?;
+            let (archives, dest_arg, here, dialog, progress, password, threads) = parse_extract_args(&args)?;
             crate::core::util::set_thread_override(threads);
             if archives.is_empty() {
                 eprintln!("Usage: arkx x <archive> [dest] [--here] [--dialog] [-p password]");
@@ -195,6 +195,14 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     // From Dolphin always use --here (see ServiceMenu).
                     std::env::current_dir()?
                 };
+                // App-style progress window (Dolphin entry): auto-close when done
+                // + notification; without display fall back to text mode.
+                if progress {
+                    if crate::ui::fm_progress::has_display() {
+                        return crate::ui::fm_progress::run_extract_with_progress(archive.clone(), dest, password.clone());
+                    }
+                    eprintln!("(no display: using text progress)");
+                }
                 println!("Extracting {} -> {} ({} threads)...", archive.display(), dest.display(), crate::core::util::effective_threads());
                 let start = std::time::Instant::now();
                 backend.extract(archive, &dest, None, password.as_deref(), Some(Box::new(|p| {
@@ -239,6 +247,9 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                             level = v.parse().unwrap_or(6);
                             i += 2;
                             continue;
+                        } else {
+                            eprintln!("-l/--level requires a value (0-9)");
+                            std::process::exit(1);
                         }
                     }
                     s if s.starts_with('-') => {
@@ -275,7 +286,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-type ExtractArgs = (Vec<PathBuf>, Option<PathBuf>, bool, bool, Option<String>, Option<usize>);
+type ExtractArgs = (Vec<PathBuf>, Option<PathBuf>, bool, bool, bool, Option<String>, Option<usize>);
 
 /// Handle the two flags shared by every command (`-p/--password`, `--threads`),
 /// accepting both `--flag value` and `--flag=value` forms. Returns the number of
@@ -289,16 +300,22 @@ fn parse_common_flags(
     if tok == "-p" || tok == "--password" {
         if let Some(v) = next {
             *password = Some(v.clone());
+            return 2;
         }
-        return 2;
+        eprintln!("{} requires a value", tok);
+        std::process::exit(1);
     }
     if let Some(v) = tok.strip_prefix("--threads=") {
         *threads = crate::core::util::parse_threads_value(v);
         return 1;
     }
     if tok == "--threads" {
-        *threads = next.and_then(|v| crate::core::util::parse_threads_value(v));
-        return 2;
+        if let Some(v) = next {
+            *threads = crate::core::util::parse_threads_value(v);
+            return 2;
+        }
+        eprintln!("--threads requires a value");
+        std::process::exit(1);
     }
     0
 }
@@ -308,6 +325,7 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
     let mut dest_arg: Option<PathBuf> = None;
     let mut here = false;
     let mut dialog = false;
+    let mut progress = false;
     let mut password: Option<String> = None;
     let mut threads: Option<usize> = None;
     let mut i = 2;
@@ -320,6 +338,7 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
         match args[i].as_str() {
             "--here" => here = true,
             "--dialog" | "--ask-dest" => dialog = true,
+            "--progress" | "--gui" => progress = true,
             s if s.starts_with('-') && archives.is_empty() && s != "-" => {
                 // Unknown flag before archives: clear error
                 // (after archives, a file starting with - is almost never intended)
@@ -349,7 +368,7 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
         }
         i += 1;
     }
-    Ok((archives, dest_arg, here, dialog, password, threads))
+    Ok((archives, dest_arg, here, dialog, progress, password, threads))
 }
 
 /// `arkx compress` — Ark parity for Dolphin ServiceMenus.
@@ -384,18 +403,27 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
                 if let Some(v) = args.get(i + 1) {
                     format = v.clone();
                     i += 1;
+                } else {
+                    eprintln!("-f/--format requires a value (zip|tar.gz|7z)");
+                    std::process::exit(1);
                 }
             }
             "--to" => {
                 if let Some(v) = args.get(i + 1) {
                     to = Some(crate::core::fm::decode_input_arg(v));
                     i += 1;
+                } else {
+                    eprintln!("--to requires a destination path");
+                    std::process::exit(1);
                 }
             }
             "-l" | "--level" => {
-                if let Some(v) = args.get(i + 1) {
+                if let Some(v) = args.get(i+1) {
                     level = v.parse().unwrap_or(6).min(9);
                     i += 1;
+                } else {
+                    eprintln!("-l/--level requires a value (0-9)");
+                    std::process::exit(1);
                 }
             }
             s if s.starts_with("--format=") => {
@@ -493,7 +521,7 @@ fn ensure_archive_extension(dest: PathBuf, format: &str) -> PathBuf {
 }
 
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max { s.to_string() } else { format!("{}...", &s[..max-3]) }
+    crate::core::util::truncate_middle(s, max)
 }
 
 #[cfg(test)]

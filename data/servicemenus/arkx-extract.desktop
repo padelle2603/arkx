@@ -15,13 +15,13 @@ Icon=arkx
 Name=Extract here
 Name[it]=Estrai qui
 Icon=arkx
-Exec=arkx extract --here %F
+Exec=arkx extract --here --progress %F
 
 [Desktop Action extractTo]
 Name=Extract to...
 Name[it]=Estrai in...
 Icon=arkx
-Exec=arkx extract --dialog %F
+Exec=arkx extract --dialog --progress %F
 
 [Desktop Action openWithArkx]
 Name=Open with Arkx

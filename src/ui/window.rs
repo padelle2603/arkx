@@ -739,7 +739,6 @@ pub fn build_ui(app: &adw::Application) {
         while let Some(evt) = ui_poll.worker.borrow().try_recv() {
             events.push(evt);
         }
-        // Local aliases keep the match arms readable.
         let status_left = &ui_poll.status_left;
         for evt in events {
             match evt {
@@ -749,8 +748,6 @@ pub fn build_ui(app: &adw::Application) {
                     ui_poll.extract_all.set_sensitive(false);
                     ui_poll.extract_sel.set_sensitive(false);
                     status_left.set_text("Working…");
-                    // Open the window immediately at 0% for extractions (not List).
-                    // A previous outcome still on screen is closed first.
                     if kind == "extract" {
                         let stale = ui_poll.progress_window.borrow().as_ref().cloned();
                         if let Some(old) = stale {
@@ -880,6 +877,7 @@ pub fn build_ui(app: &adw::Application) {
                             // Show archive info + path (root breadcrumb carries the archive name)
                             ui_poll.info.set_text(&info.format);
                             ui_poll.info.set_visible(true);
+                            ui_poll.info.remove_css_class("badge-encrypted");
                             if info.has_encrypted {
                                 ui_poll.info.add_css_class("badge-encrypted");
                                 ui_poll.info.set_text(&format!("{} • encrypted", info.format));
