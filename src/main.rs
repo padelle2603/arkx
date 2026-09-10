@@ -1,6 +1,5 @@
-mod core;
-mod worker;
-mod ui;
+use arkx::core;
+use arkx::ui;
 
 use adw::prelude::*;
 use std::path::PathBuf;
