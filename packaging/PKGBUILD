@@ -1,6 +1,6 @@
 # Maintainer: padelle <padelle@github>
 pkgname=arkx
-pkgver=1.1.1
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="Fast multi-threaded Linux archive manager, PeaZip-inspired — ZIP, 7Z, RAR, TAR.GZ, ISO"
 arch=('x86_64')

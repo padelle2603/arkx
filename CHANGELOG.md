@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — adaptive performance + huge archives
+## v1.2.0 — adaptive performance + huge archives
 
 - **Adaptive threads**: `--threads N` (or `ARKX_THREADS=N`) on `a`/`c`/`x`;
   auto default from CPU/RAM (reserve for the system on small machines,
