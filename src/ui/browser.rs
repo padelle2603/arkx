@@ -3,8 +3,8 @@
 //! Pure navigation logic (`get_children`, `get_all_descendants`) lives next to
 //! the widgets that render it, keeping `window.rs` to shell + event loop.
 
-use gtk4 as gtk;
 use gtk::prelude::*;
+use gtk4 as gtk;
 use pango;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -247,7 +247,15 @@ pub(crate) fn update_breadcrumb(
         st.current_path = String::new();
         let f = st.filter_text.clone();
         drop(st);
-        update_breadcrumb(&bc_c, "", &info_c, state_c.clone(), list_c.clone(), sl_c.clone(), sr_c.clone());
+        update_breadcrumb(
+            &bc_c,
+            "",
+            &info_c,
+            state_c.clone(),
+            list_c.clone(),
+            sl_c.clone(),
+            sr_c.clone(),
+        );
         populate_current_view(&list_c, &info_c, "", &f);
         sl_c.set_text("Root");
     });
@@ -282,7 +290,15 @@ pub(crate) fn update_breadcrumb(
             st.current_path = target.clone();
             let f = st.filter_text.clone();
             drop(st);
-            update_breadcrumb(&bc_cc, &target, &info_cc, state_cc.clone(), list_cc.clone(), sl_cc.clone(), sr_cc.clone());
+            update_breadcrumb(
+                &bc_cc,
+                &target,
+                &info_cc,
+                state_cc.clone(),
+                list_cc.clone(),
+                sl_cc.clone(),
+                sr_cc.clone(),
+            );
             populate_current_view(&list_cc, &info_cc, &target, &f);
             sl_cc.set_text(&format!("Folder: /{}", target));
         });
@@ -299,7 +315,7 @@ pub(crate) fn create_table_header() -> gtk::Box {
     hdr.set_margin_end(12);
     hdr.add_css_class("table-header");
     hdr.add_css_class("hide-narrow"); // hidden on narrow; rows go vertical via CSS
-    // Responsive columns: flexible name, fixed others hidden on narrow.
+                                      // Responsive columns: flexible name, fixed others hidden on narrow.
     let name_lbl = gtk::Label::new(Some("NAME"));
     name_lbl.set_xalign(0.0);
     name_lbl.set_hexpand(true);
@@ -351,7 +367,9 @@ pub(crate) fn create_empty_state() -> gtk::Box {
     subtitle.add_css_class("dim-label");
     subtitle.set_wrap(true);
 
-    let hint = gtk::Label::new(Some("Drop a file here, press Ctrl+O or use the button below"));
+    let hint = gtk::Label::new(Some(
+        "Drop a file here, press Ctrl+O or use the button below",
+    ));
     hint.add_css_class("dim-label");
 
     bx.append(&icon);
@@ -362,10 +380,13 @@ pub(crate) fn create_empty_state() -> gtk::Box {
 }
 
 /// Fill the list with the current folder's children (max 5000 rows).
-pub(crate) fn populate_current_view(list_box: &gtk::ListBox, info: &ArchiveInfo, current_path: &str, filter: &str) {
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
+pub(crate) fn populate_current_view(
+    list_box: &gtk::ListBox,
+    info: &ArchiveInfo,
+    current_path: &str,
+    filter: &str,
+) {
+    list_box.remove_all();
 
     let filter_lower = filter.to_lowercase();
     let children = get_children(info, current_path);
@@ -393,7 +414,9 @@ pub(crate) fn populate_current_view(list_box: &gtk::ListBox, info: &ArchiveInfo,
         visible += 1;
     }
 
-    if visible == 0 || (visible == 1 && !current_path.is_empty() && list_box.first_child().is_some()) {
+    if visible == 0
+        || (visible == 1 && !current_path.is_empty() && list_box.first_child().is_some())
+    {
         // Only ".." and nothing else: show the filtered-empty message.
         if !filter.is_empty() {
             let lbl = gtk::Label::new(Some(&format!(
@@ -459,15 +482,30 @@ fn create_file_row(entry: &ArchiveEntry) -> gtk::ListBoxRow {
         "go-up-symbolic"
     } else if entry.is_dir {
         "folder-symbolic"
-    } else if entry.path.ends_with(".jpg") || entry.path.ends_with(".png") || entry.path.ends_with(".webp") || entry.path.ends_with(".gif") {
+    } else if entry.path.ends_with(".jpg")
+        || entry.path.ends_with(".png")
+        || entry.path.ends_with(".webp")
+        || entry.path.ends_with(".gif")
+    {
         "image-x-generic-symbolic"
-    } else if entry.path.ends_with(".mp4") || entry.path.ends_with(".mkv") || entry.path.ends_with(".webm") {
+    } else if entry.path.ends_with(".mp4")
+        || entry.path.ends_with(".mkv")
+        || entry.path.ends_with(".webm")
+    {
         "video-x-generic-symbolic"
-    } else if entry.path.ends_with(".mp3") || entry.path.ends_with(".flac") || entry.path.ends_with(".ogg") {
+    } else if entry.path.ends_with(".mp3")
+        || entry.path.ends_with(".flac")
+        || entry.path.ends_with(".ogg")
+    {
         "audio-x-generic-symbolic"
     } else if entry.path.ends_with(".pdf") {
         "application-pdf-symbolic"
-    } else if entry.path.ends_with(".zip") || entry.path.ends_with(".7z") || entry.path.ends_with(".rar") || entry.path.ends_with(".tar") || entry.path.ends_with(".gz") {
+    } else if entry.path.ends_with(".zip")
+        || entry.path.ends_with(".7z")
+        || entry.path.ends_with(".rar")
+        || entry.path.ends_with(".tar")
+        || entry.path.ends_with(".gz")
+    {
         "package-x-generic-symbolic"
     } else {
         "text-x-generic-symbolic"
@@ -486,7 +524,14 @@ fn create_file_row(entry: &ArchiveEntry) -> gtk::ListBoxRow {
     // Name (basename only, file-manager feel).
     let display_name = if entry.is_dir {
         // Dirs show only the last component.
-        entry.path.trim_end_matches('/').rsplit('/').next().unwrap_or(&entry.path).to_string() + "/"
+        entry
+            .path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(&entry.path)
+            .to_string()
+            + "/"
     } else {
         entry.file_name().to_string()
     };
@@ -516,7 +561,10 @@ fn create_file_row(entry: &ArchiveEntry) -> gtk::ListBoxRow {
     size_label.add_css_class("monospace");
 
     // Date.
-    let date_str = entry.modified.map(|dt| dt.format("%d/%m/%Y").to_string()).unwrap_or_else(|| "—".into());
+    let date_str = entry
+        .modified
+        .map(|dt| dt.format("%d/%m/%Y").to_string())
+        .unwrap_or_else(|| "—".into());
     let date_label = gtk::Label::new(Some(&date_str));
     date_label.set_xalign(0.5);
     date_label.set_width_request(100);
@@ -588,7 +636,12 @@ pub(crate) fn filter_list(list_box: &gtk::ListBox, filter: &str) {
                                 || lb_row
                                     .child()
                                     .as_ref()
-                                    .map(|c| c.tooltip_text().unwrap_or_default().to_lowercase().contains(&filter_lower))
+                                    .map(|c| {
+                                        c.tooltip_text()
+                                            .unwrap_or_default()
+                                            .to_lowercase()
+                                            .contains(&filter_lower)
+                                    })
                                     .unwrap_or(false)
                         })
                         .unwrap_or(true)
@@ -663,7 +716,9 @@ mod tests {
         ]);
         let children = get_children(&info, "sub1/");
         assert_eq!(children.len(), 2);
-        assert!(children.iter().any(|e| e.path == "sub1/file1.txt" && !e.is_dir));
+        assert!(children
+            .iter()
+            .any(|e| e.path == "sub1/file1.txt" && !e.is_dir));
         assert!(children.iter().any(|e| e.path == "sub1/sub2/" && e.is_dir));
     }
 

@@ -9,7 +9,9 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 {
         match args[1].as_str() {
-            "x" | "extract" | "l" | "list" | "a" | "create" | "c" | "compress" | "--help" | "-h" | "--version" | "-V" => return run_cli(args),
+            "x" | "extract" | "l" | "list" | "a" | "create" | "c" | "compress" | "u" | "add"
+            | "update" | "r" | "rm" | "d" | "delete" | "remove" | "--help" | "-h" | "--version"
+            | "-V" => return run_cli(args),
             _ => {
                 // An existing file argument goes to the GUI (handled by ui)
                 let p = std::path::Path::new(&args[1]);
@@ -47,7 +49,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn print_help() {
-    println!(r#"Arkx {} — fast multi-threaded archive manager
+    println!(
+        r#"Arkx {} — fast multi-threaded archive manager
 
 Usage:
   arkx [COMMAND] [OPTIONS]
@@ -62,6 +65,15 @@ Commands:
   a, create <dest> <file...>       Create archive (format from extension)
                [-l <0-9>]          Compression level (default 6)
                [-p <password>]     Password (AES256 for 7z/zip)
+
+  u, add <archive> <file...>       Add files to an existing archive (zip/7z/tar)
+               [--to <dir>]        Entry paths relative to <dir> (default: archive root)
+               [-p <password>]     Password for encrypted 7z/zip
+               [--threads <N>]
+
+  r, remove <archive> <entry...>   Delete entries from an archive (zip/7z/tar)
+               [-p <password>]     Password for encrypted 7z/zip
+               [--threads <N>]
 
   c, compress [--here] [--format <zip|tar.gz|7z>]
                [--to <dest>] [--dialog] [--progress] <file...>
@@ -87,6 +99,8 @@ Examples:
   arkx x archive.7z ~/Downloads
   arkx x archive.rar . -p secret
   arkx a archive.7z file1.txt folder/ -l 9 -p pwd
+  arkx add archive.zip backup.txt --to docs/     # add into docs/
+  arkx remove archive.zip docs/backup.txt        # delete an entry
   arkx compress --here --format=zip docs/        # docs.zip next to docs/
   arkx compress --dialog photos/                  # Compress to... (kdialog)
   arkx extract --here download.zip               # Extract here
@@ -95,7 +109,9 @@ Examples:
 Formats: ZIP, 7Z, RAR (extract only), TAR, TAR.GZ, TAR.BZ2, TAR.XZ, TAR.ZST, TAR.LZ4, TAR.LZMA, TAR.Z, TAR.LZIP, TAR.LZO, TAR.LRZIP, GZ, BZ2, XZ, ZST, LZ4, LZMA, COMPRESS, ISO, APPIMAGE, CAB, CPIO, XAR, AR, LHA...
 CPU: uses every available thread ({} on this machine) with -mmt=on, streaming, zero-copy.
 "#,
-        env!("CARGO_PKG_VERSION"), crate::core::util::effective_threads());
+        env!("CARGO_PKG_VERSION"),
+        crate::core::util::effective_threads()
+    );
 }
 
 fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
@@ -109,7 +125,11 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         return Ok(());
     }
     if args.len() >= 2 && matches!(args[1].as_str(), "--version" | "-V" | "version") {
-        println!("arkx {} (7zip 26.02, libarchive, rayon, gtk4 {})", env!("CARGO_PKG_VERSION"), crate::core::util::effective_threads());
+        println!(
+            "arkx {} (7zip 26.02, libarchive, rayon, gtk4 {})",
+            env!("CARGO_PKG_VERSION"),
+            crate::core::util::effective_threads()
+        );
         return Ok(());
     }
 
@@ -127,8 +147,10 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             let path = PathBuf::from(&args[2]);
             let info = backend.detect_and_list(&path)?;
             println!("Archive: {} ({})", info.path, info.format);
-            println!("Files: {}  Folders: {}  Total: {} -> {}",
-                info.num_files, info.num_dirs,
+            println!(
+                "Files: {}  Folders: {}  Total: {} -> {}",
+                info.num_files,
+                info.num_dirs,
                 humansize::format_size(info.total_size, humansize::BINARY),
                 humansize::format_size(info.total_packed, humansize::BINARY)
             );
@@ -138,17 +160,27 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             println!("{:<60} {:>12} {:>12} Method", "Name", "Size", "Packed");
             println!("{}", "-".repeat(100));
             for e in &info.entries {
-                println!("{:<60} {:>12} {:>12} {} {}",
+                println!(
+                    "{:<60} {:>12} {:>12} {} {}",
                     truncate(&e.path, 60),
-                    if e.is_dir { "-".into() } else { humansize::format_size(e.size, humansize::BINARY) },
-                    if e.is_dir { "-".into() } else { humansize::format_size(e.packed_size, humansize::BINARY) },
+                    if e.is_dir {
+                        "-".into()
+                    } else {
+                        humansize::format_size(e.size, humansize::BINARY)
+                    },
+                    if e.is_dir {
+                        "-".into()
+                    } else {
+                        humansize::format_size(e.packed_size, humansize::BINARY)
+                    },
                     e.method.as_deref().unwrap_or("-"),
                     if e.encrypted { "🔒" } else { "" }
                 );
             }
         }
         "x" | "extract" => {
-            let (archives, dest_arg, here, dialog, progress, password, threads) = parse_extract_args(&args)?;
+            let (archives, dest_arg, here, dialog, progress, password, threads) =
+                parse_extract_args(&args)?;
             crate::core::util::set_thread_override(threads);
             if archives.is_empty() {
                 eprintln!("Usage: arkx x <archive> [dest] [--here] [--dialog] [-p password]");
@@ -156,9 +188,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
             // --dialog: ask only once (like Ark "Extract to...")
             let dialog_dest: Option<PathBuf> = if dialog {
-                let initial = archives.first()
+                let initial = archives
+                    .first()
                     .and_then(|a| a.parent().map(|p| p.to_path_buf()))
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+                    .unwrap_or_else(|| {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                    });
                 match crate::core::fm::ask_directory(&initial) {
                     Some(d) => Some(d),
                     None => {
@@ -179,8 +214,15 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 } else if here || (dest_arg.is_none() && archives.len() > 1) {
                     // --here (file-manager mode): extract next to the archive,
                     // not in the cwd of the Dolphin-launched process.
-                    archive.parent()
-                        .map(|p| if p.as_os_str().is_empty() { PathBuf::from(".") } else { p.to_path_buf() })
+                    archive
+                        .parent()
+                        .map(|p| {
+                            if p.as_os_str().is_empty() {
+                                PathBuf::from(".")
+                            } else {
+                                p.to_path_buf()
+                            }
+                        })
                         .unwrap_or_else(|| PathBuf::from("."))
                 } else if let Some(d) = &dest_arg {
                     // Only with a single archive does a positional dest make sense
@@ -198,33 +240,214 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 // + notification; without display fall back to text mode.
                 if progress {
                     if crate::ui::fm_progress::has_display() {
-                        return crate::ui::fm_progress::run_extract_with_progress(archive.clone(), dest, password.clone());
+                        return crate::ui::fm_progress::run_extract_with_progress(
+                            archive.clone(),
+                            dest,
+                            password.clone(),
+                        );
                     }
                     eprintln!("(no display: using text progress)");
                 }
-                println!("Extracting {} -> {} ({} threads)...", archive.display(), dest.display(), crate::core::util::effective_threads());
+                println!(
+                    "Extracting {} -> {} ({} threads)...",
+                    archive.display(),
+                    dest.display(),
+                    crate::core::util::effective_threads()
+                );
                 let start = std::time::Instant::now();
-                backend.extract(archive, &dest, None, password.as_deref(), Some(Box::new(|p| {
-                    if p.total == 0 {
-                        print!("\r... {}", p.file);
-                    } else {
-                        print!("\r{:>7} {} ({}/{})",
-                            crate::core::util::format_percent(p.percent, p.current, p.total), p.file,
-                            humansize::format_size(p.current, humansize::BINARY),
-                            humansize::format_size(p.total, humansize::BINARY));
-                    }
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                })))?;
+                backend.extract(
+                    archive,
+                    &dest,
+                    None,
+                    password.as_deref(),
+                    Some(Box::new(|p| {
+                        if p.total == 0 {
+                            print!("\r... {}", p.file);
+                        } else {
+                            print!(
+                                "\r{:>7} {} ({}/{})",
+                                crate::core::util::format_percent(p.percent, p.current, p.total),
+                                p.file,
+                                humansize::format_size(p.current, humansize::BINARY),
+                                humansize::format_size(p.total, humansize::BINARY)
+                            );
+                        }
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
+                    })),
+                )?;
                 println!("\nCompleted in {:.2}s", start.elapsed().as_secs_f32());
             }
         }
         "c" | "compress" => {
             run_compress(&backend, &args)?;
         }
+        "u" | "add" | "update" => {
+            if args.len() < 4 {
+                eprintln!(
+                    "Usage: arkx add <archive> <file...> [--to <dir>] [-p password] [--threads N]"
+                );
+                std::process::exit(1);
+            }
+            let archive = crate::core::fm::decode_input_arg(&args[2]);
+            if !archive.exists() {
+                eprintln!(
+                    "Not found: {} (use `arkx a <dest> <file...>` to create a new archive)",
+                    archive.display()
+                );
+                std::process::exit(1);
+            }
+            let mut to_dir: Option<String> = None;
+            let mut password: Option<String> = None;
+            let mut threads: Option<usize> = None;
+            let mut files: Vec<PathBuf> = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+                if consumed > 0 {
+                    i += consumed;
+                    continue;
+                }
+                match args[i].as_str() {
+                    "--to" => {
+                        if let Some(v) = args.get(i + 1) {
+                            let dir = crate::core::fm::decode_input_arg(v);
+                            to_dir = Some(crate::core::paths::with_trailing_slash(
+                                &dir.to_string_lossy(),
+                            ));
+                            i += 1;
+                        } else {
+                            eprintln!("--to requires a directory (entry paths are relative to it)");
+                            std::process::exit(1);
+                        }
+                    }
+                    s if s.starts_with("--to=") => {
+                        let dir = crate::core::fm::decode_input_arg(s.trim_start_matches("--to="));
+                        to_dir = Some(crate::core::paths::with_trailing_slash(
+                            &dir.to_string_lossy(),
+                        ));
+                    }
+                    s if s.starts_with('-') => {
+                        eprintln!("Unknown flag: {}", s);
+                    }
+                    p => {
+                        let f = crate::core::fm::decode_input_arg(p);
+                        if !f.exists() {
+                            eprintln!("Not found: {}", f.display());
+                            std::process::exit(1);
+                        }
+                        files.push(f);
+                    }
+                }
+                i += 1;
+            }
+            if files.is_empty() {
+                eprintln!("No files specified");
+                std::process::exit(1);
+            }
+            crate::core::util::set_thread_override(threads);
+            // Entry names: `--to <dir>` prefixes the entries with the dir,
+            // otherwise files land in the archive root.
+            let sources: Vec<(PathBuf, String)> = files
+                .iter()
+                .map(|f| {
+                    let base = f
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let entry = match &to_dir {
+                        Some(d) => crate::core::paths::normalize(&format!("{}{}", d, base)),
+                        None => crate::core::paths::normalize(&base),
+                    };
+                    (f.clone(), entry)
+                })
+                .collect();
+            println!(
+                "Adding {} item(s) to {} ({} threads)...",
+                files.len(),
+                archive.display(),
+                crate::core::util::effective_threads()
+            );
+            let start = std::time::Instant::now();
+            backend.add(
+                &archive,
+                &sources,
+                password.as_deref(),
+                Some(Box::new(|p| {
+                    print!(
+                        "\r{:>7} {}",
+                        crate::core::util::format_percent(p.percent, p.current, p.total),
+                        p.file
+                    );
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                })),
+            )?;
+            let size = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
+            println!(
+                "\nAdded in {:.2}s ({})",
+                start.elapsed().as_secs_f32(),
+                humansize::format_size(size, humansize::BINARY)
+            );
+        }
+        "r" | "rm" | "d" | "delete" | "remove" => {
+            if args.len() < 4 {
+                eprintln!("Usage: arkx remove <archive> <entry...> [-p password] [--threads N]");
+                std::process::exit(1);
+            }
+            let archive = crate::core::fm::decode_input_arg(&args[2]);
+            if !archive.exists() {
+                eprintln!(
+                    "Not found: {} (use `arkx l <archive>` to list its entries)",
+                    archive.display()
+                );
+                std::process::exit(1);
+            }
+            let mut password: Option<String> = None;
+            let mut threads: Option<usize> = None;
+            let mut entries: Vec<String> = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+                if consumed > 0 {
+                    i += consumed;
+                    continue;
+                }
+                match args[i].as_str() {
+                    s if s.starts_with('-') => {
+                        eprintln!("Unknown flag: {}", s);
+                    }
+                    p => entries.push(
+                        crate::core::fm::decode_input_arg(p)
+                            .to_string_lossy()
+                            .into(),
+                    ),
+                }
+                i += 1;
+            }
+            if entries.is_empty() {
+                eprintln!("No entries to remove");
+                std::process::exit(1);
+            }
+            crate::core::util::set_thread_override(threads);
+            println!(
+                "Removing {} entry(ies) from {} ({} threads)...",
+                entries.len(),
+                archive.display(),
+                crate::core::util::effective_threads()
+            );
+            let start = std::time::Instant::now();
+            backend.remove(&archive, &entries, password.as_deref(), None)?;
+            println!("\nRemoved in {:.2}s", start.elapsed().as_secs_f32());
+        }
         "a" | "create" => {
             if args.len() < 4 {
-                eprintln!("Usage: arkx a <dest.zip|dest.7z|dest.tar.gz> <file...> [-l 0-9] [-p password]");
+                eprintln!(
+                    "Usage: arkx a <dest.zip|dest.7z|dest.tar.gz> <file...> [-l 0-9] [-p password]"
+                );
                 std::process::exit(1);
             }
             let dest = PathBuf::from(&args[2]);
@@ -235,14 +458,15 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             let mut threads: Option<usize> = None;
             let mut i = 3;
             while i < args.len() {
-                let consumed = parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
                 if consumed > 0 {
                     i += consumed;
                     continue;
                 }
                 match args[i].as_str() {
                     "-l" | "--level" => {
-                        if let Some(v) = args.get(i+1) {
+                        if let Some(v) = args.get(i + 1) {
                             level = v.parse().unwrap_or(6);
                             i += 2;
                             continue;
@@ -267,14 +491,37 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
             crate::core::util::set_thread_override(threads);
-            println!("Creating {} ({} files, level {}, {} threads)...", dest.display(), sources.len(), level, crate::core::util::effective_threads());
+            println!(
+                "Creating {} ({} files, level {}, {} threads)...",
+                dest.display(),
+                sources.len(),
+                level,
+                crate::core::util::effective_threads()
+            );
             let start = std::time::Instant::now();
-            backend.create(&dest, &sources, level, password.as_deref(), Some(Box::new(|p| {
-                print!("\r{:>7} {}", crate::core::util::format_percent(p.percent, p.current, p.total), p.file);
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-            })))?;
-            println!("\nCreated in {:.2}s ({})", start.elapsed().as_secs_f32(), humansize::format_size(std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0), humansize::BINARY));
+            backend.create(
+                &dest,
+                &sources,
+                level,
+                password.as_deref(),
+                Some(Box::new(|p| {
+                    print!(
+                        "\r{:>7} {}",
+                        crate::core::util::format_percent(p.percent, p.current, p.total),
+                        p.file
+                    );
+                    use std::io::Write;
+                    let _ = std::io::stdout().flush();
+                })),
+            )?;
+            println!(
+                "\nCreated in {:.2}s ({})",
+                start.elapsed().as_secs_f32(),
+                humansize::format_size(
+                    std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+                    humansize::BINARY
+                )
+            );
         }
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -285,7 +532,15 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-type ExtractArgs = (Vec<PathBuf>, Option<PathBuf>, bool, bool, bool, Option<String>, Option<usize>);
+type ExtractArgs = (
+    Vec<PathBuf>,
+    Option<PathBuf>,
+    bool,
+    bool,
+    bool,
+    Option<String>,
+    Option<usize>,
+);
 
 /// Handle the two flags shared by every command (`-p/--password`, `--threads`),
 /// accepting both `--flag value` and `--flag=value` forms. Returns the number of
@@ -345,12 +600,17 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
             }
             _ => {
                 let p = crate::core::fm::decode_input_arg(&args[i]);
-                if dest_arg.is_none() && !archives.is_empty() && !here && !dialog
-                    && !args[i].starts_with("file://") && {
+                if dest_arg.is_none()
+                    && !archives.is_empty()
+                    && !here
+                    && !dialog
+                    && !args[i].starts_with("file://")
+                    && {
                         // Compat heuristic: `arkx x archive dest` (non-existent dest
                         // or existing folder, but not a second existing archive)
                         !p.exists() || p.is_dir()
-                    } && archives.len() == 1
+                    }
+                    && archives.len() == 1
                 {
                     // Could be the historic positional dest; but if the path
                     // exists as a regular file it is more likely a 2nd archive.
@@ -367,7 +627,9 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
         }
         i += 1;
     }
-    Ok((archives, dest_arg, here, dialog, progress, password, threads))
+    Ok((
+        archives, dest_arg, here, dialog, progress, password, threads,
+    ))
 }
 
 /// `arkx compress` — Ark parity for Dolphin ServiceMenus.
@@ -417,7 +679,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
                 }
             }
             "-l" | "--level" => {
-                if let Some(v) = args.get(i+1) {
+                if let Some(v) = args.get(i + 1) {
                     level = v.parse().unwrap_or(6).min(9);
                     i += 1;
                 } else {
@@ -429,7 +691,9 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
                 format = s.trim_start_matches("--format=").to_string();
             }
             s if s.starts_with("--to=") => {
-                to = Some(crate::core::fm::decode_input_arg(s.trim_start_matches("--to=")));
+                to = Some(crate::core::fm::decode_input_arg(
+                    s.trim_start_matches("--to="),
+                ));
             }
             s if s.starts_with('-') => {
                 eprintln!("Unknown flag: {}", s);
@@ -470,7 +734,9 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
         // --to folder/ → create inside; --to without extension → add format
         if t.is_dir() {
             let file = crate::core::fm::default_archive_path(&sources, &format)
-                .file_name().map(|s| s.to_owned()).unwrap();
+                .file_name()
+                .map(|s| s.to_owned())
+                .unwrap();
             crate::core::fm::uniquify(&t.join(file))
         } else {
             crate::core::fm::uniquify(&ensure_archive_extension(t, &format))
@@ -485,20 +751,42 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
     // + notification; without display fall back to text mode.
     if progress && !no_progress {
         if crate::ui::fm_progress::has_display() {
-            return crate::ui::fm_progress::run_compress_with_progress(dest, sources, level, password);
+            return crate::ui::fm_progress::run_compress_with_progress(
+                dest, sources, level, password,
+            );
         }
         eprintln!("(no display: using text progress)");
     }
 
-    println!("Creating {} ({} files, level {}, {} threads)...", dest.display(), sources.len(), level, crate::core::util::effective_threads());
+    println!(
+        "Creating {} ({} files, level {}, {} threads)...",
+        dest.display(),
+        sources.len(),
+        level,
+        crate::core::util::effective_threads()
+    );
     let start = std::time::Instant::now();
-    backend.create(&dest, &sources, level, password.as_deref(), Some(Box::new(|p| {
-        print!("\r{:>7} {}", crate::core::util::format_percent(p.percent, p.current, p.total), p.file);
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
-    })))?;
+    backend.create(
+        &dest,
+        &sources,
+        level,
+        password.as_deref(),
+        Some(Box::new(|p| {
+            print!(
+                "\r{:>7} {}",
+                crate::core::util::format_percent(p.percent, p.current, p.total),
+                p.file
+            );
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+        })),
+    )?;
     let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
-    println!("\nCreated in {:.2}s ({})", start.elapsed().as_secs_f32(), humansize::format_size(size, humansize::BINARY));
+    println!(
+        "\nCreated in {:.2}s ({})",
+        start.elapsed().as_secs_f32(),
+        humansize::format_size(size, humansize::BINARY)
+    );
     crate::core::fm::notify_created(&dest);
     crate::core::fm::reveal_in_file_manager(&dest);
     Ok(())
@@ -507,9 +795,15 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
 /// If the user chose a name without archive extension, add the format.
 fn ensure_archive_extension(dest: PathBuf, format: &str) -> PathBuf {
     let ext = crate::core::fm::format_extension(format);
-    let name = dest.file_name().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
-    let has_known = ["zip", "7z", "tar", "tar.gz", "tar.xz", "tar.zst", "tar.bz2", "tgz"]
-        .iter().any(|e| name.ends_with(&format!(".{}", e)));
+    let name = dest
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let has_known = [
+        "zip", "7z", "tar", "tar.gz", "tar.xz", "tar.zst", "tar.bz2", "tgz",
+    ]
+    .iter()
+    .any(|e| name.ends_with(&format!(".{}", e)));
     if has_known {
         dest
     } else {

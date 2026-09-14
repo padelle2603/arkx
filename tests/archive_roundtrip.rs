@@ -33,10 +33,20 @@ fn zip_roundtrip() {
     assert_eq!(info.format, "ZIP");
     assert!(info.num_files >= 3);
 
-    bm.extract(&archive, &extract_dir, None, None, None).unwrap();
-    assert_eq!(fs::read(extract_dir.join("src/hello.txt")).unwrap(), b"Hello, arkx!");
-    assert_eq!(fs::read(extract_dir.join("src/data.bin")).unwrap(), vec![0xAB; 4096]);
-    assert_eq!(fs::read(extract_dir.join("src/nested/inner.txt")).unwrap(), b"nested content");
+    bm.extract(&archive, &extract_dir, None, None, None)
+        .unwrap();
+    assert_eq!(
+        fs::read(extract_dir.join("src/hello.txt")).unwrap(),
+        b"Hello, arkx!"
+    );
+    assert_eq!(
+        fs::read(extract_dir.join("src/data.bin")).unwrap(),
+        vec![0xAB; 4096]
+    );
+    assert_eq!(
+        fs::read(extract_dir.join("src/nested/inner.txt")).unwrap(),
+        b"nested content"
+    );
     assert!(extract_dir.join("src/empty_folder").is_dir());
 }
 
@@ -53,8 +63,12 @@ fn tar_roundtrip() {
     let info = bm.detect_and_list(&archive).unwrap();
     assert!(info.format.contains("TAR"));
 
-    bm.extract(&archive, &extract_dir, None, None, None).unwrap();
-    assert_eq!(fs::read(extract_dir.join("src/hello.txt")).unwrap(), b"Hello, arkx!");
+    bm.extract(&archive, &extract_dir, None, None, None)
+        .unwrap();
+    assert_eq!(
+        fs::read(extract_dir.join("src/hello.txt")).unwrap(),
+        b"Hello, arkx!"
+    );
 }
 
 #[test]
@@ -70,8 +84,12 @@ fn tar_gz_roundtrip() {
     let info = bm.detect_and_list(&archive).unwrap();
     assert!(info.format.contains("TAR.GZ") || info.format.contains("TAR"));
 
-    bm.extract(&archive, &extract_dir, None, None, None).unwrap();
-    assert_eq!(fs::read(extract_dir.join("src/hello.txt")).unwrap(), b"Hello, arkx!");
+    bm.extract(&archive, &extract_dir, None, None, None)
+        .unwrap();
+    assert_eq!(
+        fs::read(extract_dir.join("src/hello.txt")).unwrap(),
+        b"Hello, arkx!"
+    );
 }
 
 #[test]
@@ -84,8 +102,12 @@ fn tar_zst_roundtrip() {
     let bm = backend();
     bm.create(&archive, &sources, 6, None, None).unwrap();
 
-    bm.extract(&archive, &extract_dir, None, None, None).unwrap();
-    assert_eq!(fs::read(extract_dir.join("src/hello.txt")).unwrap(), b"Hello, arkx!");
+    bm.extract(&archive, &extract_dir, None, None, None)
+        .unwrap();
+    assert_eq!(
+        fs::read(extract_dir.join("src/hello.txt")).unwrap(),
+        b"Hello, arkx!"
+    );
 }
 
 #[test]
@@ -98,7 +120,11 @@ fn list_shows_correct_sizes() {
     bm.create(&archive, &sources, 6, None, None).unwrap();
 
     let info = bm.detect_and_list(&archive).unwrap();
-    let hello = info.entries.iter().find(|e| e.path.contains("hello.txt")).unwrap();
+    let hello = info
+        .entries
+        .iter()
+        .find(|e| e.path.contains("hello.txt"))
+        .unwrap();
     assert_eq!(hello.size, 12);
     assert!(!hello.is_dir);
 }
@@ -113,7 +139,8 @@ fn extract_to_empty_dir_works() {
     bm.create(&archive, &sources, 6, None, None).unwrap();
 
     let extract_dir = tmp.path().join("brand_new_dir");
-    bm.extract(&archive, &extract_dir, None, None, None).unwrap();
+    bm.extract(&archive, &extract_dir, None, None, None)
+        .unwrap();
     assert!(extract_dir.join("src/hello.txt").exists());
 }
 
@@ -146,4 +173,88 @@ fn backend_manager_detects_and_lists() {
     let info = bm.detect_and_list(&archive).unwrap();
     assert!(info.num_files >= 1);
     assert_eq!(info.format, "ZIP");
+}
+
+#[test]
+fn add_to_zip_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("add.zip");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, None, None).unwrap();
+
+    let extra = tmp.path().join("extra.txt");
+    fs::write(&extra, b"added content").unwrap();
+    bm.add(
+        &archive,
+        &[(extra, "src/added.txt".to_string())],
+        None,
+        None,
+    )
+    .unwrap();
+
+    let info = bm.detect_and_list(&archive).unwrap();
+    assert!(info.entries.iter().any(|e| e.path == "src/added.txt"));
+
+    let out = tmp.path().join("out_add");
+    bm.extract(&archive, &out, None, None, None).unwrap();
+    assert_eq!(
+        fs::read(out.join("src/added.txt")).unwrap(),
+        b"added content"
+    );
+}
+
+#[test]
+fn add_to_unsupported_format_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = create_src_dir(tmp.path());
+    // .gz is stream-compressed (extract-only): adding must fail with a clear
+    // error, not silently corrupt the archive.
+    let archive = tmp.path().join("x.gz");
+    let _ = fs::copy(tmp.path().join("src/hello.txt"), &archive);
+
+    let bm = backend();
+    let extra = tmp.path().join("extra.txt");
+    fs::write(&extra, b"x").unwrap();
+    let err = bm
+        .add(&archive, &[(extra, "extra.txt".to_string())], None, None)
+        .unwrap_err();
+    assert!(err.to_string().contains("cannot add to"));
+}
+
+#[test]
+fn remove_from_zip_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("rm.zip");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, None, None).unwrap();
+
+    bm.remove(&archive, &["src/data.bin".to_string()], None, None)
+        .unwrap();
+
+    let info = bm.detect_and_list(&archive).unwrap();
+    assert!(!info.entries.iter().any(|e| e.path == "src/data.bin"));
+    assert!(info.entries.iter().any(|e| e.path.contains("hello.txt")));
+
+    let out = tmp.path().join("out_rm");
+    bm.extract(&archive, &out, None, None, None).unwrap();
+    assert!(out.join("src/hello.txt").exists());
+    assert!(!out.join("src/data.bin").exists());
+}
+
+#[test]
+fn remove_unsupported_format_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = create_src_dir(tmp.path());
+    let archive = tmp.path().join("x.gz");
+    let _ = fs::copy(tmp.path().join("src/hello.txt"), &archive);
+
+    let bm = backend();
+    let err = bm
+        .remove(&archive, &["hello.txt".to_string()], None, None)
+        .unwrap_err();
+    assert!(err.to_string().contains("cannot remove from"));
 }

@@ -20,7 +20,7 @@ use gtk4 as gtk;
 use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::{Arc, mpsc};
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use crate::core::archive::ProgressInfo;
@@ -269,7 +269,11 @@ fn activate_extract(
                             // Auto-close + reveal dest folder + notify.
                             crate::core::fm::reveal_in_file_manager(&dest_c);
                             let _ = std::process::Command::new("notify-send")
-                                .args(["Arkx", &format!("Extracted to {}", dest_c.display()), "--icon=arkx"])
+                                .args([
+                                    "Arkx",
+                                    &format!("Extracted to {}", dest_c.display()),
+                                    "--icon=arkx",
+                                ])
                                 .output();
                             pw_c.borrow().close();
                             app_c.quit();

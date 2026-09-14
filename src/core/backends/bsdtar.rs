@@ -11,8 +11,8 @@ use crate::core::util::dir_size;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
 };
 use std::time::Duration;
 
@@ -171,7 +171,9 @@ impl BsdtarBackend {
         let mut cmd = self.base_cmd(&fmt);
         cmd.arg("-tvf").arg(path);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let output = cmd.output().map_err(|e| ArkxError::Backend(format!("cannot run tar backend: {}", e)))?;
+        let output = cmd
+            .output()
+            .map_err(|e| ArkxError::Backend(format!("cannot run tar backend: {}", e)))?;
         if !output.status.success() {
             let msg = String::from_utf8_lossy(&output.stderr);
             return Err(map_tar_error(&msg));
@@ -189,7 +191,8 @@ impl BsdtarBackend {
     ) -> Result<()> {
         if !self.is_available() {
             return Err(ArkxError::Backend(
-                "neither bsdtar nor tar found: install libarchive-tools to extract this format".into(),
+                "neither bsdtar nor tar found: install libarchive-tools to extract this format"
+                    .into(),
             ));
         }
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
@@ -205,7 +208,9 @@ impl BsdtarBackend {
 
         // Without progress: run to completion, draining pipes.
         if progress.is_none() {
-            let output = cmd.output().map_err(|e| ArkxError::Backend(format!("spawn tar: {}", e)))?;
+            let output = cmd
+                .output()
+                .map_err(|e| ArkxError::Backend(format!("spawn tar: {}", e)))?;
             if !output.status.success() {
                 return Err(map_tar_error(&String::from_utf8_lossy(&output.stderr)));
             }
@@ -215,18 +220,28 @@ impl BsdtarBackend {
 
         // Byte-based progress via dest polling (same idea as the 7z backend:
         // total from listing, done = dir_size(dest) - baseline).
-        let total = self.list(archive).map(|i| match entries {
-            None => i.total_size,
-            Some(sel) => i
-                .entries
-                .iter()
-                .filter(|e| !e.is_dir && sel.iter().any(|f| crate::core::paths::entry_matches(&e.path, f)))
-                .map(|e| e.size)
-                .fold(0u64, |a, b| a.saturating_add(b)),
-        }).unwrap_or(0);
+        let total = self
+            .list(archive)
+            .map(|i| match entries {
+                None => i.total_size,
+                Some(sel) => i
+                    .entries
+                    .iter()
+                    .filter(|e| {
+                        !e.is_dir
+                            && sel
+                                .iter()
+                                .any(|f| crate::core::paths::entry_matches(&e.path, f))
+                    })
+                    .map(|e| e.size)
+                    .fold(0u64, |a, b| a.saturating_add(b)),
+            })
+            .unwrap_or(0);
         cb(ProgressInfo::new("Preparing…".to_string(), 0, total));
 
-        let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(format!("spawn tar: {}", e)))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ArkxError::Backend(format!("spawn tar: {}", e)))?;
         let baseline = dir_size(dest);
         let done = Arc::new(AtomicU64::new(0));
         let stop = Arc::new(AtomicBool::new(false));
@@ -269,7 +284,10 @@ impl BsdtarBackend {
         let _ = poll_handle.join();
         out_handle.join().ok();
         if !status.success() {
-            return Err(ArkxError::Backend(format!("extraction failed (code {:?})", status.code())));
+            return Err(ArkxError::Backend(format!(
+                "extraction failed (code {:?})",
+                status.code()
+            )));
         }
         if let Ok(g) = cb.lock() {
             if total > 0 {
@@ -289,7 +307,8 @@ fn map_tar_error(stderr: &str) -> ArkxError {
     // Translate to a human message instead of showing "(null)" to the user.
     if m.contains("(null)") {
         return ArkxError::Corrupted(
-            "cannot open archive (damaged file or unsupported names; try `7z l` for details)".into(),
+            "cannot open archive (damaged file or unsupported names; try `7z l` for details)"
+                .into(),
         );
     }
     if m.contains("Cannot allocate memory") {
@@ -304,7 +323,9 @@ fn map_tar_error(stderr: &str) -> ArkxError {
     {
         return ArkxError::Corrupted(m.to_string());
     }
-    if m.contains("lz4") && (m.contains("not found") || m.contains("Cannot exec") || m.contains("non riuscita")) {
+    if m.contains("lz4")
+        && (m.contains("not found") || m.contains("Cannot exec") || m.contains("non riuscita"))
+    {
         return ArkxError::Backend("lz4 decoder missing: install lz4 or libarchive-tools".into());
     }
     if m.contains("lzip") && (m.contains("not found") || m.contains("Cannot exec")) {
@@ -314,7 +335,9 @@ fn map_tar_error(stderr: &str) -> ArkxError {
         return ArkxError::Backend("lzop decoder missing: install lzop or libarchive-tools".into());
     }
     if m.contains("lrzip") && (m.contains("not found") || m.contains("Cannot exec")) {
-        return ArkxError::Backend("lrzip decoder missing: install lrzip or libarchive-tools".into());
+        return ArkxError::Backend(
+            "lrzip decoder missing: install lrzip or libarchive-tools".into(),
+        );
     }
     if m.is_empty() {
         return ArkxError::Corrupted("cannot open archive (empty error)".into());
@@ -336,13 +359,17 @@ fn parse_tvf(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
         }
     }
     if entries.is_empty() {
-        return Err(ArkxError::Corrupted("cannot list archive (empty output: file may be empty or damaged)".into()));
+        return Err(ArkxError::Corrupted(
+            "cannot list archive (empty output: file may be empty or damaged)".into(),
+        ));
     }
     let num_files = entries.iter().filter(|e| !e.is_dir).count();
     let num_dirs = entries.len() - num_files;
     Ok(ArchiveInfo {
         path: archive_path.to_string_lossy().to_string(),
-        format: crate::core::detector::detect_format(archive_path).display_name().to_string(),
+        format: crate::core::detector::detect_format(archive_path)
+            .display_name()
+            .to_string(),
         entries,
         total_size,
         total_packed: total_size,
@@ -370,7 +397,10 @@ fn parse_tvf_line(line: &str) -> Option<ArchiveEntry> {
     // GNU tar: [user/group, size, date, time, path...]
     let (size, path_tokens): (u64, &[&str]) = if rest.len() >= 8
         && rest[0].chars().all(|c| c.is_ascii_digit())
-        && rest[4].chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && rest[4]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
     {
         (rest[3].parse().unwrap_or(0), &rest[7..])
     } else if rest.len() >= 5 && rest[1].chars().all(|c| c.is_ascii_digit()) {
@@ -383,7 +413,11 @@ fn parse_tvf_line(line: &str) -> Option<ArchiveEntry> {
     }
     let raw_path = path_tokens.join(" ");
     // Strip symlink target.
-    let link_path = raw_path.split(" -> ").next().unwrap_or(&raw_path).to_string();
+    let link_path = raw_path
+        .split(" -> ")
+        .next()
+        .unwrap_or(&raw_path)
+        .to_string();
     let norm = crate::core::paths::normalize(&link_path);
     if norm.is_empty() {
         return None;
@@ -408,7 +442,12 @@ fn parse_tvf_line(line: &str) -> Option<ArchiveEntry> {
 
 fn parse_tvf_date(rest: &[&str]) -> Option<chrono::DateTime<chrono::Local>> {
     // bsdtar: [nlink, user, group, size, Mon, Day, Time|Year]
-    if rest.len() >= 7 && rest[4].chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+    if rest.len() >= 7
+        && rest[4]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic())
+    {
         let mon = rest[4];
         let day = rest[5];
         let third = rest[6];
@@ -451,9 +490,15 @@ fn parse_mode(perms: &str) -> Option<u32> {
         'x' | 's' | 'S' | 't' | 'T' => v,
         _ => 0,
     };
-    let mode = bit(b[1], 0o400) + bit(b[2], 0o200) + bit(b[3], 0o100)
-        + bit(b[4], 0o40) + bit(b[5], 0o20) + bit(b[6], 0o10)
-        + bit(b[7], 0o4) + bit(b[8], 0o2) + bit(b[9], 0o1);
+    let mode = bit(b[1], 0o400)
+        + bit(b[2], 0o200)
+        + bit(b[3], 0o100)
+        + bit(b[4], 0o40)
+        + bit(b[5], 0o20)
+        + bit(b[6], 0o10)
+        + bit(b[7], 0o4)
+        + bit(b[8], 0o2)
+        + bit(b[9], 0o1);
     Some(mode)
 }
 
@@ -463,7 +508,8 @@ mod tests {
 
     #[test]
     fn test_parse_bsdtar_line() {
-        let e = parse_tvf_line("-rw-r--r--  0 padelle padelle    11 Sep  3 16:34 hello.txt").unwrap();
+        let e =
+            parse_tvf_line("-rw-r--r--  0 padelle padelle    11 Sep  3 16:34 hello.txt").unwrap();
         assert_eq!(e.path, "hello.txt");
         assert!(!e.is_dir);
         assert_eq!(e.size, 11);
@@ -475,16 +521,19 @@ mod tests {
 
     #[test]
     fn test_parse_gnu_line() {
-        let e = parse_tvf_line("-rw-r--r-- padelle/padelle  11 2025-09-03 16:34 hello.txt").unwrap();
+        let e =
+            parse_tvf_line("-rw-r--r-- padelle/padelle  11 2025-09-03 16:34 hello.txt").unwrap();
         assert_eq!(e.path, "hello.txt");
         assert_eq!(e.size, 11);
-        let spaced = parse_tvf_line("-rw-r--r-- padelle/padelle  11 2025-09-03 16:34 my file.txt").unwrap();
+        let spaced =
+            parse_tvf_line("-rw-r--r-- padelle/padelle  11 2025-09-03 16:34 my file.txt").unwrap();
         assert_eq!(spaced.path, "my file.txt");
     }
 
     #[test]
     fn test_parse_symlink_and_mode() {
-        let e = parse_tvf_line("lrwxrwxrwx  0 root    root       7 Sep  3 16:34 link -> target").unwrap();
+        let e = parse_tvf_line("lrwxrwxrwx  0 root    root       7 Sep  3 16:34 link -> target")
+            .unwrap();
         assert_eq!(e.path, "link");
         assert_eq!(parse_mode("drwxr-xr-x"), Some(0o755));
         assert!(parse_tvf_line("total 123").is_none());
@@ -510,7 +559,9 @@ mod error_tests {
 
     #[test]
     fn gnu_english_not_a_tar_is_corrupted() {
-        let err = map_tar_error("tar: This does not look like a tar archive\ntar: Exiting with failure status");
+        let err = map_tar_error(
+            "tar: This does not look like a tar archive\ntar: Exiting with failure status",
+        );
         assert!(matches!(err, ArkxError::Corrupted(_)), "got: {}", err);
     }
 }

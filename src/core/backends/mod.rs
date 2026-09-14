@@ -7,8 +7,8 @@ use super::detector::{ArchiveFormat, BackendKind};
 use super::error::{ArkxError, Result};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
     atomic::{AtomicBool, Ordering},
+    Arc,
 };
 
 pub struct BackendManager {
@@ -57,19 +57,31 @@ impl BackendManager {
                 // (Exotic tar.* fail on native/7z but open with bsdtar;
                 // encrypted ZIPs fail on native but open with 7z.)
                 if matches!(fmt.backend(), BackendKind::Native) {
-                    eprintln!("[core] native list failed for {:?}: {}, falling back to 7z", fmt, first);
+                    eprintln!(
+                        "[core] native list failed for {:?}: {}, falling back to 7z",
+                        fmt, first
+                    );
                     match self.seven.list(path) {
                         Ok(info) => Ok(info),
                         Err(second) => {
-                            eprintln!("[core] 7z list failed for {:?}: {}, falling back to bsdtar", fmt, second);
+                            eprintln!(
+                                "[core] 7z list failed for {:?}: {}, falling back to bsdtar",
+                                fmt, second
+                            );
                             self.bsdtar.list(path)
                         }
                     }
                 } else if matches!(fmt.backend(), BackendKind::SevenZip) {
-                    eprintln!("[core] 7z list failed for {:?}: {}, falling back to bsdtar", fmt, first);
+                    eprintln!(
+                        "[core] 7z list failed for {:?}: {}, falling back to bsdtar",
+                        fmt, first
+                    );
                     self.bsdtar.list(path)
                 } else {
-                    eprintln!("[core] bsdtar list failed for {:?}: {}, falling back to 7z", fmt, first);
+                    eprintln!(
+                        "[core] bsdtar list failed for {:?}: {}, falling back to 7z",
+                        fmt, first
+                    );
                     match self.seven.list(path) {
                         Ok(info) => Ok(info),
                         Err(_) => Err(first),
@@ -91,12 +103,20 @@ impl BackendManager {
         // Large zips → multithreaded 7z even if the table says native:
         // zero-fork only pays off below threshold (adaptive on RAM).
         let big_zip = fmt == ArchiveFormat::Zip
-            && std::fs::metadata(archive).map(|m| m.len() >= crate::core::util::big_archive_threshold_bytes()).unwrap_or(false);
+            && std::fs::metadata(archive)
+                .map(|m| m.len() >= crate::core::util::big_archive_threshold_bytes())
+                .unwrap_or(false);
         if big_zip {
-            match self.seven.extract(archive, dest, entries, password, progress) {
+            match self
+                .seven
+                .extract(archive, dest, entries, password, progress)
+            {
                 Ok(()) => return Ok(()),
                 Err(e) => {
-                    eprintln!("[core] 7z extract failed for big zip, falling back to native: {}", e);
+                    eprintln!(
+                        "[core] 7z extract failed for big zip, falling back to native: {}",
+                        e
+                    );
                     return self.native.extract(archive, dest, entries, password, None);
                 }
             }
@@ -104,7 +124,10 @@ impl BackendManager {
         // NOTE: progress callbacks are single-shot (Fn, not clonable):
         // only the backend that actually runs receives it; fallbacks
         // re-run without progress.
-        match self.primary(&fmt).extract(archive, dest, entries, password, progress) {
+        match self
+            .primary(&fmt)
+            .extract(archive, dest, entries, password, progress)
+        {
             Ok(()) => Ok(()),
             Err(e) => {
                 if matches!(fmt.backend(), BackendKind::Native) {
@@ -112,7 +135,10 @@ impl BackendManager {
                     match self.seven.extract(archive, dest, entries, password, None) {
                         Ok(()) => Ok(()),
                         Err(second) => {
-                            eprintln!("[core] 7z extract failed, falling back to bsdtar: {}", second);
+                            eprintln!(
+                                "[core] 7z extract failed, falling back to bsdtar: {}",
+                                second
+                            );
                             self.bsdtar.extract(archive, dest, entries, None, None)
                         }
                     }
@@ -171,7 +197,10 @@ impl BackendManager {
                 && self.seven.is_available()
                 && total >= crate::core::util::zip_seven_threshold_bytes()
             {
-                eprintln!("[core] big zip ({} threads): using 7z", crate::core::util::effective_threads());
+                eprintln!(
+                    "[core] big zip ({} threads): using 7z",
+                    crate::core::util::effective_threads()
+                );
                 match self.seven.create(dest, sources, level, password, progress) {
                     Ok(()) => return Ok(()),
                     Err(e) => {
@@ -186,8 +215,54 @@ impl BackendManager {
             self.seven.create(dest, sources, level, password, progress)
         }
     }
+
+    /// Add files to an existing archive. Routing:
+    /// Zip→native rewrite; 7z and plain tar→`7z a` (update mode); everything else
+    /// is extract-only. Stream-compressed tar flavors (tar.gz/.xz/…) cannot be
+    /// updated in place and fail clearly instead of corrupting the archive. No
+    /// fallback chain: a failed update must reach the user as an error.
+    pub fn add(
+        &self,
+        archive: &Path,
+        sources: &[(PathBuf, String)],
+        password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let fmt = super::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.native.add(archive, sources, password, progress),
+            ArchiveFormat::SevenZip | ArchiveFormat::Tar => {
+                self.seven.add(archive, sources, password, progress)
+            }
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "cannot add to {fmt:?}: stream-compressed formats (tar.gz/tar.xz/…) are add-only if you re-create them; use .tar/.zip/.7z for updates"
+            ))),
+        }
+    }
+
+    /// Remove entries from an existing archive. Same routing as `add`.
+    pub fn remove(
+        &self,
+        archive: &Path,
+        entries: &[String],
+        password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let fmt = super::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.native.remove(archive, entries, password, progress),
+            ArchiveFormat::SevenZip | ArchiveFormat::Tar => {
+                self.seven.remove(archive, entries, password, progress)
+            }
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "cannot remove from {fmt:?}: stream-compressed formats (tar.gz/tar.xz/…) are extract-only; use .tar/.zip/.7z for updates"
+            ))),
+        }
+    }
 }
 
 impl Default for BackendManager {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

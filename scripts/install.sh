@@ -1,5 +1,8 @@
 #!/bin/bash
 set -e
+# Run from anywhere: resolve the repo root (cwd is not guaranteed).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 echo "==> Building arkx (release, optimized for $(nproc) threads)..."
 cargo build --release
 echo "==> Installing to /usr/local/bin/arkx..."
@@ -26,7 +29,15 @@ echo "==> Verifying..."
 arkx --version
 arkx --help | head -n 20
 echo "==> CLI smoke test..."
-arkx l /tmp/test_arkx.zip 2>&1 | head -n 10 || echo "create a test zip: 7z a /tmp/test.zip file..."
+SMOKE_DIR="$(mktemp -d)"
+echo "test" > "$SMOKE_DIR/a.txt"
+arkx a "$SMOKE_DIR/t.zip" "$SMOKE_DIR/a.txt" >/dev/null 2>&1
+if arkx l "$SMOKE_DIR/t.zip" >/dev/null 2>&1 && [ "$(arkx l "$SMOKE_DIR/t.zip" 2>/dev/null | grep -c 'a.txt')" -eq 1 ]; then
+    echo "Smoke test passed ✓"
+else
+    echo "WARNING: smoke test failed" >&2
+fi
+rm -rf "$SMOKE_DIR"
 echo "==> Done! Launch with: arkx  or  arkx archive.zip"
 echo "    Dolphin: right click a folder -> Compress -> Compress to zip... / tar.gz... / 7zip..."
 echo "             right click an archive -> Extract -> Extract here"

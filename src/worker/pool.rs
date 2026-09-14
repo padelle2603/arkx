@@ -1,8 +1,11 @@
+use crate::core::archive::ProgressInfo;
 use crate::core::backends::BackendManager;
 use crate::worker::{Job, JobKind, JobResult};
-use crate::core::archive::ProgressInfo;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::sync::mpsc::{self, Sender, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::thread;
 
 /// Non-blocking worker pool: one dispatcher thread + channel.
@@ -35,13 +38,17 @@ impl WorkerPool {
         thread::spawn(move || {
             while let Ok(job) = job_rx.recv() {
                 if cancel_clone.load(Ordering::Relaxed) {
-                    let _ = evt_tx.send(WorkerEvent::Error { msg: "Cancelled".into() });
+                    let _ = evt_tx.send(WorkerEvent::Error {
+                        msg: "Cancelled".into(),
+                    });
                     cancel_clone.store(false, Ordering::Relaxed);
                     continue;
                 }
                 let kind_str = match &job.kind {
                     JobKind::List { .. } => "list",
                     JobKind::Extract { .. } => "extract",
+                    JobKind::Add { .. } => "add",
+                    JobKind::Remove { .. } => "remove",
                 }
                 .to_string();
                 let _ = evt_tx.send(WorkerEvent::Started { kind: kind_str });
@@ -70,10 +77,15 @@ impl WorkerPool {
                         }
                         Err(e) => {
                             let msg = e.to_string();
-                            if msg.contains("Cancelled") || cancel_flag_inner.load(Ordering::Relaxed) {
-                                let _ = evt_tx_inner.send(WorkerEvent::Error { msg: "Cancelled".into() });
+                            if msg.contains("Cancelled")
+                                || cancel_flag_inner.load(Ordering::Relaxed)
+                            {
+                                let _ = evt_tx_inner.send(WorkerEvent::Error {
+                                    msg: "Cancelled".into(),
+                                });
                             } else {
-                                let _ = evt_tx_inner.send(WorkerEvent::Finished { result: Err(msg) });
+                                let _ =
+                                    evt_tx_inner.send(WorkerEvent::Finished { result: Err(msg) });
                             }
                         }
                     }
@@ -81,7 +93,11 @@ impl WorkerPool {
             }
         });
 
-        Self { tx: job_tx, rx: evt_rx, cancel_flag }
+        Self {
+            tx: job_tx,
+            rx: evt_rx,
+            cancel_flag,
+        }
     }
 
     fn execute_job<F>(
@@ -106,9 +122,46 @@ impl WorkerPool {
                 let info = backend.detect_and_list(&path)?;
                 Ok(JobResult::List(info))
             }
-            JobKind::Extract { archive, dest, entries, password } => {
-                backend.extract(&archive, &dest, entries.as_deref(), password.as_deref(), Some(Box::new(wrapped)))?;
+            JobKind::Extract {
+                archive,
+                dest,
+                entries,
+                password,
+            } => {
+                backend.extract(
+                    &archive,
+                    &dest,
+                    entries.as_deref(),
+                    password.as_deref(),
+                    Some(Box::new(wrapped)),
+                )?;
                 Ok(JobResult::Extract)
+            }
+            JobKind::Add {
+                archive,
+                sources,
+                password,
+            } => {
+                backend.add(
+                    &archive,
+                    &sources,
+                    password.as_deref(),
+                    Some(Box::new(wrapped)),
+                )?;
+                Ok(JobResult::Add)
+            }
+            JobKind::Remove {
+                archive,
+                entries,
+                password,
+            } => {
+                backend.remove(
+                    &archive,
+                    &entries,
+                    password.as_deref(),
+                    Some(Box::new(wrapped)),
+                )?;
+                Ok(JobResult::Remove)
             }
         }
     }
@@ -128,7 +181,9 @@ impl WorkerPool {
 }
 
 impl Default for WorkerPool {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Drop for WorkerPool {

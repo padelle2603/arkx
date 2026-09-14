@@ -6,8 +6,8 @@ use crate::core::util::{dir_size, effective_threads};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
-    Arc, Mutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use std::time::{Duration, Instant};
 
@@ -35,9 +35,9 @@ impl SevenZipBackend {
         if self.bin.components().count() > 1 {
             return self.bin.is_file();
         }
-        std::env::var_os("PATH").map(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join(&self.bin).is_file())
-        }).unwrap_or(false)
+        std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(&self.bin).is_file()))
+            .unwrap_or(false)
     }
 }
 
@@ -71,6 +71,26 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         self.create_inner(dest, sources, level, password, progress)
+    }
+
+    fn add(
+        &self,
+        archive: &Path,
+        sources: &[(PathBuf, String)],
+        password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        self.add_inner(archive, sources, password, progress)
+    }
+
+    fn remove(
+        &self,
+        archive: &Path,
+        entries: &[String],
+        password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        self.remove_inner(archive, entries, password, progress)
     }
 }
 
@@ -109,7 +129,10 @@ impl SevenZipBackend {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let msg = format!("{}{}", stdout, stderr);
-            if msg.contains("Wrong password") || msg.contains("Enter password") || msg.contains("Can not open encrypted") {
+            if msg.contains("Wrong password")
+                || msg.contains("Enter password")
+                || msg.contains("Can not open encrypted")
+            {
                 return Err(ArkxError::WrongPassword);
             }
             if msg.contains("Can not open file as archive") || msg.contains("Is not archive") {
@@ -157,7 +180,9 @@ impl SevenZipBackend {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(format!("spawn 7z: {}", e)))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ArkxError::Backend(format!("spawn 7z: {}", e)))?;
 
         // Byte-based 0%→100% progress (like PeaZip/file-roller): 7z's own % with
         // -mmt=N is unreliable by upstream design (lzma2-mt buffering causes
@@ -251,16 +276,27 @@ impl SevenZipBackend {
                     Ok(data) => String::from_utf8_lossy(&data).to_string(),
                     Err(_) => String::new(),
                 };
-                if stderr_text.contains("Wrong password") || stderr_text.contains("Enter password") || stderr_text.contains("Can not open encrypted") {
+                if stderr_text.contains("Wrong password")
+                    || stderr_text.contains("Enter password")
+                    || stderr_text.contains("Can not open encrypted")
+                {
                     return Err(ArkxError::WrongPassword);
                 }
-                return Err(ArkxError::Backend(format!("7z extract failed (code 2): {}", stderr_text.trim())));
+                return Err(ArkxError::Backend(format!(
+                    "7z extract failed (code 2): {}",
+                    stderr_text.trim()
+                )));
             }
             if !status.success() && code != 1 {
-                return Err(ArkxError::Backend(format!("7z extract failed code {:?}", status.code())));
+                return Err(ArkxError::Backend(format!(
+                    "7z extract failed code {:?}",
+                    status.code()
+                )));
             } else {
                 if code == 1 {
-                    eprintln!("[7z] warning code 1 (Headers Error on solid archives), treated as success");
+                    eprintln!(
+                        "[7z] warning code 1 (Headers Error on solid archives), treated as success"
+                    );
                 }
                 // Final 100% (the only allowed jump: last value → 100).
                 if let Ok(guard) = cb_arc.lock() {
@@ -302,12 +338,21 @@ impl SevenZipBackend {
                         Ok(data) => String::from_utf8_lossy(&data).to_string(),
                         Err(_) => String::new(),
                     };
-                    if stderr_text.contains("Wrong password") || stderr_text.contains("Enter password") || stderr_text.contains("Can not open encrypted") {
+                    if stderr_text.contains("Wrong password")
+                        || stderr_text.contains("Enter password")
+                        || stderr_text.contains("Can not open encrypted")
+                    {
                         return Err(ArkxError::WrongPassword);
                     }
-                    return Err(ArkxError::Backend(format!("7z extract failed (code 2): {}", stderr_text.trim())));
+                    return Err(ArkxError::Backend(format!(
+                        "7z extract failed (code 2): {}",
+                        stderr_text.trim()
+                    )));
                 }
-                return Err(ArkxError::Backend(format!("Extraction failed (code {})", code)));
+                return Err(ArkxError::Backend(format!(
+                    "Extraction failed (code {})",
+                    code
+                )));
             }
             if code == 1 {
                 eprintln!("[7z] warning code 1 in no-progress path, treated as success");
@@ -349,9 +394,7 @@ impl SevenZipBackend {
         let threads = effective_threads().min(32);
         let fmt = crate::core::detector::detect_format(dest);
         let mut cmd = Command::new(&self.bin);
-        cmd.arg("a")
-            .arg(format!("-mmt={}", threads))
-            .arg("-y");
+        cmd.arg("a").arg(format!("-mmt={}", threads)).arg("-y");
 
         // Compression level
         let mx = level.clamp(0, 9);
@@ -399,7 +442,9 @@ impl SevenZipBackend {
         // counter, speed and ETA stay byte-based and honest.
         cmd.arg("-bsp1").arg("-bso1");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(format!("spawn 7z: {}", e)))?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ArkxError::Backend(format!("spawn 7z: {}", e)))?;
 
         let sizes = crate::core::util::input_file_sizes(sources);
         // Total = the absolute-keyed entries of the map already walked above.
@@ -487,17 +532,296 @@ impl SevenZipBackend {
         let _ = stderr_handle.join();
         let code = status.code().unwrap_or(-1);
         if !status.success() && code != 1 {
-            return Err(ArkxError::Backend(format!("7z create failed (code {})", code)));
+            return Err(ArkxError::Backend(format!(
+                "7z create failed (code {})",
+                code
+            )));
         }
         if code == 1 {
             eprintln!("[7z] warning code 1 in create path, treated as success");
         }
         // Final 100% (the only allowed jump: last value → 100).
         if let Ok(g) = cb_shared.lock() {
-            g(ProgressInfo::new("Completed".to_string(), total.max(1), total.max(1)));
+            g(ProgressInfo::new(
+                "Completed".to_string(),
+                total.max(1),
+                total.max(1),
+            ));
         }
         Ok(())
     }
+
+    /// Add files to an existing archive via `7z a` (update mode, preserves all
+    /// existing entries; same-name entries are replaced). Entry names are
+    /// controlled via a staging dir: sources are copied to `tmp/<entry path>`
+    /// and passed to 7z as cwd-relative paths, so the stored name is exactly
+    /// the requested one. A root-only add (no `/` in any entry name, sources
+    /// sharing one common parent) skips the staging copy entirely.
+    fn add_inner(
+        &self,
+        archive: &Path,
+        sources: &[(PathBuf, String)],
+        password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        if !archive.exists() {
+            return Err(ArkxError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("archive not found: {}", archive.display()),
+            )));
+        }
+        // Run 7z from the staging dir / common parent: the archive must not be
+        // resolved relatively, so absolutize it upfront.
+        let archive = super::native::absolutize(archive);
+        let fmt = crate::core::detector::detect_format(&archive);
+        let threads = effective_threads().min(32);
+
+        // Fast path: no staging at all when every entry is at the archive root and
+        // the sources share one common parent (cwd = parent, bare names).
+        // `parent()` of a bare name like "one.txt" is the *empty* path, which
+        // `Command::current_dir` would reject: normalize it to ".". Any mix of
+        // parents falls back to the staging dir (safe, no per-case logic).
+        let names_are_root = sources.iter().all(|(_, n)| !n.contains('/'));
+        let common_parent = if names_are_root {
+            let parents: std::collections::HashSet<Option<&std::path::Path>> = sources
+                .iter()
+                .map(|(s, _)| {
+                    let p = s.parent().unwrap_or(std::path::Path::new("."));
+                    Some(if p.as_os_str().is_empty() {
+                        std::path::Path::new(".")
+                    } else {
+                        p
+                    })
+                })
+                .collect();
+            if parents.len() == 1 {
+                parents
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .map(|p| p.to_path_buf())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("a").arg(format!("-mmt={}", threads)).arg("-y");
+        match fmt {
+            ArchiveFormat::SevenZip => {
+                cmd.arg("-m0=lzma2");
+                cmd.arg("-md=64m");
+            }
+            ArchiveFormat::Zip => {
+                cmd.arg("-mm=Deflate");
+            }
+            _ => {}
+        }
+        if let Some(pw) = password {
+            cmd.arg(format!("-p{}", pw));
+        }
+        cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
+
+        let mut input_paths: Vec<PathBuf> = Vec::new();
+        // Kept alive until the end of the function (Drop cleans the temp dir).
+        let _staging = if let Some(parent) = common_parent {
+            for (s, name) in sources {
+                input_paths.push(s.clone());
+                cmd.arg(name);
+            }
+            cmd.current_dir(&parent);
+            None
+        } else {
+            let dir = Staging::new()?;
+            for (s, name) in sources {
+                let dest = dir.path().join(name);
+                let _ = std::fs::create_dir_all(dest.parent().unwrap_or(dir.path()));
+                copy_out(s, &dest)?;
+                input_paths.push(dest.clone());
+                cmd.arg(name);
+            }
+            cmd.current_dir(dir.path());
+            Some(dir)
+        };
+
+        let total: u64 = crate::core::util::input_file_sizes(&input_paths)
+            .iter()
+            .filter(|(k, _)| std::path::Path::new(k.as_str()).is_absolute())
+            .map(|(_, v)| *v)
+            .sum();
+
+        let Some(cb) = progress else {
+            let output = cmd
+                .arg("-bsp0")
+                .arg("-bso0")
+                .output()
+                .map_err(|e| ArkxError::Backend(e.to_string()))?;
+            if !output.status.success() {
+                let msg = String::from_utf8_lossy(&output.stderr);
+                return Err(ArkxError::Backend(format!("7z add failed: {}", msg.trim())));
+            }
+            return Ok(());
+        };
+
+        cb(ProgressInfo::new("Preparing…".to_string(), 0, total.max(1)));
+        cmd.arg("-bsp1").arg("-bso1");
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(e.to_string()))?;
+
+        let stderr_handle = std::thread::spawn({
+            let mut stderr = child.stderr.take();
+            move || {
+                if let Some(err) = stderr.take() {
+                    crate::core::util::drain_reader(err);
+                }
+            }
+        });
+
+        let cb_shared: SharedCallback = Arc::new(Mutex::new(cb));
+        let tracker: Arc<Mutex<CreateProgress>> = Arc::new(Mutex::new(CreateProgress::new(
+            total,
+            crate::core::util::input_file_sizes(&input_paths),
+        )));
+        let mut cancelled = false;
+        if let Some(stdout) = child.stdout.take() {
+            if self.cancelled() {
+                cancelled = true;
+            } else {
+                crate::core::util::read_lines_until(stdout, |line| {
+                    if self.cancelled() {
+                        cancelled = true;
+                        return true;
+                    }
+                    if let (Ok(mut t), Ok(g)) = (tracker.lock(), cb_shared.lock()) {
+                        t.feed(line, &*g);
+                    }
+                    false
+                });
+            }
+        }
+        if cancelled {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stderr_handle.join();
+            return Err(ArkxError::Cancelled);
+        }
+        let status = child.wait().map_err(ArkxError::Io)?;
+        let _ = stderr_handle.join();
+        let code = status.code().unwrap_or(-1);
+        if !status.success() && code != 1 {
+            return Err(ArkxError::Backend(format!("7z add failed (code {})", code)));
+        }
+        if code == 1 {
+            eprintln!("[7z] warning code 1 in add path, treated as success");
+        }
+        // Final 100% (the only allowed jump: last value → 100).
+        if let Ok(g) = cb_shared.lock() {
+            g(ProgressInfo::new(
+                "Completed".to_string(),
+                total.max(1),
+                total.max(1),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Remove entries from an existing archive via `7z d` (7z and plain tar).
+    /// No byte-based progress (7z d reports none): a start / done pair only.
+    fn remove_inner(
+        &self,
+        archive: &Path,
+        entries: &[String],
+        password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        if !archive.exists() {
+            return Err(ArkxError::Io(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("archive not found: {}", archive.display()),
+            )));
+        }
+        if entries.is_empty() {
+            return Err(ArkxError::Backend("no entries to remove".into()));
+        }
+        let archive = super::native::absolutize(archive);
+        let threads = effective_threads().min(32);
+
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("d").arg("-y").arg(format!("-mmt={}", threads));
+        if let Some(pw) = password {
+            cmd.arg(format!("-p{}", pw));
+        }
+        cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
+        for name in entries {
+            cmd.arg(name);
+        }
+
+        if let Some(cb) = &progress {
+            cb(ProgressInfo::new("Removing…".to_string(), 0, 1));
+        }
+        let output = cmd
+            .arg("-bsp0")
+            .arg("-bso0")
+            .output()
+            .map_err(|e| ArkxError::Backend(e.to_string()))?;
+        if let Some(cb) = &progress {
+            cb(ProgressInfo::new("Completed".to_string(), 1, 1));
+        }
+        if !output.status.success() {
+            let msg = String::from_utf8_lossy(&output.stderr);
+            return Err(ArkxError::Backend(format!(
+                "7z remove failed: {}",
+                msg.trim()
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Temp dir used to stage added files at their archive-relative paths.
+/// Self-cleaning: removed on drop, so cleanup happens on every path
+/// (success, error, cancel). No extra crate (tempfile is test-only).
+struct Staging(PathBuf);
+
+impl Staging {
+    fn new() -> Result<Self> {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let base =
+            std::env::temp_dir().join(format!("arkx-add-{}-{:09}", std::process::id(), nanos));
+        std::fs::create_dir_all(&base).map_err(ArkxError::Io)?;
+        Ok(Staging(base))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Copy a file or an entire directory tree to `dest` (for a dir, `dest` is the
+/// new root). Broken symlinks/special files are skipped silently, mirroring
+/// the create path's tolerance.
+fn copy_out(src: &Path, dest: &Path) -> Result<()> {
+    if src.is_file() {
+        std::fs::copy(src, dest).map_err(ArkxError::Io)?;
+    } else if src.is_dir() {
+        std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
+        for entry in std::fs::read_dir(src).map_err(ArkxError::Io)? {
+            let entry = entry.map_err(ArkxError::Io)?;
+            copy_out(&entry.path(), &dest.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Byte-based progress tracker for `7z a -bsp1` (create path).
@@ -641,7 +965,16 @@ fn label_from_7z_add_line(line: &str) -> String {
         return String::new();
     }
     // Status lines without a file.
-    for prefix in ["Everything is Ok", "Scanning", "Creating archive", "Add new data to archive", "7-Zip", "64-bit", "Files read", "Archive size"] {
+    for prefix in [
+        "Everything is Ok",
+        "Scanning",
+        "Creating archive",
+        "Add new data to archive",
+        "7-Zip",
+        "64-bit",
+        "Files read",
+        "Archive size",
+    ] {
         if s.starts_with(prefix) {
             return String::new();
         }
@@ -667,7 +1000,11 @@ fn label_from_7z_add_line(line: &str) -> String {
         }
     }
     // Per-file markers (`+ path`, `- path`).
-    s = s.strip_prefix('+').or_else(|| s.strip_prefix('-')).map(|r| r.trim()).unwrap_or(s);
+    s = s
+        .strip_prefix('+')
+        .or_else(|| s.strip_prefix('-'))
+        .map(|r| r.trim())
+        .unwrap_or(s);
     s.to_string()
 }
 
@@ -764,7 +1101,9 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
                 if !entry.path.is_empty() {
                     total_size += entry.size;
                     total_packed += entry.packed_size;
-                    if entry.encrypted { has_encrypted = true; }
+                    if entry.encrypted {
+                        has_encrypted = true;
+                    }
                     entries.push(entry);
                 }
             }
@@ -785,14 +1124,16 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
             if let Some((k, v)) = line.split_once(" = ") {
                 match k {
                     "Path" => {
-                // A Path key on an already-named entry starts a new one
+                        // A Path key on an already-named entry starts a new one
                         // (solid blocks without a ---------- separator)
                         if !entry.path.is_empty() {
                             // finalize previous
                             let prev = current.take().unwrap();
                             total_size += prev.size;
                             total_packed += prev.packed_size;
-                            if prev.encrypted { has_encrypted = true; }
+                            if prev.encrypted {
+                                has_encrypted = true;
+                            }
                             entries.push(prev);
                             // new entry
                             current = Some(ArchiveEntry {
@@ -820,7 +1161,9 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
                         entry.modified = parse_7z_date(v);
                     }
                     "CRC" => {
-                        if !v.is_empty() { entry.crc32 = Some(v.to_string()); }
+                        if !v.is_empty() {
+                            entry.crc32 = Some(v.to_string());
+                        }
                     }
                     "Method" => entry.method = Some(v.to_string()),
                     "Encrypted" => entry.encrypted = v == "+",
@@ -833,14 +1176,18 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
         if !entry.path.is_empty() {
             total_size += entry.size;
             total_packed += entry.packed_size;
-            if entry.encrypted { has_encrypted = true; }
+            if entry.encrypted {
+                has_encrypted = true;
+            }
             entries.push(entry);
         }
     }
 
     // If we parsed nothing, try simple fallback parsing
     if entries.is_empty() {
-                return Err(ArkxError::Corrupted("Cannot parse archive contents (empty or protected)".into()));
+        return Err(ArkxError::Corrupted(
+            "Cannot parse archive contents (empty or protected)".into(),
+        ));
     }
 
     let num_files = entries.iter().filter(|e| !e.is_dir).count();
@@ -848,7 +1195,9 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
 
     Ok(ArchiveInfo {
         path: archive_path.to_string_lossy().to_string(),
-        format: crate::core::detector::detect_format(archive_path).display_name().to_string(),
+        format: crate::core::detector::detect_format(archive_path)
+            .display_name()
+            .to_string(),
         entries,
         total_size,
         total_packed,
@@ -868,7 +1217,9 @@ fn parse_7z_date(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{label_from_7z_add_line, label_from_7z_line, parse_percent, parse_proc_io, CreateProgress};
+    use super::{
+        label_from_7z_add_line, label_from_7z_line, parse_percent, parse_proc_io, CreateProgress,
+    };
     use std::collections::HashMap;
     #[test]
     fn test_pct() {
@@ -881,23 +1232,43 @@ mod tests {
         assert_eq!(label_from_7z_line(" 97% - dir/file.txt"), "dir/file.txt");
         assert_eq!(label_from_7z_line("  7%"), "");
         assert_eq!(label_from_7z_line("Everything is Ok"), "");
-        assert_eq!(label_from_7z_line("Extracting  dir/file.txt"), "dir/file.txt");
+        assert_eq!(
+            label_from_7z_line("Extracting  dir/file.txt"),
+            "dir/file.txt"
+        );
     }
     #[test]
     fn test_add_label() {
         assert_eq!(label_from_7z_add_line(" 12% + docs/a.txt"), "docs/a.txt");
-        assert_eq!(label_from_7z_add_line("Compressing  docs/a.txt"), "docs/a.txt");
+        assert_eq!(
+            label_from_7z_add_line("Compressing  docs/a.txt"),
+            "docs/a.txt"
+        );
         assert_eq!(label_from_7z_add_line("Adding  docs/a.txt"), "docs/a.txt");
         assert_eq!(label_from_7z_add_line("  7%"), "");
         assert_eq!(label_from_7z_add_line("Everything is Ok"), "");
         assert_eq!(label_from_7z_add_line("Scanning the drive:"), "");
         assert_eq!(label_from_7z_add_line("0M Scan  /tmp/x"), "");
-        assert_eq!(label_from_7z_add_line("Add new data to archive: 24 folders, 318 files,"), "");
+        assert_eq!(
+            label_from_7z_add_line("Add new data to archive: 24 folders, 318 files,"),
+            ""
+        );
         assert_eq!(label_from_7z_add_line("Add new data to archive:"), "");
-        assert_eq!(label_from_7z_add_line("7-Zip 26.02 (x64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-06-25"), "");
-        assert_eq!(label_from_7z_add_line("64-bit locale=it_IT.UTF-8 Threads:12 OPEN_MAX:1048576, ASM"), "");
+        assert_eq!(
+            label_from_7z_add_line(
+                "7-Zip 26.02 (x64) : Copyright (c) 1999-2026 Igor Pavlov : 2026-06-25"
+            ),
+            ""
+        );
+        assert_eq!(
+            label_from_7z_add_line("64-bit locale=it_IT.UTF-8 Threads:12 OPEN_MAX:1048576, ASM"),
+            ""
+        );
         assert_eq!(label_from_7z_add_line("Files read from disk: 60"), "");
-        assert_eq!(label_from_7z_add_line("Archive size: 984497 bytes (962 KiB)"), "");
+        assert_eq!(
+            label_from_7z_add_line("Archive size: 984497 bytes (962 KiB)"),
+            ""
+        );
     }
     #[test]
     fn test_add_progress_is_monotonic() {
@@ -964,5 +1335,104 @@ mod tests {
         tracker.last_emit = std::time::Instant::now() - std::time::Duration::from_secs(5);
         assert!(tracker.feed_io(10, &cb));
         assert_eq!(events.borrow().last().unwrap().current, 42);
+    }
+
+    #[test]
+    fn add_updates_archive_and_stages_nested_entries() {
+        use crate::core::archive::ArchiveBackend as _;
+        use std::sync::{atomic::AtomicBool, Arc};
+        let b = super::SevenZipBackend::with_cancel(Arc::new(AtomicBool::new(false)));
+        if !b.is_available() {
+            eprintln!("(7z unavailable, skipping)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.7z");
+        let src = dir.path().join("folder");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("old.txt"), b"old").unwrap();
+        b.create(&dest, std::slice::from_ref(&src), 6, None, None)
+            .unwrap();
+
+        let new = dir.path().join("new.txt");
+        std::fs::write(&new, b"new").unwrap();
+        // Root add (no staging) plus a nested entry (staging dir path).
+        b.add(
+            &dest,
+            &[
+                (new.clone(), "folder/new.txt".to_string()),
+                (new, "new_sub/deep.txt".to_string()),
+            ],
+            None,
+            None,
+        )
+        .unwrap();
+
+        let info = b.list(&dest).unwrap();
+        let names: Vec<&str> = info.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(names.contains(&"folder/old.txt"), "lost old: {:?}", names);
+        assert!(
+            names.contains(&"folder/new.txt"),
+            "missing new: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"new_sub/deep.txt"),
+            "missing staged: {:?}",
+            names
+        );
+
+        let out = dir.path().join("out");
+        b.extract(&dest, &out, None, None, None).unwrap();
+        assert_eq!(std::fs::read(out.join("folder/new.txt")).unwrap(), b"new");
+        assert_eq!(std::fs::read(out.join("new_sub/deep.txt")).unwrap(), b"new");
+        // Staging dir must be cleaned up on success.
+        let leftovers: Vec<_> = std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with(&format!("arkx-add-{}", std::process::id()))
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging dirs left behind: {:?}",
+            leftovers
+        );
+    }
+
+    #[test]
+    fn remove_updates_7z_archive() {
+        use crate::core::archive::ArchiveBackend as _;
+        use std::sync::{atomic::AtomicBool, Arc};
+        let b = super::SevenZipBackend::with_cancel(Arc::new(AtomicBool::new(false)));
+        if !b.is_available() {
+            eprintln!("(7z unavailable, skipping)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.7z");
+        let src = dir.path().join("folder");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(src.join("drop.txt"), b"drop").unwrap();
+        b.create(&dest, std::slice::from_ref(&src), 6, None, None)
+            .unwrap();
+
+        b.remove(&dest, &["folder/drop.txt".to_string()], None, None)
+            .unwrap();
+
+        let info = b.list(&dest).unwrap();
+        let names: Vec<&str> = info.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(names.contains(&"folder/keep.txt"), "lost keep: {:?}", names);
+        assert!(
+            !names.contains(&"folder/drop.txt"),
+            "drop still present: {:?}",
+            names
+        );
+        let out = dir.path().join("out");
+        b.extract(&dest, &out, None, None, None).unwrap();
+        assert_eq!(std::fs::read(out.join("folder/keep.txt")).unwrap(), b"keep");
     }
 }

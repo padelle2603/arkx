@@ -49,8 +49,17 @@ pub struct ProgressInfo {
 
 impl ProgressInfo {
     pub fn new(file: String, current: u64, total: u64) -> Self {
-        let percent = if total == 0 { 0.0 } else { current as f32 / total as f32 * 100.0 };
-        Self { file, current, total, percent }
+        let percent = if total == 0 {
+            0.0
+        } else {
+            current as f32 / total as f32 * 100.0
+        };
+        Self {
+            file,
+            current,
+            total,
+            percent,
+        }
     }
 }
 
@@ -75,5 +84,33 @@ pub trait ArchiveBackend: Send + Sync {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()>;
+    /// Add `sources` (filesystem path → entry path inside the archive) to an
+    /// existing archive. Implemented only by backends that can rewrite/update
+    /// in place (see `BackendManager::add`); the default is a clear error.
+    fn add(
+        &self,
+        _archive: &Path,
+        _sources: &[(PathBuf, String)],
+        _password: Option<&str>,
+        _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        Err(super::error::ArkxError::UnsupportedFormat(
+            "adding files to this archive format is not supported".into(),
+        ))
+    }
+    /// Remove archive entries by name from an existing archive. Implemented only
+    /// by backends that can rewrite/update in place (see `BackendManager::remove`);
+    /// the default is a clear error.
+    fn remove(
+        &self,
+        _archive: &Path,
+        _entries: &[String],
+        _password: Option<&str>,
+        _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        Err(super::error::ArkxError::UnsupportedFormat(
+            "removing files from this archive format is not supported".into(),
+        ))
+    }
     fn supports(&self, format: &super::detector::ArchiveFormat) -> bool;
 }

@@ -78,9 +78,24 @@ impl ArchiveFormat {
         match self {
             // Fast sequential reads without fork. Single Lzma/Compress:
             // listing is synthetic (native) while decoding falls back to 7z.
-            Self::Zip | Self::Tar | Self::TarGz | Self::TarBz2 | Self::TarXz | Self::TarZst | Self::TarLz4 | Self::Gz | Self::Bz2 | Self::Xz | Self::Zst | Self::Lz4 | Self::Lzma | Self::Compress => BackendKind::Native,
+            Self::Zip
+            | Self::Tar
+            | Self::TarGz
+            | Self::TarBz2
+            | Self::TarXz
+            | Self::TarZst
+            | Self::TarLz4
+            | Self::Gz
+            | Self::Bz2
+            | Self::Xz
+            | Self::Zst
+            | Self::Lz4
+            | Self::Lzma
+            | Self::Compress => BackendKind::Native,
             // 7z does not open these tar.* (nor list tar.Z/tar.lzma): libarchive.
-            Self::TarZ | Self::TarLzma | Self::TarLzip | Self::TarLzo | Self::TarLrzip => BackendKind::Libarchive,
+            Self::TarZ | Self::TarLzma | Self::TarLzip | Self::TarLzo | Self::TarLrzip => {
+                BackendKind::Libarchive
+            }
             _ => BackendKind::SevenZip,
         }
     }
@@ -100,7 +115,17 @@ pub fn detect_format(path: &Path) -> ArchiveFormat {
         let mime = kind.mime_type();
         if let Some(fmt) = from_mime(mime) {
             // Composite tar.* check (e.g. tar.xz is inferred as xz)
-            if matches!(fmt, ArchiveFormat::Tar | ArchiveFormat::Gz | ArchiveFormat::Bz2 | ArchiveFormat::Xz | ArchiveFormat::Zst | ArchiveFormat::Lz4 | ArchiveFormat::Lzma | ArchiveFormat::Compress) {
+            if matches!(
+                fmt,
+                ArchiveFormat::Tar
+                    | ArchiveFormat::Gz
+                    | ArchiveFormat::Bz2
+                    | ArchiveFormat::Xz
+                    | ArchiveFormat::Zst
+                    | ArchiveFormat::Lz4
+                    | ArchiveFormat::Lzma
+                    | ArchiveFormat::Compress
+            ) {
                 if let Some(tar_fmt) = detect_tar_composite(path) {
                     return tar_fmt;
                 }
@@ -114,7 +139,19 @@ pub fn detect_format(path: &Path) -> ArchiveFormat {
         if !matches!(fmt, ArchiveFormat::Unknown(_)) {
             if let Some(tar_fmt) = detect_tar_composite(path) {
                 // A gzip header with a tar.gz extension means TarGz
-                if matches!(tar_fmt, ArchiveFormat::TarGz | ArchiveFormat::TarBz2 | ArchiveFormat::TarXz | ArchiveFormat::TarZst | ArchiveFormat::TarLz4 | ArchiveFormat::TarZ | ArchiveFormat::TarLzma | ArchiveFormat::TarLzip | ArchiveFormat::TarLzo | ArchiveFormat::TarLrzip) {
+                if matches!(
+                    tar_fmt,
+                    ArchiveFormat::TarGz
+                        | ArchiveFormat::TarBz2
+                        | ArchiveFormat::TarXz
+                        | ArchiveFormat::TarZst
+                        | ArchiveFormat::TarLz4
+                        | ArchiveFormat::TarZ
+                        | ArchiveFormat::TarLzma
+                        | ArchiveFormat::TarLzip
+                        | ArchiveFormat::TarLzo
+                        | ArchiveFormat::TarLrzip
+                ) {
                     return tar_fmt;
                 }
             }
@@ -130,7 +167,9 @@ fn from_mime(mime: &str) -> Option<ArchiveFormat> {
     match mime {
         "application/zip" => Some(ArchiveFormat::Zip),
         "application/x-7z-compressed" => Some(ArchiveFormat::SevenZip),
-        "application/vnd.rar" | "application/x-rar" | "application/x-rar-compressed" => Some(ArchiveFormat::Rar),
+        "application/vnd.rar" | "application/x-rar" | "application/x-rar-compressed" => {
+            Some(ArchiveFormat::Rar)
+        }
         "application/x-tar" => Some(ArchiveFormat::Tar),
         // File-manager aliases for compressed tars (e.g. Nautilus/Dolphin)
         "application/x-compressed-tar" => Some(ArchiveFormat::TarGz),
@@ -152,7 +191,11 @@ fn from_mime(mime: &str) -> Option<ArchiveFormat> {
         "application/x-iso9660-image" | "application/x-cd-image" => Some(ArchiveFormat::Iso),
         "application/x-iso9660-appimage" => Some(ArchiveFormat::AppImage),
         "application/vnd.ms-cab-compressed" => Some(ArchiveFormat::Cab),
-        "application/x-bcpio" | "application/x-cpio" | "application/x-cpio-compressed" | "application/x-sv4cpio" | "application/x-sv4crc" => Some(ArchiveFormat::Cpio),
+        "application/x-bcpio"
+        | "application/x-cpio"
+        | "application/x-cpio-compressed"
+        | "application/x-sv4cpio"
+        | "application/x-sv4crc" => Some(ArchiveFormat::Cpio),
         "application/x-xar" => Some(ArchiveFormat::Xar),
         "application/x-archive" => Some(ArchiveFormat::Ar),
         "application/x-lha" | "application/x-lzh" => Some(ArchiveFormat::Lzh),
@@ -403,74 +446,200 @@ mod tests {
     use std::path::PathBuf;
     #[test]
     fn test_ext() {
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tar.gz")), ArchiveFormat::TarGz);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.zip")), ArchiveFormat::Zip);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.7z")), ArchiveFormat::SevenZip);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.rar")), ArchiveFormat::Rar);
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tar.gz")),
+            ArchiveFormat::TarGz
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.zip")),
+            ArchiveFormat::Zip
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.7z")),
+            ArchiveFormat::SevenZip
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.rar")),
+            ArchiveFormat::Rar
+        );
     }
 
     #[test]
     fn test_ext_new_formats() {
         // Exotic composite tars
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tar.Z")), ArchiveFormat::TarZ);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.taz")), ArchiveFormat::TarZ);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tar.lzma")), ArchiveFormat::TarLzma);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tlz")), ArchiveFormat::TarLzma);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tar.lz")), ArchiveFormat::TarLzip);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tzo")), ArchiveFormat::TarLzo);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tar.lzo")), ArchiveFormat::TarLzo);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tar.lrz")), ArchiveFormat::TarLrzip);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tar.lz4")), ArchiveFormat::TarLz4);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.tar.zst")), ArchiveFormat::TarZst);
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tar.Z")),
+            ArchiveFormat::TarZ
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.taz")),
+            ArchiveFormat::TarZ
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tar.lzma")),
+            ArchiveFormat::TarLzma
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tlz")),
+            ArchiveFormat::TarLzma
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tar.lz")),
+            ArchiveFormat::TarLzip
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tzo")),
+            ArchiveFormat::TarLzo
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tar.lzo")),
+            ArchiveFormat::TarLzo
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tar.lrz")),
+            ArchiveFormat::TarLrzip
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tar.lz4")),
+            ArchiveFormat::TarLz4
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.tar.zst")),
+            ArchiveFormat::TarZst
+        );
         // Singles
-        assert_eq!(detect_by_extension(&PathBuf::from("a.Z")), ArchiveFormat::Compress);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.lzma")), ArchiveFormat::Lzma);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.lz4")), ArchiveFormat::Lz4);
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.Z")),
+            ArchiveFormat::Compress
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.lzma")),
+            ArchiveFormat::Lzma
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.lz4")),
+            ArchiveFormat::Lz4
+        );
         // Archives via 7z
-        assert_eq!(detect_by_extension(&PathBuf::from("a.cpio")), ArchiveFormat::Cpio);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.bcpio")), ArchiveFormat::Cpio);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.xar")), ArchiveFormat::Xar);
-        assert_eq!(detect_by_extension(&PathBuf::from("libfoo.a")), ArchiveFormat::Ar);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.ar")), ArchiveFormat::Ar);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.AppImage")), ArchiveFormat::AppImage);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.lha")), ArchiveFormat::Lzh);
-        assert_eq!(detect_by_extension(&PathBuf::from("a.src.rpm")), ArchiveFormat::Rpm);
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.cpio")),
+            ArchiveFormat::Cpio
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.bcpio")),
+            ArchiveFormat::Cpio
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.xar")),
+            ArchiveFormat::Xar
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("libfoo.a")),
+            ArchiveFormat::Ar
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.ar")),
+            ArchiveFormat::Ar
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.AppImage")),
+            ArchiveFormat::AppImage
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.lha")),
+            ArchiveFormat::Lzh
+        );
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("a.src.rpm")),
+            ArchiveFormat::Rpm
+        );
         // No false positive for single-letter .a
-        assert_eq!(detect_by_extension(&PathBuf::from("opera")), ArchiveFormat::Unknown("unknown".into()));
+        assert_eq!(
+            detect_by_extension(&PathBuf::from("opera")),
+            ArchiveFormat::Unknown("unknown".into())
+        );
     }
 
     #[test]
     fn test_mime_aliases() {
-        assert_eq!(from_mime("application/x-compressed-tar"), Some(ArchiveFormat::TarGz));
-        assert_eq!(from_mime("application/x-bzip-compressed-tar"), Some(ArchiveFormat::TarBz2));
+        assert_eq!(
+            from_mime("application/x-compressed-tar"),
+            Some(ArchiveFormat::TarGz)
+        );
+        assert_eq!(
+            from_mime("application/x-bzip-compressed-tar"),
+            Some(ArchiveFormat::TarBz2)
+        );
         assert_eq!(from_mime("application/x-tarz"), Some(ArchiveFormat::TarZ));
-        assert_eq!(from_mime("application/x-xz-compressed-tar"), Some(ArchiveFormat::TarXz));
-        assert_eq!(from_mime("application/x-lzma-compressed-tar"), Some(ArchiveFormat::TarLzma));
-        assert_eq!(from_mime("application/x-lzip-compressed-tar"), Some(ArchiveFormat::TarLzip));
+        assert_eq!(
+            from_mime("application/x-xz-compressed-tar"),
+            Some(ArchiveFormat::TarXz)
+        );
+        assert_eq!(
+            from_mime("application/x-lzma-compressed-tar"),
+            Some(ArchiveFormat::TarLzma)
+        );
+        assert_eq!(
+            from_mime("application/x-lzip-compressed-tar"),
+            Some(ArchiveFormat::TarLzip)
+        );
         assert_eq!(from_mime("application/x-tzo"), Some(ArchiveFormat::TarLzo));
-        assert_eq!(from_mime("application/x-lrzip-compressed-tar"), Some(ArchiveFormat::TarLrzip));
-        assert_eq!(from_mime("application/x-lz4-compressed-tar"), Some(ArchiveFormat::TarLz4));
-        assert_eq!(from_mime("application/x-zstd-compressed-tar"), Some(ArchiveFormat::TarZst));
-        assert_eq!(from_mime("application/x-cd-image"), Some(ArchiveFormat::Iso));
+        assert_eq!(
+            from_mime("application/x-lrzip-compressed-tar"),
+            Some(ArchiveFormat::TarLrzip)
+        );
+        assert_eq!(
+            from_mime("application/x-lz4-compressed-tar"),
+            Some(ArchiveFormat::TarLz4)
+        );
+        assert_eq!(
+            from_mime("application/x-zstd-compressed-tar"),
+            Some(ArchiveFormat::TarZst)
+        );
+        assert_eq!(
+            from_mime("application/x-cd-image"),
+            Some(ArchiveFormat::Iso)
+        );
         assert_eq!(from_mime("application/x-bcpio"), Some(ArchiveFormat::Cpio));
         assert_eq!(from_mime("application/x-cpio"), Some(ArchiveFormat::Cpio));
-        assert_eq!(from_mime("application/x-cpio-compressed"), Some(ArchiveFormat::Cpio));
-        assert_eq!(from_mime("application/x-sv4cpio"), Some(ArchiveFormat::Cpio));
+        assert_eq!(
+            from_mime("application/x-cpio-compressed"),
+            Some(ArchiveFormat::Cpio)
+        );
+        assert_eq!(
+            from_mime("application/x-sv4cpio"),
+            Some(ArchiveFormat::Cpio)
+        );
         assert_eq!(from_mime("application/x-sv4crc"), Some(ArchiveFormat::Cpio));
-        assert_eq!(from_mime("application/x-source-rpm"), Some(ArchiveFormat::Rpm));
+        assert_eq!(
+            from_mime("application/x-source-rpm"),
+            Some(ArchiveFormat::Rpm)
+        );
         assert_eq!(from_mime("application/x-xar"), Some(ArchiveFormat::Xar));
-        assert_eq!(from_mime("application/x-iso9660-appimage"), Some(ArchiveFormat::AppImage));
+        assert_eq!(
+            from_mime("application/x-iso9660-appimage"),
+            Some(ArchiveFormat::AppImage)
+        );
         assert_eq!(from_mime("application/x-archive"), Some(ArchiveFormat::Ar));
         assert_eq!(from_mime("application/x-rar"), Some(ArchiveFormat::Rar));
-        assert_eq!(from_mime("application/x-compress"), Some(ArchiveFormat::Compress));
+        assert_eq!(
+            from_mime("application/x-compress"),
+            Some(ArchiveFormat::Compress)
+        );
         assert_eq!(from_mime("application/x-bzip"), Some(ArchiveFormat::Bz2));
         assert_eq!(from_mime("application/x-lzma"), Some(ArchiveFormat::Lzma));
         assert_eq!(from_mime("application/x-lha"), Some(ArchiveFormat::Lzh));
         // tar.* dialects must not stay Unknown
-        for fmt in [from_mime("application/x-tar"), from_mime("application/zip"),
-                    from_mime("application/x-7z-compressed"), from_mime("application/vnd.rar"),
-                    from_mime("application/gzip"), from_mime("application/x-xz"),
-                    from_mime("application/zstd"), from_mime("application/vnd.ms-cab-compressed")] {
+        for fmt in [
+            from_mime("application/x-tar"),
+            from_mime("application/zip"),
+            from_mime("application/x-7z-compressed"),
+            from_mime("application/vnd.rar"),
+            from_mime("application/gzip"),
+            from_mime("application/x-xz"),
+            from_mime("application/zstd"),
+            from_mime("application/vnd.ms-cab-compressed"),
+        ] {
             assert!(fmt.is_some());
         }
     }
@@ -479,21 +648,40 @@ mod tests {
     fn test_backend_routing() {
         use super::BackendKind;
         // Fast natives without fork
-        for fmt in [ArchiveFormat::Zip, ArchiveFormat::Tar, ArchiveFormat::TarGz,
-                    ArchiveFormat::TarXz, ArchiveFormat::TarLz4,
-                    ArchiveFormat::Gz, ArchiveFormat::Lz4,
-                    ArchiveFormat::Lzma, ArchiveFormat::Compress] {
+        for fmt in [
+            ArchiveFormat::Zip,
+            ArchiveFormat::Tar,
+            ArchiveFormat::TarGz,
+            ArchiveFormat::TarXz,
+            ArchiveFormat::TarLz4,
+            ArchiveFormat::Gz,
+            ArchiveFormat::Lz4,
+            ArchiveFormat::Lzma,
+            ArchiveFormat::Compress,
+        ] {
             assert_eq!(fmt.backend(), BackendKind::Native);
         }
         // Exotics via libarchive (7z does not open them / list their contents)
-        for fmt in [ArchiveFormat::TarZ, ArchiveFormat::TarLzma, ArchiveFormat::TarLzip,
-                    ArchiveFormat::TarLzo, ArchiveFormat::TarLrzip] {
+        for fmt in [
+            ArchiveFormat::TarZ,
+            ArchiveFormat::TarLzma,
+            ArchiveFormat::TarLzip,
+            ArchiveFormat::TarLzo,
+            ArchiveFormat::TarLrzip,
+        ] {
             assert_eq!(fmt.backend(), BackendKind::Libarchive);
         }
         // Rest via 7z
-        for fmt in [ArchiveFormat::SevenZip, ArchiveFormat::Rar, ArchiveFormat::Iso,
-                    ArchiveFormat::AppImage, ArchiveFormat::Cpio, ArchiveFormat::Xar,
-                    ArchiveFormat::Ar, ArchiveFormat::Cab] {
+        for fmt in [
+            ArchiveFormat::SevenZip,
+            ArchiveFormat::Rar,
+            ArchiveFormat::Iso,
+            ArchiveFormat::AppImage,
+            ArchiveFormat::Cpio,
+            ArchiveFormat::Xar,
+            ArchiveFormat::Ar,
+            ArchiveFormat::Cab,
+        ] {
             assert_eq!(fmt.backend(), BackendKind::SevenZip);
         }
     }

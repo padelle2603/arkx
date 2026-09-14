@@ -184,7 +184,9 @@ pub fn uniquify(path: &Path) -> PathBuf {
 
 fn split_archive_extension(filename: &str) -> (String, String) {
     let lower = filename.to_lowercase();
-    for comp in ["tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tar.zstd", "tar.lz4"] {
+    for comp in [
+        "tar.gz", "tar.bz2", "tar.xz", "tar.zst", "tar.zstd", "tar.lz4",
+    ] {
         if lower.ends_with(&format!(".{}", comp)) {
             let stem = filename[..filename.len() - comp.len() - 1].to_string();
             return (stem, comp.to_string());
@@ -305,8 +307,8 @@ mod tests {
     #[test]
     fn decodes_file_uris() {
         assert_eq!(
-            decode_input_arg("file:///home/user/Miei%20Documenti/docs"),
-            PathBuf::from("/home/user/Miei Documenti/docs")
+            decode_input_arg("file:///home/user/My%20Documents/docs"),
+            PathBuf::from("/home/user/My Documents/docs")
         );
         assert_eq!(
             decode_input_arg("/home/user/docs"),
@@ -323,36 +325,40 @@ mod tests {
         // Dolphin passes file:// URIs with UTF-8 percent-encoded: each %XX is a
         // BYTE, not a char (the old version corrupted accents/emoji).
         assert_eq!(
-            decode_input_arg("file:///home/user/caff%C3%A8/relazione.txt"),
-            PathBuf::from("/home/user/caffè/relazione.txt")
+            decode_input_arg("file:///home/user/caf%C3%A9/report.txt"),
+            PathBuf::from("/home/user/café/report.txt")
         );
         assert_eq!(
-            decode_input_arg("/tmp/cartella%20con%20spazi"),
-            PathBuf::from("/tmp/cartella con spazi")
+            decode_input_arg("/tmp/folder%20with%20spaces"),
+            PathBuf::from("/tmp/folder with spaces")
         );
     }
 
     #[test]
     fn default_name_single_file_and_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("relazione.txt");
+        let f = dir.path().join("report.txt");
         std::fs::write(&f, "x").unwrap();
         let dest = default_archive_path(&[f], "zip");
         assert_eq!(dest.extension().and_then(|s| s.to_str()), Some("zip"));
-        assert!(dest.file_name().unwrap().to_string_lossy().starts_with("relazione"));
+        assert!(dest
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("report"));
 
-        let sub = dir.path().join("foto");
+        let sub = dir.path().join("photos");
         std::fs::create_dir(&sub).unwrap();
-        let dest = default_archive_path(&[sub.to_path_buf()], "tar.gz");
+        let dest = default_archive_path(std::slice::from_ref(&sub), "tar.gz");
         let name = dest.file_name().unwrap().to_string_lossy().to_string();
-        assert!(name.starts_with("foto"));
+        assert!(name.starts_with("photos"));
         assert!(name.ends_with(".tar.gz"));
     }
 
     #[test]
     fn default_name_multi_uses_parent() {
         let dir = tempfile::tempdir().unwrap();
-        let proj = dir.path().join("progetto");
+        let proj = dir.path().join("project");
         std::fs::create_dir(&proj).unwrap();
         let a = proj.join("a.txt");
         let b = proj.join("b.txt");
@@ -363,7 +369,7 @@ mod tests {
             .file_name()
             .unwrap()
             .to_string_lossy()
-            .starts_with("progetto"));
+            .starts_with("project"));
     }
 
     #[test]
@@ -372,12 +378,9 @@ mod tests {
         let target = dir.path().join("docs.zip");
         std::fs::write(&target, "x").unwrap();
         let unique = uniquify(&target);
-        assert_eq!(
-            unique.file_name().unwrap().to_string_lossy(),
-            "docs-2.zip"
-        );
+        assert_eq!(unique.file_name().unwrap().to_string_lossy(), "docs-2.zip");
         // compound tar.gz keeps the whole extension
-        let tgz = dir.path().join("foto.tar.gz");
+        let tgz = dir.path().join("photos.tar.gz");
         std::fs::write(&tgz, "x").unwrap();
         let unique = uniquify(&tgz);
         assert!(unique
@@ -389,7 +392,7 @@ mod tests {
             .file_name()
             .unwrap()
             .to_string_lossy()
-            .starts_with("foto-2"));
+            .starts_with("photos-2"));
     }
 
     #[test]

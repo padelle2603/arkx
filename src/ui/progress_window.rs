@@ -1,6 +1,6 @@
-use gtk4 as gtk;
-use gtk::glib;
 use adw::prelude::*;
+use gtk::glib;
+use gtk4 as gtk;
 use pango;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -193,7 +193,11 @@ impl ProgressWindow {
         details_btn.connect_toggled(move |b| {
             let open = b.is_active();
             revealer_toggle.set_reveal_child(open);
-            b.set_icon_name(if open { "pan-up-symbolic" } else { "pan-down-symbolic" });
+            b.set_icon_name(if open {
+                "pan-up-symbolic"
+            } else {
+                "pan-down-symbolic"
+            });
             btn_toggle.set_tooltip_text(Some(if open { "Hide details" } else { "Show details" }));
         });
 
@@ -239,7 +243,8 @@ impl ProgressWindow {
         let pct_s = crate::core::util::format_percent(pct, info.current, info.total);
         self.bar.set_text(Some(&pct_s));
         self.file_label.set_text(&truncate_middle(&info.file, 60));
-        self.title_label.set_text(&format!("{}… {}", self.verb.borrow(), pct_s));
+        self.title_label
+            .set_text(&format!("{}… {}", self.verb.borrow(), pct_s));
 
         let now = Instant::now();
         let (prev_bytes, prev_time) = *self.last_sample.borrow();
@@ -294,7 +299,8 @@ impl ProgressWindow {
         self.bar.pulse();
         self.bar.set_text(Some("…"));
         self.file_label.set_text(&truncate_middle(file, 60));
-        self.title_label.set_text(&format!("{}…", self.verb.borrow()));
+        self.title_label
+            .set_text(&format!("{}…", self.verb.borrow()));
         self.detail_file.set_text(file);
     }
 

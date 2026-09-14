@@ -1,20 +1,20 @@
 use adw::prelude::*;
+use gtk::{gdk, gio, glib};
 use gtk4 as gtk;
-use gtk::{glib, gio, gdk};
 use std::cell::RefCell;
-use std::rc::Rc;
 use std::path::{Path, PathBuf};
-use std::time::{Instant, Duration};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use crate::core::paths;
 use crate::core::util::truncate_middle;
 use crate::ui::browser::{
-    AppState, create_empty_state, create_table_header, filter_list, get_all_descendants,
-    get_children, navigate_up, populate_current_view, update_breadcrumb,
+    create_empty_state, create_table_header, filter_list, get_all_descendants, get_children,
+    navigate_up, populate_current_view, update_breadcrumb, AppState,
 };
 use crate::ui::dialogs;
-use crate::worker::{WorkerPool, JobKind, WorkerEvent, JobResult};
 use crate::ui::progress_window::ProgressWindow;
+use crate::worker::{JobKind, JobResult, WorkerEvent, WorkerPool};
 
 /// Handles shared by every UI callback. Cloning is cheap (Rc + refcounted widgets).
 #[derive(Clone)]
@@ -246,7 +246,9 @@ pub fn build_ui(app: &adw::Application) {
 
     // Separate progress window (dismissed by the user: Close button or Esc).
     // Holder for the current progress window
-    let progress_window: Rc<RefCell<Option<Rc<RefCell<crate::ui::progress_window::ProgressWindow>>>>> = Rc::new(RefCell::new(None));
+    let progress_window: Rc<
+        RefCell<Option<Rc<RefCell<crate::ui::progress_window::ProgressWindow>>>>,
+    > = Rc::new(RefCell::new(None));
 
     // Responsive status bar
     let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 12);
@@ -267,7 +269,8 @@ pub fn build_ui(app: &adw::Application) {
     window.set_content(Some(&root));
 
     // Breakpoints for responsiveness
-    let bp_narrow = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 650px").unwrap());
+    let bp_narrow =
+        adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 650px").unwrap());
     let root_clone_a = root.clone();
     let root_clone_b = root.clone();
     bp_narrow.connect_apply(move |_| {
@@ -278,7 +281,8 @@ pub fn build_ui(app: &adw::Application) {
     });
     window.add_breakpoint(bp_narrow);
 
-    let bp_medium = adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 900px").unwrap());
+    let bp_medium =
+        adw::Breakpoint::new(adw::BreakpointCondition::parse("max-width: 900px").unwrap());
     let root_clone2_a = root.clone();
     let root_clone2_b = root.clone();
     bp_medium.connect_apply(move |_| {
@@ -293,9 +297,13 @@ pub fn build_ui(app: &adw::Application) {
     let action_extract_here = gio::SimpleAction::new("extract-selected-here", None);
     let action_extract_to = gio::SimpleAction::new("extract-selected-to", None);
     let action_copy = gio::SimpleAction::new("copy-path", None);
+    let action_remove = gio::SimpleAction::new("remove-selected", None);
     window.add_action(&action_extract_here);
     window.add_action(&action_extract_to);
     window.add_action(&action_copy);
+    window.add_action(&action_remove);
+
+    let open_menu: Rc<RefCell<Option<gtk::PopoverMenu>>> = Rc::new(RefCell::new(None));
 
     // Bundle shared handles for the callbacks below.
     let ui = Ui {
@@ -331,6 +339,71 @@ pub fn build_ui(app: &adw::Application) {
         false
     });
     root.add_controller(drop_target);
+
+    // === DRAG & DROP INTO THE OPEN ARCHIVE ===
+    // Dropping files onto the archive area adds them to the browsed folder.
+    fn drop_into_archive(paths: Vec<PathBuf>, ui: Ui) -> bool {
+        if ui.state.borrow().current_info.is_none() {
+            // No archive open: open the first dropped file (old empty-state behaviour).
+            if let Some(first) = paths.first() {
+                open_archive(first.clone(), ui);
+            }
+            return true;
+        }
+        if *ui.is_busy.borrow() {
+            ui.status_left
+                .set_text("Busy: wait for the current operation to finish");
+            return true;
+        }
+        let Some(archive) = ui.state.borrow().current_archive.clone() else {
+            return true;
+        };
+        let cur = ui.state.borrow().current_path.clone();
+        let mut sources: Vec<(PathBuf, String)> = Vec::new();
+        for p in &paths {
+            if *p == archive {
+                continue; // never add the archive into itself
+            }
+            let Some(base) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            sources.push((p.clone(), paths::normalize(&format!("{}{}", cur, base))));
+        }
+        if sources.is_empty() {
+            ui.status_left.set_text("Nothing to add");
+            return true;
+        }
+        ui.status_left
+            .set_text(&format!("Adding {} item(s)…", sources.len()));
+        ui.worker.borrow_mut().submit(JobKind::Add {
+            archive,
+            sources,
+            password: None,
+        });
+        true
+    }
+    let drop_single = gtk::DropTarget::new(gio::File::static_type(), gdk::DragAction::COPY);
+    let ui_ds = ui.clone();
+    drop_single.connect_drop(move |_, value, _, _| {
+        let Ok(f) = value.get::<gio::File>() else {
+            return true;
+        };
+        f.path()
+            .map(|p| drop_into_archive(vec![p], ui_ds.clone()))
+            .unwrap_or(true)
+    });
+    content_box.add_controller(drop_single);
+
+    let drop_multi = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+    let ui_dm = ui.clone();
+    drop_multi.connect_drop(move |_, value, _, _| {
+        let Ok(list) = value.get::<gdk::FileList>() else {
+            return true;
+        };
+        let paths: Vec<PathBuf> = list.files().iter().filter_map(|f| f.path()).collect();
+        drop_into_archive(paths, ui_dm.clone())
+    });
+    content_box.add_controller(drop_multi);
 
     // === ACTIONS ===
     // Open file
@@ -446,7 +519,9 @@ pub fn build_ui(app: &adw::Application) {
     let ui_all = ui.clone();
     extract_all_btn.connect_clicked(move |_| {
         if *ui_all.is_busy.borrow() {
-            ui_all.status_left.set_text("An operation is already in progress…");
+            ui_all
+                .status_left
+                .set_text("An operation is already in progress…");
             return;
         }
         let st = ui_all.state.borrow();
@@ -473,7 +548,9 @@ pub fn build_ui(app: &adw::Application) {
     let ui_sel = ui.clone();
     extract_sel_btn.connect_clicked(move |_| {
         if *ui_sel.is_busy.borrow() {
-            ui_sel.status_left.set_text("An operation is already in progress…");
+            ui_sel
+                .status_left
+                .set_text("An operation is already in progress…");
             return;
         }
         let st = ui_sel.state.borrow();
@@ -509,7 +586,9 @@ pub fn build_ui(app: &adw::Application) {
     let ui_back = ui.clone();
     back_btn.connect_clicked(move |_| {
         let mut st = ui_back.state.borrow_mut();
-        if st.current_path.is_empty() { return; }
+        if st.current_path.is_empty() {
+            return;
+        }
         // Drop the last component.
         st.current_path = navigate_up(&st.current_path);
         let cur = st.current_path.clone();
@@ -517,10 +596,25 @@ pub fn build_ui(app: &adw::Application) {
         let filter = st.filter_text.clone();
         drop(st);
         if let Some(info) = info_opt {
-            update_breadcrumb(&ui_back.breadcrumb, &cur, &info, ui_back.state.clone(), ui_back.list.clone(), ui_back.status_left.clone(), ui_back.status_right.clone());
+            update_breadcrumb(
+                &ui_back.breadcrumb,
+                &cur,
+                &info,
+                ui_back.state.clone(),
+                ui_back.list.clone(),
+                ui_back.status_left.clone(),
+                ui_back.status_right.clone(),
+            );
             populate_current_view(&ui_back.list, &info, &cur, &filter);
             ui_back.back.set_sensitive(!cur.is_empty());
-            ui_back.status_left.set_text(&format!("Folder: /{}", if cur.is_empty() { "".to_string() } else { cur.clone() }));
+            ui_back.status_left.set_text(&format!(
+                "Folder: /{}",
+                if cur.is_empty() {
+                    "".to_string()
+                } else {
+                    cur.clone()
+                }
+            ));
         }
     });
 
@@ -533,7 +627,9 @@ pub fn build_ui(app: &adw::Application) {
         for row in lb.selected_rows() {
             if let Some(p) = row.tooltip_text() {
                 let s = p.to_string();
-                if s == "__UP__" { continue; }
+                if s == "__UP__" {
+                    continue;
+                }
                 selected.push(s);
             }
         }
@@ -559,10 +655,25 @@ pub fn build_ui(app: &adw::Application) {
                 let filter_c = st_mut.filter_text.clone();
                 let info_c = st_mut.current_info.clone().unwrap();
                 drop(st_mut);
-                update_breadcrumb(&ui_nav.breadcrumb, &new_path, &info_c, ui_nav.state.clone(), ui_nav.list.clone(), ui_nav.status_left.clone(), ui_nav.status_right.clone());
+                update_breadcrumb(
+                    &ui_nav.breadcrumb,
+                    &new_path,
+                    &info_c,
+                    ui_nav.state.clone(),
+                    ui_nav.list.clone(),
+                    ui_nav.status_left.clone(),
+                    ui_nav.status_right.clone(),
+                );
                 populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c);
                 ui_nav.back.set_sensitive(!new_path.is_empty());
-                ui_nav.status_left.set_text(&format!("Folder: /{}", if new_path.is_empty() { "".to_string() } else { new_path.clone() }));
+                ui_nav.status_left.set_text(&format!(
+                    "Folder: /{}",
+                    if new_path.is_empty() {
+                        "".to_string()
+                    } else {
+                        new_path.clone()
+                    }
+                ));
                 return;
             }
             if let Some(info) = info_opt {
@@ -577,13 +688,27 @@ pub fn build_ui(app: &adw::Application) {
                         let filter_c = st_mut.filter_text.clone();
                         let info_c = st_mut.current_info.clone().unwrap();
                         drop(st_mut);
-                        update_breadcrumb(&ui_nav.breadcrumb, &new_path, &info_c, ui_nav.state.clone(), ui_nav.list.clone(), ui_nav.status_left.clone(), ui_nav.status_right.clone());
+                        update_breadcrumb(
+                            &ui_nav.breadcrumb,
+                            &new_path,
+                            &info_c,
+                            ui_nav.state.clone(),
+                            ui_nav.list.clone(),
+                            ui_nav.status_left.clone(),
+                            ui_nav.status_right.clone(),
+                        );
                         populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c);
                         ui_nav.back.set_sensitive(true);
-                        ui_nav.status_left.set_text(&format!("Opened: /{}", new_path));
+                        ui_nav
+                            .status_left
+                            .set_text(&format!("Opened: /{}", new_path));
                     } else {
                         // Plain file: show info for now.
-                        ui_nav.status_left.set_text(&format!("File: {} ({}), double-click to extract", entry.file_name(), humansize::format_size(entry.size, humansize::BINARY)));
+                        ui_nav.status_left.set_text(&format!(
+                            "File: {} ({}), double-click to extract",
+                            entry.file_name(),
+                            humansize::format_size(entry.size, humansize::BINARY)
+                        ));
                     }
                 }
             }
@@ -595,8 +720,10 @@ pub fn build_ui(app: &adw::Application) {
     gesture.set_button(3);
     let ui_menu = ui.clone();
     let list_gesture = list_box.clone();
+    let open_menu_g = open_menu.clone();
     gesture.connect_pressed(move |gesture, _n, x, y| {
         gesture.set_state(gtk::EventSequenceState::Claimed);
+        dismiss_context_menu(&open_menu_g);
         // Find the row under the cursor.
         let picked = list_gesture.pick(x, y, gtk::PickFlags::DEFAULT);
         let mut target_path: Option<String> = None;
@@ -631,28 +758,46 @@ pub fn build_ui(app: &adw::Application) {
         // Build the contextual popover menu (win.* actions read
         // state.selected_entries when activated).
         let menu = gio::Menu::new();
-        menu.append(Some("Extract selected here"), Some("win.extract-selected-here"));
-        menu.append(Some("Extract selected to…"), Some("win.extract-selected-to"));
+        menu.append(
+            Some("Extract selected here"),
+            Some("win.extract-selected-here"),
+        );
+        menu.append(
+            Some("Extract selected to…"),
+            Some("win.extract-selected-to"),
+        );
         menu.append(Some("Copy path"), Some("win.copy-path"));
+        menu.append(Some("Remove from archive"), Some("win.remove-selected"));
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
         popover.set_parent(&list_gesture);
         popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
         popover.set_has_arrow(false);
         popover.popup();
+        *open_menu_g.borrow_mut() = Some(popover);
     });
     list_box.add_controller(gesture);
 
     // Wire the context-menu actions (global) with a fast duplicate guard
     let ui_here = ui.clone();
+    let open_menu_here = open_menu.clone();
     action_extract_here.connect_activate(move |_, _| {
-        if *ui_here.is_busy.borrow() { ui_here.status_left.set_text("An operation is already in progress…"); return; }
+        dismiss_context_menu(&open_menu_here);
+        if *ui_here.is_busy.borrow() {
+            ui_here
+                .status_left
+                .set_text("An operation is already in progress…");
+            return;
+        }
         let st = ui_here.state.borrow();
         if let Some(archive) = st.current_archive.clone() {
             let dest = archive.parent().unwrap_or(Path::new("/tmp")).to_path_buf();
             let selected = st.selected_entries.clone();
             let info_opt = st.current_info.clone();
             drop(st);
-            if selected.is_empty() { ui_here.status_left.set_text("No selection"); return; }
+            if selected.is_empty() {
+                ui_here.status_left.set_text("No selection");
+                return;
+            }
             {
                 let mut le = ui_here.last_extract.borrow_mut();
                 if let Some((la, ld, t)) = &*le {
@@ -663,14 +808,25 @@ pub fn build_ui(app: &adw::Application) {
                 }
                 *le = Some((archive.clone(), dest.clone(), Instant::now()));
             }
-            let expanded = if let Some(info) = info_opt { get_all_descendants(&info, &selected) } else { selected };
+            let expanded = if let Some(info) = info_opt {
+                get_all_descendants(&info, &selected)
+            } else {
+                selected
+            };
             start_extract(archive, dest, expanded, None, ui_here.clone());
         }
     });
 
     let ui_to = ui.clone();
+    let open_menu_to = open_menu.clone();
     action_extract_to.connect_activate(move |_, _| {
-        if *ui_to.is_busy.borrow() { ui_to.status_left.set_text("An operation is already in progress…"); return; }
+        dismiss_context_menu(&open_menu_to);
+        if *ui_to.is_busy.borrow() {
+            ui_to
+                .status_left
+                .set_text("An operation is already in progress…");
+            return;
+        }
         let st = ui_to.state.borrow();
         let archive = match st.current_archive.clone() {
             Some(a) => a,
@@ -679,8 +835,15 @@ pub fn build_ui(app: &adw::Application) {
         let selected = st.selected_entries.clone();
         let info_opt = st.current_info.clone();
         drop(st);
-        if selected.is_empty() { ui_to.status_left.set_text("No selection"); return; }
-        let expanded = if let Some(info) = info_opt { get_all_descendants(&info, &selected) } else { selected };
+        if selected.is_empty() {
+            ui_to.status_left.set_text("No selection");
+            return;
+        }
+        let expanded = if let Some(info) = info_opt {
+            get_all_descendants(&info, &selected)
+        } else {
+            selected
+        };
         let dialog = gtk::FileDialog::new();
         dialog.set_title("Extract selected to…");
         let ui_dlg = ui_to.clone();
@@ -695,7 +858,9 @@ pub fn build_ui(app: &adw::Application) {
     });
 
     let ui_copy = ui.clone();
+    let open_menu_copy = open_menu.clone();
     action_copy.connect_activate(move |_, _| {
+        dismiss_context_menu(&open_menu_copy);
         let st = ui_copy.state.borrow();
         if let Some(sel) = st.selected_entries.first() {
             let display = gdk::Display::default().unwrap();
@@ -704,11 +869,51 @@ pub fn build_ui(app: &adw::Application) {
         }
     });
 
+    // Remove selected entries from the open archive (like `arkx remove`).
+    let ui_rm = ui.clone();
+    let open_menu_rm = open_menu.clone();
+    action_remove.connect_activate(move |_, _| {
+        dismiss_context_menu(&open_menu_rm);
+        if *ui_rm.is_busy.borrow() {
+            ui_rm
+                .status_left
+                .set_text("An operation is already in progress…");
+            return;
+        }
+        let st = ui_rm.state.borrow();
+        let archive = match st.current_archive.clone() {
+            Some(a) => a,
+            None => return,
+        };
+        let selected = st.selected_entries.clone();
+        let info_opt = st.current_info.clone();
+        drop(st);
+        if selected.is_empty() {
+            ui_rm.status_left.set_text("No selection");
+            return;
+        }
+        let entries = if let Some(info) = info_opt {
+            get_all_descendants(&info, &selected)
+        } else {
+            selected
+        };
+        ui_rm
+            .status_left
+            .set_text(&format!("Removing {} entry(ies)…", entries.len()));
+        ui_rm.worker.borrow_mut().submit(JobKind::Remove {
+            archive,
+            entries,
+            password: None,
+        });
+    });
+
     // Shortcuts
     let shortcut_controller = gtk::ShortcutController::new();
     let ui_open_key = ui.clone();
     let action_open = gio::SimpleAction::new("open", None);
-    action_open.connect_activate(move |_, _| { ui_open_key.open.emit_clicked(); });
+    action_open.connect_activate(move |_, _| {
+        ui_open_key.open.emit_clicked();
+    });
     window.add_action(&action_open);
     let ui_ctrl_o = ui.clone();
     shortcut_controller.add_shortcut(gtk::Shortcut::new(
@@ -734,6 +939,7 @@ pub fn build_ui(app: &adw::Application) {
     // Poll worker events every 50ms (throttled so the UI is not spammed).
     // The whole loop works off one shared `Ui` snapshot plus small locals.
     let ui_poll = ui.clone();
+    let open_menu_poll = open_menu.clone();
     glib::timeout_add_local(Duration::from_millis(50), move || {
         let mut events = Vec::new();
         while let Some(evt) = ui_poll.worker.borrow().try_recv() {
@@ -748,13 +954,19 @@ pub fn build_ui(app: &adw::Application) {
                     ui_poll.extract_all.set_sensitive(false);
                     ui_poll.extract_sel.set_sensitive(false);
                     status_left.set_text("Working…");
-                    if kind == "extract" {
+                    if kind == "extract" || kind == "add" || kind == "remove" {
+                        let (title, verb) = match kind.as_str() {
+                            "add" => ("Adding to archive", "Adding"),
+                            "remove" => ("Removing from archive", "Removing"),
+                            _ => ("Extraction in progress", "Extracting"),
+                        };
                         let stale = ui_poll.progress_window.borrow().as_ref().cloned();
                         if let Some(old) = stale {
                             old.borrow().close();
                         }
                         *ui_poll.progress_window.borrow_mut() = None;
-                        let w = ProgressWindow::new(&ui_poll.window, "Extraction in progress", "Preparing… 0%");
+                        let w = ProgressWindow::new(&ui_poll.window, title, "Preparing… 0%");
+                        w.borrow().set_operation(verb);
                         w.borrow().reset();
                         let w_clone = w.clone();
                         let worker_c = ui_poll.worker.clone();
@@ -769,9 +981,16 @@ pub fn build_ui(app: &adw::Application) {
                     // Unknown total (e.g. encrypted headers, empty Size): pulsing bar,
                     // never a fake %. Every event steps the pulse.
                     if info.total == 0 {
-                        if ui_poll.progress_window.borrow().is_none() {
+                        // Compute the flag first so the borrow is dropped before
+                        // the `borrow_mut()` below.
+                        let has_window = ui_poll.progress_window.borrow().is_some();
+                        if !has_window {
                             let subtitle = truncate_middle(&info.file, 50);
-                            let w = ProgressWindow::new(&ui_poll.window, "Extraction in progress", &subtitle);
+                            let w = ProgressWindow::new(
+                                &ui_poll.window,
+                                "Extraction in progress",
+                                &subtitle,
+                            );
                             w.borrow().pulse(&info.file);
                             let w_clone = w.clone();
                             let worker_c = ui_poll.worker.clone();
@@ -799,9 +1018,14 @@ pub fn build_ui(app: &adw::Application) {
                     }
                     *ui_poll.last_progress.borrow_mut() = (pct, Instant::now());
                     // Fallback: Started lost (ultrafast job), create at the real pct.
-                    if ui_poll.progress_window.borrow().is_none() {
+                    let has_window = ui_poll.progress_window.borrow().is_some();
+                    if !has_window {
                         let subtitle = truncate_middle(&info.file, 50);
-                        let w = ProgressWindow::new(&ui_poll.window, "Extraction in progress", &subtitle);
+                        let w = ProgressWindow::new(
+                            &ui_poll.window,
+                            "Extraction in progress",
+                            &subtitle,
+                        );
                         w.borrow().set_progress(&info);
                         let w_clone = w.clone();
                         let worker_c = ui_poll.worker.clone();
@@ -814,23 +1038,34 @@ pub fn build_ui(app: &adw::Application) {
                     if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
                         pw.borrow().set_progress(&info);
                     }
-                    status_left.set_text(&format!("{} — {}", truncate_middle(&info.file, 40), crate::core::util::format_percent(pct, info.current, info.total)));
+                    status_left.set_text(&format!(
+                        "{} — {}",
+                        truncate_middle(&info.file, 40),
+                        crate::core::util::format_percent(pct, info.current, info.total)
+                    ));
                 }
                 WorkerEvent::Finished { result } => {
                     *ui_poll.last_progress.borrow_mut() = (100.0, Instant::now());
                     // The outcome stays on screen: the user dismisses it with
                     // Close, Esc or the window X. No auto-close timers.
                     match &result {
-                        Ok(JobResult::Extract) => {
-                            if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
+                        Ok(JobResult::Extract) | Ok(JobResult::Add) | Ok(JobResult::Remove) => {
+                            // Clone the handle first: the else branch below uses
+                            // `borrow_mut()` while this `Ref` would still be live.
+                            let existing = ui_poll.progress_window.borrow().as_ref().cloned();
+                            if let Some(pw) = existing {
                                 pw.borrow().set_complete();
                                 let holder = ui_poll.progress_window.clone();
                                 pw.borrow().finish_dismiss(move || {
                                     *holder.borrow_mut() = None;
                                 });
                             } else {
-                                // Ultrafast extraction without Progress: still show the outcome.
-                                let w = ProgressWindow::new(&ui_poll.window, "Extraction", "Completed ✓");
+                                // Ultrafast job without Progress: still show the outcome.
+                                let w = ProgressWindow::new(
+                                    &ui_poll.window,
+                                    "Operation completed",
+                                    "Completed ✓",
+                                );
                                 w.borrow().set_complete();
                                 let holder = ui_poll.progress_window.clone();
                                 *ui_poll.progress_window.borrow_mut() = Some(w.clone());
@@ -843,21 +1078,28 @@ pub fn build_ui(app: &adw::Application) {
                             if !ui_poll.state.borrow().selected_entries.is_empty() {
                                 ui_poll.extract_sel.set_sensitive(true);
                             }
-                            status_left.set_text("Extraction complete ✓");
                         }
                         _ => {
-                            // For List, close any leftover window
-                            if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
+                            // For List, close any leftover window. Clone first so the
+                            // borrow is released before `borrow_mut()` below (a live
+                            // `Ref` here panics with `RefCell already borrowed`).
+                            let stale = ui_poll.progress_window.borrow().as_ref().cloned();
+                            if let Some(pw) = stale {
                                 pw.borrow().close();
-                                *ui_poll.progress_window.borrow_mut() = None;
                             }
+                            *ui_poll.progress_window.borrow_mut() = None;
                             *ui_poll.is_busy.borrow_mut() = false;
-                            ui_poll.extract_all.set_sensitive(ui_poll.state.borrow().current_info.is_some());
-                            ui_poll.extract_sel.set_sensitive(!ui_poll.state.borrow().selected_entries.is_empty());
+                            ui_poll
+                                .extract_all
+                                .set_sensitive(ui_poll.state.borrow().current_info.is_some());
+                            ui_poll
+                                .extract_sel
+                                .set_sensitive(!ui_poll.state.borrow().selected_entries.is_empty());
                         }
                     }
                     match result {
                         Ok(JobResult::List(info)) => {
+                            dismiss_context_menu(&open_menu_poll);
                             let archive_path = PathBuf::from(&info.path);
                             let mut st = ui_poll.state.borrow_mut();
                             st.current_info = Some(info.clone());
@@ -866,39 +1108,98 @@ pub fn build_ui(app: &adw::Application) {
                             let filter = st.filter_text.clone();
                             drop(st);
                             // Refresh the root breadcrumb
-                            update_breadcrumb(&ui_poll.breadcrumb, "", &info, ui_poll.state.clone(), ui_poll.list.clone(), ui_poll.status_left.clone(), ui_poll.status_right.clone());
+                            update_breadcrumb(
+                                &ui_poll.breadcrumb,
+                                "",
+                                &info,
+                                ui_poll.state.clone(),
+                                ui_poll.list.clone(),
+                                ui_poll.status_left.clone(),
+                                ui_poll.status_right.clone(),
+                            );
                             // Populate the current view (top level only)
                             populate_current_view(&ui_poll.list, &info, "", &filter);
                             ui_poll.empty.set_visible(info.entries.is_empty());
                             status_left.set_text("");
-                            let total_h = humansize::format_size(info.total_size, humansize::BINARY);
-                            let packed_h = humansize::format_size(info.total_packed, humansize::BINARY);
-                            let ratio = if info.total_size > 0 { 100.0 * (1.0 - info.total_packed as f32 / info.total_size as f32) } else { 0.0 };
+                            let total_h =
+                                humansize::format_size(info.total_size, humansize::BINARY);
+                            let packed_h =
+                                humansize::format_size(info.total_packed, humansize::BINARY);
+                            let ratio = if info.total_size > 0 {
+                                100.0 * (1.0 - info.total_packed as f32 / info.total_size as f32)
+                            } else {
+                                0.0
+                            };
                             // Show archive info + path (root breadcrumb carries the archive name)
                             ui_poll.info.set_text(&info.format);
                             ui_poll.info.set_visible(true);
                             ui_poll.info.remove_css_class("badge-encrypted");
                             if info.has_encrypted {
                                 ui_poll.info.add_css_class("badge-encrypted");
-                                ui_poll.info.set_text(&format!("{} • encrypted", info.format));
+                                ui_poll
+                                    .info
+                                    .set_text(&format!("{} • encrypted", info.format));
                             }
-                            ui_poll.status_right.set_text(&format!("{} files • {} folders • {} → {} ({:.0}%)", info.num_files, info.num_dirs, total_h, packed_h, ratio));
+                            ui_poll.status_right.set_text(&format!(
+                                "{} files • {} folders • {} → {} ({:.0}%)",
+                                info.num_files, info.num_dirs, total_h, packed_h, ratio
+                            ));
                             ui_poll.extract_all.set_sensitive(true);
                             ui_poll.extract_sel.set_sensitive(false);
                             ui_poll.back.set_sensitive(false);
                             // Full-path tooltip on the breadcrumb
-                            ui_poll.breadcrumb.set_tooltip_text(Some(&archive_path.display().to_string()));
+                            ui_poll
+                                .breadcrumb
+                                .set_tooltip_text(Some(&archive_path.display().to_string()));
                         }
                         Ok(JobResult::Extract) => {
                             // Outcome already shown in the progress window; status only.
                             status_left.set_text("Extraction complete ✓");
                         }
+                        Ok(JobResult::Add) => {
+                            // Relist to show the newly added files in place.
+                            // Deferred to the next main-loop iteration: submitting
+                            // the relist job mid-poll would re-enter the event
+                            // dispatch and could tear down the window.
+                            status_left.set_text("Added files to archive ✓");
+                            let archive = ui_poll.state.borrow().current_archive.clone();
+                            if let Some(archive) = archive {
+                                let ui_idle = ui_poll.clone();
+                                glib::timeout_add_local_once(
+                                    std::time::Duration::from_millis(0),
+                                    move || {
+                                        open_archive(archive, ui_idle.clone());
+                                    },
+                                );
+                            }
+                        }
+                        Ok(JobResult::Remove) => {
+                            // Relist like Add (deferred, see above).
+                            status_left.set_text("Removed entries from archive ✓");
+                            let archive = ui_poll.state.borrow().current_archive.clone();
+                            if let Some(archive) = archive {
+                                let ui_idle = ui_poll.clone();
+                                glib::timeout_add_local_once(
+                                    std::time::Duration::from_millis(0),
+                                    move || {
+                                        open_archive(archive, ui_idle.clone());
+                                    },
+                                );
+                            }
+                        }
                         Err(msg) => {
                             // Outcome shown in the progress window when one exists;
                             // password errors still open the unlock prompt.
                             status_left.set_text(&format!("Error: {}", truncate_middle(&msg, 80)));
-                            if msg.contains("Password") || msg.contains("encrypted") || msg.contains("Wrong") {
-                                dialogs::show_password_dialog(status_left, ui_poll.state.clone(), ui_poll.worker.clone());
+                            if msg.contains("Password")
+                                || msg.contains("encrypted")
+                                || msg.contains("Wrong")
+                            {
+                                dialogs::show_password_dialog(
+                                    status_left,
+                                    ui_poll.state.clone(),
+                                    ui_poll.worker.clone(),
+                                );
                             } else if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
                                 pw.borrow().set_error(&msg);
                                 let holder = ui_poll.progress_window.clone();
@@ -919,8 +1220,12 @@ pub fn build_ui(app: &adw::Application) {
                         });
                     }
                     *ui_poll.is_busy.borrow_mut() = false;
-                    ui_poll.extract_all.set_sensitive(ui_poll.state.borrow().current_info.is_some());
-                    ui_poll.extract_sel.set_sensitive(!ui_poll.state.borrow().selected_entries.is_empty());
+                    ui_poll
+                        .extract_all
+                        .set_sensitive(ui_poll.state.borrow().current_info.is_some());
+                    ui_poll
+                        .extract_sel
+                        .set_sensitive(!ui_poll.state.borrow().selected_entries.is_empty());
                     status_left.set_text(&format!("Error: {}", msg));
                 }
             }
@@ -937,6 +1242,13 @@ pub fn build_ui(app: &adw::Application) {
     }
 }
 
+fn dismiss_context_menu(menu: &Rc<RefCell<Option<gtk::PopoverMenu>>>) {
+    if let Some(m) = menu.borrow_mut().take() {
+        m.popdown();
+        m.unparent();
+    }
+}
+
 fn create_title_widget() -> gtk::Box {
     let bx = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let icon = gtk::Image::from_icon_name("package-x-generic-symbolic");
@@ -949,14 +1261,16 @@ fn create_title_widget() -> gtk::Box {
 
 fn open_archive(path: PathBuf, ui: Ui) {
     if !path.exists() {
-        ui.status_left.set_text(&format!("File not found: {}", path.display()));
+        ui.status_left
+            .set_text(&format!("File not found: {}", path.display()));
         return;
     }
     // Reset the breadcrumb to the filename right away;
     // the List result will fill it in.
     ui.state.borrow_mut().current_archive = Some(path.clone());
     ui.state.borrow_mut().current_path = String::new();
-    ui.status_left.set_text(&format!("Opening {}…", path.display()));
+    ui.status_left
+        .set_text(&format!("Opening {}…", path.display()));
     ui.worker.borrow_mut().submit(JobKind::List { path });
 }
 
@@ -967,11 +1281,25 @@ fn start_extract(
     password: Option<String>,
     ui: Ui,
 ) {
-    let entries_opt = if entries.is_empty() { None } else { Some(entries) };
-    if let Some(ref sel) = entries_opt {
-        ui.status_left.set_text(&format!("Extracting {} items to {}…", sel.len(), dest.display()));
+    let entries_opt = if entries.is_empty() {
+        None
     } else {
-        ui.status_left.set_text(&format!("Extracting everything to {}…", dest.display()));
+        Some(entries)
+    };
+    if let Some(ref sel) = entries_opt {
+        ui.status_left.set_text(&format!(
+            "Extracting {} items to {}…",
+            sel.len(),
+            dest.display()
+        ));
+    } else {
+        ui.status_left
+            .set_text(&format!("Extracting everything to {}…", dest.display()));
     }
-    ui.worker.borrow_mut().submit(JobKind::Extract { archive, dest, entries: entries_opt, password });
+    ui.worker.borrow_mut().submit(JobKind::Extract {
+        archive,
+        dest,
+        entries: entries_opt,
+        password,
+    });
 }

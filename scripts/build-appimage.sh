@@ -2,9 +2,14 @@
 # Build a portable Arkx AppImage with linuxdeploy.
 #
 # Usage: ./scripts/build-appimage.sh [VERSION]
-# Expects: cargo project root as CWD, linuxdeploy (+gtk plugin) on PATH or
-#   LINUXDEPLOY= /LINUXDEPLOY_GTK= pointing at them (CI downloads them).
+# Invocable from any directory (resolves the repo root itself).
+# Expects: linuxdeploy (+gtk plugin) on PATH or LINUXDEPLOY=/
+#   LINUXDEPLOY_GTK= pointing at them (CI downloads them).
 set -euo pipefail
+
+# Run from anywhere: resolve the repo root (cwd is not guaranteed).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
 
 VERSION="${1:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}"
 ARCH="${ARCH:-x86_64}"

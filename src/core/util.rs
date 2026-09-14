@@ -123,7 +123,9 @@ pub fn filesystem_free_bytes(path: &std::path::Path) -> Option<u64> {
     let anchor = if path.is_dir() {
         path.to_path_buf()
     } else {
-        path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."))
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
     };
     let out = std::process::Command::new("df")
         .args(["-B1", "--output=avail"])
@@ -159,17 +161,28 @@ pub fn format_percent_with(pct: f32, current: u64, total: u64, comma: bool) -> S
     } else {
         "100%".to_string()
     };
-    let mut s = if comma { raw.replacen('.', ",", 1) } else { raw };
+    let mut s = if comma {
+        raw.replacen('.', ",", 1)
+    } else {
+        raw
+    };
     // Never "100%" (or "100.0%" from rounding) on an incomplete job.
     if total > 0 && current < total && (s == "100%" || s == "100.0%" || s == "100,0%") {
-        s = if comma { "99,9%".to_string() } else { "99.9%".to_string() };
+        s = if comma {
+            "99,9%".to_string()
+        } else {
+            "99.9%".to_string()
+        };
     }
     s
 }
 
 /// True if the locale wants the decimal comma (it/fr/de/es/pt/nl...).
 pub fn decimal_comma() -> bool {
-    decimal_comma_for(&std::env::var("LC_NUMERIC").unwrap_or_default(), &std::env::var("LANG").unwrap_or_default())
+    decimal_comma_for(
+        &std::env::var("LC_NUMERIC").unwrap_or_default(),
+        &std::env::var("LANG").unwrap_or_default(),
+    )
 }
 
 fn decimal_comma_for(lc_numeric: &str, lang: &str) -> bool {
@@ -422,9 +435,17 @@ mod tests {
     #[test]
     fn thresholds_have_sane_bounds() {
         let t = big_archive_threshold_bytes();
-        assert!((32 * 1024 * 1024..=256 * 1024 * 1024).contains(&t), "t={}", t);
+        assert!(
+            (32 * 1024 * 1024..=256 * 1024 * 1024).contains(&t),
+            "t={}",
+            t
+        );
         let z = zip_seven_threshold_bytes();
-        assert!((64 * 1024 * 1024..=1024 * 1024 * 1024).contains(&z), "z={}", z);
+        assert!(
+            (64 * 1024 * 1024..=1024 * 1024 * 1024).contains(&z),
+            "z={}",
+            z
+        );
     }
 
     #[test]
