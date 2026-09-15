@@ -1,11 +1,23 @@
 #!/bin/bash
 set -e
 # Run from anywhere: resolve the repo root (cwd is not guaranteed).
+VERBOSE=0
+for arg in "$@"; do
+    case "$arg" in
+        --verbose) VERBOSE=1 ;;
+    esac
+done
+_vlog()  { if [ "$VERBOSE" -eq 1 ]; then echo "  $1"; fi; }
+_warn()  { echo "  ! $1" >&2; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/.."
-echo "==> Building arkx (release, optimized for $(nproc) threads)..."
-cargo build --release
-echo "==> Installing to /usr/local/bin/arkx..."
+
+echo "arkx - Installation"
+
+_vlog "Building arkx (release, optimized for $(nproc) threads)..."
+cargo build --release 2>&1 | tail -n 5
+_vlog "Installing to /usr/local/bin/arkx..."
 sudo install -Dm755 target/release/arkx /usr/local/bin/arkx
 sudo install -Dm644 data/arkx.desktop /usr/share/applications/arkx.desktop
 # App icons (SVG + rendered PNGs)
@@ -25,19 +37,29 @@ sudo update-desktop-database /usr/share/applications || true
 # Reload Dolphin service menus (harmless if kbuildsycoca6 is missing)
 kbuildsycoca6 --noincremental 2>/dev/null || true
 sudo gtk-update-icon-cache /usr/share/icons/hicolor || true
-echo "==> Verifying..."
-arkx --version
-arkx --help | head -n 20
-echo "==> CLI smoke test..."
+
+_vlog "Verifying..."
+_vlog "$(arkx --version)"
+_vlog "$(arkx --help | head -n 20)"
+
+# CLI smoke test
 SMOKE_DIR="$(mktemp -d)"
 echo "test" > "$SMOKE_DIR/a.txt"
 arkx a "$SMOKE_DIR/t.zip" "$SMOKE_DIR/a.txt" >/dev/null 2>&1
 if arkx l "$SMOKE_DIR/t.zip" >/dev/null 2>&1 && [ "$(arkx l "$SMOKE_DIR/t.zip" 2>/dev/null | grep -c 'a.txt')" -eq 1 ]; then
-    echo "Smoke test passed ✓"
+    _vlog "Smoke test passed"
 else
-    echo "WARNING: smoke test failed" >&2
+    _warn "smoke test failed"
 fi
 rm -rf "$SMOKE_DIR"
-echo "==> Done! Launch with: arkx  or  arkx archive.zip"
+
+echo ""
+echo "Installed:"
+echo "  - /usr/local/bin/arkx (binary)"
+echo "  - /usr/share/applications/arkx.desktop"
+echo "  - Icons (SVG + PNG, 16-256px)"
+echo "  - Dolphin service menus"
+echo ""
+echo "Launch with: arkx  or  arkx archive.zip"
 echo "    Dolphin: right click a folder -> Compress -> Compress to zip... / tar.gz... / 7zip..."
 echo "             right click an archive -> Extract -> Extract here"
