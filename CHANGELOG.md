@@ -1,5 +1,38 @@
 # Changelog
 
+## v1.3.0 — add/remove entries + hardening & speedups
+
+- **Add to archive**: `arkx a/u <archive> <file...>` appends files to an
+  existing `.zip`/`.7z`/`.tar` (`--to <dir>` offsets entry paths, `-p` for
+  encrypted archives); in the GUI, drag & drop files onto the open archive to
+  add them to the browsed folder (never into the archive itself).
+- **Remove from archive**: `arkx r/d <archive> <entry...>` deletes entries
+  (folders recursively); in the GUI, right-click a selection → *Remove*.
+  Zip updates are rewritten natively, 7z/tar use 7z update mode, and
+  stream-compressed tars fail clearly instead of corrupting.
+
+### Fixed
+
+- **Security**: a hostile archive could write outside the extract directory
+  via an intermediate symlink (the old check only canonicalized full paths
+  whose target already existed); each existing component is now validated.
+- **Cancel**: the first job submitted right after a cancel was silently
+  dropped as "Cancelled" (the flag was cleared only on the next submit).
+- **File-manager open**: double-clicking an archive in Dolphin did not load
+  it — the `gio open` path was never handed to the window; a file queued via
+  `GApplication::open` is now opened on startup.
+
+### Performance
+
+- Tree building in the archive browser went from O(n²) to O(n) for large
+  archives (explicit-dir lookup via hash map).
+- `7z`/`bsdtar` binary discovery is cached once per process instead of
+  spawning probe subprocesses on every job.
+
+### Chore
+
+- Removed unused dependencies (`mime_guess`, `open`, `serde_json`).
+
 ## v1.2.0 — adaptive performance + huge archives
 
 - **Adaptive threads**: `--threads N` (or `ARKX_THREADS=N`) on `a`/`c`/`x`;

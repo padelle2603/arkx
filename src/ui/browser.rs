@@ -39,14 +39,14 @@ pub(crate) fn get_children(info: &ArchiveInfo, current_path: &str) -> Vec<Archiv
     let cur_norm = cur.as_str();
 
     let mut map: HashMap<String, ArchiveEntry> = HashMap::new();
-    let mut explicit_dirs: HashSet<String> = HashSet::new();
+    let mut dir_map: HashMap<String, ArchiveEntry> = HashMap::new();
 
-    // First pass: collect explicit dirs to reuse their metadata.
+    // First pass: collect explicit dirs keyed by their path for O(1) lookup.
     for e in &info.entries {
         let ep = paths::normalize(&e.path);
         if e.is_dir {
             let key = paths::with_trailing_slash(&ep);
-            explicit_dirs.insert(key);
+            dir_map.insert(key, e.clone());
         }
     }
 
@@ -101,18 +101,8 @@ pub(crate) fn get_children(info: &ArchiveInfo, current_path: &str) -> Vec<Archiv
             }
             // Look for explicit metadata for this dir.
             let mut synthetic = None;
-            for orig in &info.entries {
-                let op = paths::normalize(&orig.path);
-                let op_slash = paths::with_trailing_slash(&op);
-                if op_slash == child_path && orig.is_dir {
-                    synthetic = Some(orig.clone());
-                    break;
-                }
-                // Also without trailing slash.
-                if op == child_path.trim_end_matches('/') && orig.is_dir {
-                    synthetic = Some(orig.clone());
-                    break;
-                }
+            if let Some(ex) = dir_map.get(&child_path) {
+                synthetic = Some(ex.clone());
             }
             let entry = if let Some(mut ex) = synthetic {
                 // Fix up the path.

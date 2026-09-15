@@ -4,6 +4,7 @@ use gtk4 as gtk;
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::core::paths;
@@ -15,6 +16,17 @@ use crate::ui::browser::{
 use crate::ui::dialogs;
 use crate::ui::progress_window::ProgressWindow;
 use crate::worker::{JobKind, JobResult, WorkerEvent, WorkerPool};
+
+/// Path queued by the file-manager `GApplication::open` handler. `build_ui`
+/// drains it when it constructs the window (a `gio open` path is NOT in argv).
+static PENDING_OPEN: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Remembers a path so the next `build_ui` call opens it automatically.
+pub fn queue_open_path(path: PathBuf) {
+    if let Ok(mut guard) = PENDING_OPEN.lock() {
+        *guard = Some(path);
+    }
+}
 
 /// Handles shared by every UI callback. Cloning is cheap (Rc + refcounted widgets).
 #[derive(Clone)]
@@ -1234,7 +1246,14 @@ pub fn build_ui(app: &adw::Application) {
     });
 
     // Launched with a file argument
-    if let Some(arg) = std::env::args().nth(1) {
+    let opened = PENDING_OPEN
+        .lock()
+        .ok()
+        .and_then(|mut g| g.take())
+        .filter(|p| p.exists() && p.is_file());
+    if let Some(p) = opened {
+        open_archive(p, ui.clone());
+    } else if let Some(arg) = std::env::args().nth(1) {
         let p = PathBuf::from(arg);
         if p.exists() && p.is_file() {
             open_archive(p, ui.clone());

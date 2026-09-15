@@ -96,29 +96,35 @@ impl Default for BsdtarBackend {
 }
 
 fn locate_tar() -> (PathBuf, bool) {
-    // Inside an AppImage bsdtar ships next to us (like 7z): prefer a binary
-    // beside the current executable, then PATH.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for name in ["bsdtar", "tar"] {
-                let p = dir.join(name);
-                if p.is_file() {
-                    return (p, name == "bsdtar");
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<(PathBuf, bool)> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            // Inside an AppImage bsdtar ships next to us (like 7z): prefer a binary
+            // beside the current executable, then PATH.
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    for name in ["bsdtar", "tar"] {
+                        let p = dir.join(name);
+                        if p.is_file() {
+                            return (p, name == "bsdtar");
+                        }
+                    }
                 }
             }
-        }
-    }
-    for name in ["bsdtar", "tar"] {
-        if let Ok(out) = Command::new(name).arg("--version").output() {
-            if out.status.success() {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_lowercase();
-                // GNU tar reports "tar (GNU tar)"; bsdtar reports "bsdtar".
-                let is_bsdtar = !stdout.contains("gnu tar");
-                return (PathBuf::from(name), is_bsdtar);
+            for name in ["bsdtar", "tar"] {
+                if let Ok(out) = Command::new(name).arg("--version").output() {
+                    if out.status.success() {
+                        let stdout = String::from_utf8_lossy(&out.stdout).to_lowercase();
+                        // GNU tar reports "tar (GNU tar)"; bsdtar reports "bsdtar".
+                        let is_bsdtar = !stdout.contains("gnu tar");
+                        return (PathBuf::from(name), is_bsdtar);
+                    }
+                }
             }
-        }
-    }
-    (PathBuf::from("bsdtar"), true)
+            (PathBuf::from("bsdtar"), true)
+        })
+        .clone()
 }
 
 /// Extra decompressor flag for GNU `tar` (reads ignore -z/-j/-J, but exotic

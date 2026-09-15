@@ -33,14 +33,16 @@ fn main() -> anyhow::Result<()> {
         ui::build_ui(app);
     });
 
-    // Files opened from the file manager (gio open)
+    // Files opened from the file manager (gio open): the path is NOT in argv,
+    // so queue it for the window and build only if no window exists yet.
     app.connect_open(|app, files, _hint| {
-        ui::build_ui(app);
-        // A file passed via open is picked up from argv by the window
         if let Some(file) = files.first() {
             if let Some(path) = file.path() {
-                eprintln!("[arkx] open {}", path.display());
+                arkx::ui::window::queue_open_path(path);
             }
+        }
+        if app.windows().is_empty() {
+            ui::build_ui(app);
         }
     });
 
@@ -162,7 +164,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             for e in &info.entries {
                 println!(
                     "{:<60} {:>12} {:>12} {} {}",
-                    truncate(&e.path, 60),
+                    crate::core::util::truncate_middle(&e.path, 60),
                     if e.is_dir {
                         "-".into()
                     } else {
@@ -736,7 +738,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             let file = crate::core::fm::default_archive_path(&sources, &format)
                 .file_name()
                 .map(|s| s.to_owned())
-                .unwrap();
+                .unwrap_or_else(|| "archive".into());
             crate::core::fm::uniquify(&t.join(file))
         } else {
             crate::core::fm::uniquify(&ensure_archive_extension(t, &format))
@@ -811,10 +813,6 @@ fn ensure_archive_extension(dest: PathBuf, format: &str) -> PathBuf {
         s.push(format!(".{}", ext));
         PathBuf::from(s)
     }
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    crate::core::util::truncate_middle(s, max)
 }
 
 #[cfg(test)]

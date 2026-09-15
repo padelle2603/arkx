@@ -95,24 +95,30 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
 }
 
 fn which_7z() -> PathBuf {
-    // Inside an AppImage the 7z binary ships next to us: prefer a `7z`
-    // beside the current executable, then the system locations, then PATH.
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for name in ["7z", "7za", "7zr"] {
-                let p = dir.join(name);
-                if p.is_file() {
-                    return p;
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<PathBuf> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            // Inside an AppImage the 7z binary ships next to us: prefer a `7z`
+            // beside the current executable, then the system locations, then PATH.
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    for name in ["7z", "7za", "7zr"] {
+                        let p = dir.join(name);
+                        if p.is_file() {
+                            return p;
+                        }
+                    }
                 }
             }
-        }
-    }
-    for p in ["/usr/bin/7z", "/usr/bin/7za", "/usr/bin/7zr"] {
-        if Path::new(p).exists() {
-            return PathBuf::from(p);
-        }
-    }
-    PathBuf::from("7z")
+            for p in ["/usr/bin/7z", "/usr/bin/7za", "/usr/bin/7zr"] {
+                if Path::new(p).exists() {
+                    return PathBuf::from(p);
+                }
+            }
+            PathBuf::from("7z")
+        })
+        .clone()
 }
 
 impl SevenZipBackend {

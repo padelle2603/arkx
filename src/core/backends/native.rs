@@ -1344,8 +1344,28 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
                 None
             }
         }
-        // File doesn't exist yet — safe to create.
-        Err(_) => Some(full),
+        // File doesn't exist yet — check intermediate symlinks.
+        Err(_) => {
+            let mut current = dest.to_path_buf();
+            for component in Path::new(&norm).components() {
+                current = current.join(component);
+                // If this component exists, it must be under dest.
+                if let Ok(meta) = std::fs::symlink_metadata(&current) {
+                    if meta.file_type().is_symlink() {
+                        // Resolve symlink and verify target is under dest.
+                        match std::fs::canonicalize(&current) {
+                            Ok(canonical) => {
+                                if !canonical.starts_with(dest) {
+                                    return None;
+                                }
+                            }
+                            Err(_) => return None,
+                        }
+                    }
+                }
+            }
+            Some(full)
+        }
     }
 }
 
@@ -1513,6 +1533,31 @@ mod tests {
         assert_eq!(secure_join(dest, "a/b.txt").unwrap(), dest.join("a/b.txt"));
         // Normalized absolute paths stay inside dest (no zip-slip).
         assert_eq!(secure_join(dest, "/abs.txt").unwrap(), dest.join("abs.txt"));
+    }
+
+    #[test]
+    fn secure_join_rejects_symlink_escapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        // Symlinked intermediate that points outside dest; the final target
+        // does not exist yet (the case canonicalize() cannot guard).
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, dest.join("link")).unwrap();
+        assert!(
+            secure_join(&dest, "link/newfile.txt").is_none(),
+            "symlinked intermediate escaping dest must be rejected"
+        );
+        // Symlink inside dest is allowed.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("sub", dest.join("inner_link")).unwrap();
+        std::fs::create_dir(dest.join("sub")).unwrap();
+        assert_eq!(
+            secure_join(&dest, "inner_link/file.txt").unwrap(),
+            dest.join("inner_link/file.txt")
+        );
     }
 
     #[test]

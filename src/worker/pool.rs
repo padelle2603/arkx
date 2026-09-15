@@ -37,13 +37,6 @@ impl WorkerPool {
         let cancel_clone = cancel_flag.clone();
         thread::spawn(move || {
             while let Ok(job) = job_rx.recv() {
-                if cancel_clone.load(Ordering::Relaxed) {
-                    let _ = evt_tx.send(WorkerEvent::Error {
-                        msg: "Cancelled".into(),
-                    });
-                    cancel_clone.store(false, Ordering::Relaxed);
-                    continue;
-                }
                 let kind_str = match &job.kind {
                     JobKind::List { .. } => "list",
                     JobKind::Extract { .. } => "extract",
@@ -73,13 +66,17 @@ impl WorkerPool {
 
                     match result {
                         Ok(res) => {
+                            cancel_flag_inner.store(false, Ordering::Relaxed);
                             let _ = evt_tx_inner.send(WorkerEvent::Finished { result: Ok(res) });
                         }
                         Err(e) => {
                             let msg = e.to_string();
-                            if msg.contains("Cancelled")
-                                || cancel_flag_inner.load(Ordering::Relaxed)
-                            {
+                            // Snapshot the cancel state BEFORE clearing it, so the
+                            // next job after a cancel is not mistaken for one.
+                            let was_cancelled = msg.contains("Cancelled")
+                                || cancel_flag_inner.load(Ordering::Relaxed);
+                            cancel_flag_inner.store(false, Ordering::Relaxed);
+                            if was_cancelled {
                                 let _ = evt_tx_inner.send(WorkerEvent::Error {
                                     msg: "Cancelled".into(),
                                 });
