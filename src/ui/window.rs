@@ -7,11 +7,14 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use crate::core::archive::ArchiveInfo;
+use crate::core::error::ArkxError;
 use crate::core::paths;
 use crate::core::util::truncate_middle;
 use crate::ui::browser::{
-    create_empty_state, create_table_header, filter_list, get_all_descendants, get_children,
-    navigate_up, populate_current_view, update_breadcrumb, AppState,
+    apply_responsive_visibility, create_empty_state, create_table_header, filter_list,
+    get_all_descendants, get_children, navigate_up, populate_current_view, set_responsive,
+    update_breadcrumb, AppState,
 };
 use crate::ui::dialogs;
 use crate::ui::progress_window::ProgressWindow;
@@ -28,6 +31,9 @@ pub fn queue_open_path(path: PathBuf) {
     }
 }
 
+/// Parameters of a retriable extraction (archive, dest, entries).
+type PendingExtract = (PathBuf, PathBuf, Option<Vec<String>>);
+
 /// Handles shared by every UI callback. Cloning is cheap (Rc + refcounted widgets).
 #[derive(Clone)]
 struct Ui {
@@ -37,6 +43,14 @@ struct Ui {
     last_extract: Rc<RefCell<Option<(PathBuf, PathBuf, Instant)>>>,
     last_progress: Rc<RefCell<(f32, Instant)>>,
     progress_window: Rc<RefCell<Option<Rc<RefCell<ProgressWindow>>>>>,
+    /// A password prompt is awaiting its unlock job: the progress window is
+    /// deferred until real progress (or completion) proves the password right.
+    pending_password: Rc<RefCell<bool>>,
+    /// Parameters of the pending/retriable extraction (archive, dest, entries).
+    pending_extract: Rc<RefCell<Option<PendingExtract>>>,
+    /// Password remembered for the current archive: reused by every operation
+    /// until the archive is closed or a different one is opened.
+    password_cache: Rc<RefCell<Option<String>>>,
     breadcrumb: gtk::Box,
     list: gtk::ListBox,
     empty: gtk::Box,
@@ -55,7 +69,7 @@ pub fn build_ui(app: &adw::Application) {
     // CSS distintivo — responsive + frame + non generico
     let css = r#"
         window { background: #09090b; }
-        .app-frame { margin: 12px; border: 1px solid #27272a; border-radius: 12px; background: #0f0f0f; box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.3); overflow: hidden; }
+        .app-frame { margin: 12px; border: 1px solid #27272a; border-radius: 12px; background: #0f0f0f; box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.3); }
         .app-header { background: #1e1e1e; border-bottom: 1px solid #2a2a2a; padding: 6px 8px; }
         .header-btn { padding: 6px 10px; border-radius: 8px; }
         .header-btn.suggested-action { background: #2563eb; color: white; }
@@ -88,11 +102,8 @@ pub fn build_ui(app: &adw::Application) {
         scrollbar slider:hover { background: #52525b; }
         scrolledwindow { border: none; }
         /* Responsive helpers */
-        .narrow .hide-narrow { display: none; }
         .narrow .header-btn label { font-size: 12px; }
         .narrow .file-row { padding: 6px 8px; }
-        .medium .hide-medium { display: none; }
-        .header-wrap { flex-wrap: wrap; }
         .narrow .app-frame { margin: 6px; border-radius: 8px; }
     "#;
     let provider = gtk::CssProvider::new();
@@ -287,9 +298,13 @@ pub fn build_ui(app: &adw::Application) {
     let root_clone_b = root.clone();
     bp_narrow.connect_apply(move |_| {
         root_clone_a.add_css_class("narrow");
+        set_responsive(true, true);
+        apply_responsive_visibility(&root_clone_a);
     });
     bp_narrow.connect_unapply(move |_| {
         root_clone_b.remove_css_class("narrow");
+        set_responsive(false, root_clone_b.has_css_class("medium"));
+        apply_responsive_visibility(&root_clone_b);
     });
     window.add_breakpoint(bp_narrow);
 
@@ -299,9 +314,13 @@ pub fn build_ui(app: &adw::Application) {
     let root_clone2_b = root.clone();
     bp_medium.connect_apply(move |_| {
         root_clone2_a.add_css_class("medium");
+        set_responsive(root_clone2_a.has_css_class("narrow"), true);
+        apply_responsive_visibility(&root_clone2_a);
     });
     bp_medium.connect_unapply(move |_| {
         root_clone2_b.remove_css_class("medium");
+        set_responsive(root_clone2_b.has_css_class("narrow"), false);
+        apply_responsive_visibility(&root_clone2_b);
     });
     window.add_breakpoint(bp_medium);
 
@@ -325,6 +344,9 @@ pub fn build_ui(app: &adw::Application) {
         last_extract: last_extract.clone(),
         last_progress: last_progress.clone(),
         progress_window: progress_window.clone(),
+        pending_password: Rc::new(RefCell::new(false)),
+        pending_extract: Rc::new(RefCell::new(None)),
+        password_cache: Rc::new(RefCell::new(None)),
         breadcrumb: breadcrumb_content.clone(),
         list: list_box.clone(),
         empty: empty_state.clone(),
@@ -663,9 +685,11 @@ pub fn build_ui(app: &adw::Application) {
                 // Go up one level.
                 let mut st_mut = ui_nav.state.borrow_mut();
                 st_mut.current_path = navigate_up(&st_mut.current_path);
+                let Some(info_c) = st_mut.current_info.clone() else {
+                    return;
+                };
                 let new_path = st_mut.current_path.clone();
                 let filter_c = st_mut.filter_text.clone();
-                let info_c = st_mut.current_info.clone().unwrap();
                 drop(st_mut);
                 update_breadcrumb(
                     &ui_nav.breadcrumb,
@@ -695,10 +719,12 @@ pub fn build_ui(app: &adw::Application) {
                     if entry.is_dir {
                         // Dive in.
                         let mut st_mut = ui_nav.state.borrow_mut();
+                        let Some(info_c) = st_mut.current_info.clone() else {
+                            return;
+                        };
                         st_mut.current_path = paths::with_trailing_slash(&entry.path.clone());
                         let new_path = st_mut.current_path.clone();
                         let filter_c = st_mut.filter_text.clone();
-                        let info_c = st_mut.current_info.clone().unwrap();
                         drop(st_mut);
                         update_breadcrumb(
                             &ui_nav.breadcrumb,
@@ -875,7 +901,9 @@ pub fn build_ui(app: &adw::Application) {
         dismiss_context_menu(&open_menu_copy);
         let st = ui_copy.state.borrow();
         if let Some(sel) = st.selected_entries.first() {
-            let display = gdk::Display::default().unwrap();
+            let Some(display) = gdk::Display::default() else {
+                return;
+            };
             let clipboard = display.clipboard();
             clipboard.set_text(&glib::GString::from(sel.clone()));
         }
@@ -972,6 +1000,12 @@ pub fn build_ui(app: &adw::Application) {
                             "remove" => ("Removing from archive", "Removing"),
                             _ => ("Extraction in progress", "Extracting"),
                         };
+                        // Password-first flow: no progress bar yet, the unlock
+                        // reopens on a wrong password (window beats error flash).
+                        if kind == "extract" && *ui_poll.pending_password.borrow() {
+                            status_left.set_text("Verifying password…");
+                            continue;
+                        }
                         let stale = ui_poll.progress_window.borrow().as_ref().cloned();
                         if let Some(old) = stale {
                             old.borrow().close();
@@ -990,6 +1024,11 @@ pub fn build_ui(app: &adw::Application) {
                     }
                 }
                 WorkerEvent::Progress { info } => {
+                    // Real progress means the password was accepted: the
+                    // progress window may now appear (deferred in password mode).
+                    if *ui_poll.pending_password.borrow() {
+                        *ui_poll.pending_password.borrow_mut() = false;
+                    }
                     // Unknown total (e.g. encrypted headers, empty Size): pulsing bar,
                     // never a fake %. Every event steps the pulse.
                     if info.total == 0 {
@@ -1062,6 +1101,7 @@ pub fn build_ui(app: &adw::Application) {
                     // Close, Esc or the window X. No auto-close timers.
                     match &result {
                         Ok(JobResult::Extract) | Ok(JobResult::Add) | Ok(JobResult::Remove) => {
+                            *ui_poll.pending_password.borrow_mut() = false;
                             // Clone the handle first: the else branch below uses
                             // `borrow_mut()` while this `Ref` would still be live.
                             let existing = ui_poll.progress_window.borrow().as_ref().cloned();
@@ -1111,6 +1151,7 @@ pub fn build_ui(app: &adw::Application) {
                     }
                     match result {
                         Ok(JobResult::List(info)) => {
+                            *ui_poll.pending_password.borrow_mut() = false;
                             dismiss_context_menu(&open_menu_poll);
                             let archive_path = PathBuf::from(&info.path);
                             let mut st = ui_poll.state.borrow_mut();
@@ -1199,31 +1240,97 @@ pub fn build_ui(app: &adw::Application) {
                                 );
                             }
                         }
-                        Err(msg) => {
+                        Err(err) => {
                             // Outcome shown in the progress window when one exists;
-                            // password errors still open the unlock prompt.
+                            // password errors reopen the unlock prompt (retry).
+                            let msg = err.to_string();
                             status_left.set_text(&format!("Error: {}", truncate_middle(&msg, 80)));
-                            if msg.contains("Password")
-                                || msg.contains("encrypted")
-                                || msg.contains("Wrong")
-                            {
-                                dialogs::show_password_dialog(
-                                    status_left,
-                                    ui_poll.state.clone(),
-                                    ui_poll.worker.clone(),
+                            let pwd_err = matches!(err, ArkxError::WrongPassword);
+                            if pwd_err {
+                                // Drop any transient progress window silently.
+                                let stale = ui_poll.progress_window.borrow().as_ref().cloned();
+                                if let Some(pw) = stale {
+                                    pw.borrow().close();
+                                    *ui_poll.progress_window.borrow_mut() = None;
+                                }
+                                *ui_poll.is_busy.borrow_mut() = false;
+                                ui_poll
+                                    .extract_all
+                                    .set_sensitive(ui_poll.state.borrow().current_info.is_some());
+                                ui_poll.extract_sel.set_sensitive(
+                                    !ui_poll.state.borrow().selected_entries.is_empty(),
                                 );
-                            } else if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
-                                pw.borrow().set_error(&msg);
-                                let holder = ui_poll.progress_window.clone();
-                                pw.borrow().finish_dismiss(move || {
-                                    *holder.borrow_mut() = None;
-                                });
+                                let retry = ui_poll.pending_extract.borrow().clone();
+                                if let Some((archive, dest, entries)) = retry {
+                                    *ui_poll.pending_password.borrow_mut() = true;
+                                    dialogs::prompt_password(
+                                        &ui_poll.window,
+                                        dialogs::PasswordAction::Extract {
+                                            archive,
+                                            dest,
+                                            entries,
+                                        },
+                                        ui_poll.worker.clone(),
+                                        ui_poll.password_cache.clone(),
+                                    );
+                                } else if let Some(archive) =
+                                    ui_poll.state.borrow().current_archive.clone()
+                                {
+                                    // Failed to OPEN a header-encrypted archive:
+                                    // offer the password, then re-list it.
+                                    *ui_poll.pending_password.borrow_mut() = true;
+                                    dialogs::prompt_password(
+                                        &ui_poll.window,
+                                        dialogs::PasswordAction::Open { archive },
+                                        ui_poll.worker.clone(),
+                                        ui_poll.password_cache.clone(),
+                                    );
+                                } else if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
+                                    *ui_poll.pending_password.borrow_mut() = false;
+                                    pw.borrow().set_error(&msg);
+                                    let holder = ui_poll.progress_window.clone();
+                                    pw.borrow().finish_dismiss(move || {
+                                        *holder.borrow_mut() = None;
+                                    });
+                                }
+                            } else {
+                                // Clone first: a live `Ref` from `borrow()` here would
+                                // stay alive for the whole if/else chain and make the
+                                // `borrow_mut()` below panic.
+                                let existing = ui_poll.progress_window.borrow().as_ref().cloned();
+                                if let Some(pw) = existing {
+                                    *ui_poll.pending_password.borrow_mut() = false;
+                                    pw.borrow().set_error(&msg);
+                                    let holder = ui_poll.progress_window.clone();
+                                    pw.borrow().finish_dismiss(move || {
+                                        *holder.borrow_mut() = None;
+                                    });
+                                } else {
+                                    // No progress window (e.g. a failed OPEN/List):
+                                    // show the full error in a dismissible window
+                                    // instead of only the truncated statusbar line.
+                                    *ui_poll.pending_password.borrow_mut() = false;
+                                    *ui_poll.is_busy.borrow_mut() = false;
+                                    let w = ProgressWindow::new(
+                                        &ui_poll.window,
+                                        "Error",
+                                        &truncate_middle(&msg, 60),
+                                    );
+                                    w.borrow().set_error(&msg);
+                                    let holder = ui_poll.progress_window.clone();
+                                    *ui_poll.progress_window.borrow_mut() = Some(w.clone());
+                                    w.borrow().finish_dismiss(move || {
+                                        *holder.borrow_mut() = None;
+                                    });
+                                }
                             }
                         }
                     }
                 }
-                WorkerEvent::Error { msg } => {
+                WorkerEvent::Error { err } => {
                     // Permanent error outcome; the user dismisses it.
+                    let msg = err.to_string();
+                    *ui_poll.pending_password.borrow_mut() = false;
                     if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
                         pw.borrow().set_error(&msg);
                         let holder = ui_poll.progress_window.clone();
@@ -1284,13 +1391,34 @@ fn open_archive(path: PathBuf, ui: Ui) {
             .set_text(&format!("File not found: {}", path.display()));
         return;
     }
+    // Opening a different archive discards the remembered password; re-opening
+    // the same one keeps it, so no prompt is shown again.
+    let previous = ui.state.borrow().current_archive.clone();
+    if previous.as_deref() != Some(path.as_path()) {
+        *ui.password_cache.borrow_mut() = None;
+    }
     // Reset the breadcrumb to the filename right away;
     // the List result will fill it in.
     ui.state.borrow_mut().current_archive = Some(path.clone());
     ui.state.borrow_mut().current_path = String::new();
+    // Drop the previous archive's contents immediately: if the List below
+    // fails (wrong password, corrupt file) stale entries must not stay visible.
+    {
+        let mut st = ui.state.borrow_mut();
+        st.current_info = None;
+        st.selected_entries.clear();
+    }
+    ui.list.remove_all();
+    ui.empty.set_visible(false);
+    ui.extract_all.set_sensitive(false);
+    ui.extract_sel.set_sensitive(false);
+    ui.back.set_sensitive(false);
     ui.status_left
         .set_text(&format!("Opening {}…", path.display()));
-    ui.worker.borrow_mut().submit(JobKind::List { path });
+    let password = ui.password_cache.borrow().clone();
+    ui.worker
+        .borrow_mut()
+        .submit(JobKind::List { path, password });
 }
 
 fn start_extract(
@@ -1305,6 +1433,36 @@ fn start_extract(
     } else {
         Some(entries)
     };
+    // Remember the exact operation even when no pre-prompt ran: a wrong
+    // password mid-extraction must still be able to retry with these values.
+    *ui.pending_extract.borrow_mut() = Some((archive.clone(), dest.clone(), entries_opt.clone()));
+    // Reuse the password remembered for this archive; prompt only if there is
+    // none yet (password-first flow: the progress bar appears only once the
+    // password is accepted).
+    let effective = password.or_else(|| ui.password_cache.borrow().clone());
+    if effective.is_none()
+        && ui
+            .state
+            .borrow()
+            .current_info
+            .as_ref()
+            .is_some_and(|i| needs_password(i, entries_opt.as_deref()))
+    {
+        *ui.pending_password.borrow_mut() = true;
+        let parent = ui.window.clone();
+        let worker = ui.worker.clone();
+        dialogs::prompt_password(
+            &parent,
+            dialogs::PasswordAction::Extract {
+                archive,
+                dest,
+                entries: entries_opt,
+            },
+            worker,
+            ui.password_cache.clone(),
+        );
+        return;
+    }
     if let Some(ref sel) = entries_opt {
         ui.status_left.set_text(&format!(
             "Extracting {} items to {}…",
@@ -1319,6 +1477,81 @@ fn start_extract(
         archive,
         dest,
         entries: entries_opt,
-        password,
+        password: effective,
     });
+}
+
+/// True when the extraction may hit encrypted entries: the archive is flagged
+/// encrypted and (for partial extraction) at least one selected entry is.
+fn needs_password(info: &ArchiveInfo, entries: Option<&[String]>) -> bool {
+    if !info.has_encrypted {
+        return false;
+    }
+    match entries {
+        None => true,
+        Some(sel) => {
+            if sel.is_empty() {
+                return true;
+            }
+            let set: std::collections::HashSet<&str> = sel.iter().map(|s| s.as_str()).collect();
+            info.entries
+                .iter()
+                .any(|e| e.encrypted && set.contains(e.path.as_str()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_password;
+    use crate::core::archive::{ArchiveEntry, ArchiveInfo};
+
+    fn info(has_encrypted: bool) -> ArchiveInfo {
+        let enc = |name: &str, encrypted: bool| ArchiveEntry {
+            path: name.to_string(),
+            is_dir: false,
+            size: 1,
+            packed_size: 1,
+            modified: None,
+            mode: None,
+            crc32: None,
+            method: None,
+            encrypted,
+        };
+        ArchiveInfo {
+            path: "a.rar".to_string(),
+            format: "RAR".to_string(),
+            entries: vec![
+                enc("open.txt", false),
+                enc("secret.txt", true),
+                enc("sub/", true),
+            ],
+            total_size: 3,
+            total_packed: 3,
+            num_files: 2,
+            num_dirs: 1,
+            has_encrypted,
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn plain_archive_never_prompts() {
+        assert!(!needs_password(&info(false), None));
+        assert!(!needs_password(&info(false), Some(&["secret.txt".into()])));
+    }
+
+    #[test]
+    fn encrypted_archive_prompts_for_all() {
+        let i = info(true);
+        assert!(needs_password(&i, None));
+        assert!(needs_password(&i, Some(&[])));
+    }
+
+    #[test]
+    fn partial_extract_prompts_only_for_encrypted_entries() {
+        let i = info(true);
+        assert!(needs_password(&i, Some(&["secret.txt".into()])));
+        assert!(!needs_password(&i, Some(&["open.txt".into()])));
+    }
 }

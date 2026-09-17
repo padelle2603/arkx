@@ -294,7 +294,7 @@ fn detect_by_header(path: &Path) -> Result<ArchiveFormat, std::io::Error> {
                 return Ok(tar_fmt);
             }
         }
-        // No dedicated single format: leave to extension/mime.
+        // Single-file lzip has no native/7z reader here: fall through to Unknown.
     }
     // ar (.a): "!<arch>\n"
     if buf.starts_with(b"!<arch>") {
@@ -311,20 +311,22 @@ fn detect_by_header(path: &Path) -> Result<ArchiveFormat, std::io::Error> {
     if (buf[0] == 0xC7 && buf[1] == 0x71) || (buf[0] == 0x71 && buf[1] == 0xC7) {
         return Ok(ArchiveFormat::Cpio);
     }
-    // TAR: ustar at 257
-    if n >= 262 && buf[0..4] != [0, 0, 0, 0] {
-        // Check ustar magic at offset 257 (need more bytes)
-        let mut full = [0u8; 512];
-        let mut f2 = File::open(path)?;
-        let _ = f2.read(&mut full)?;
-        if &full[257..262] == b"ustar" {
-            return Ok(ArchiveFormat::Tar);
-        }
+    // TAR: "ustar" magic at offset 257 — needs the first 512-byte block, so
+    // read it separately (the 12-byte probe above is too short).
+    let mut full = [0u8; 512];
+    let mut f2 = File::open(path)?;
+    let read = f2.read(&mut full)?;
+    if read >= 262 && &full[257..262] == b"ustar" {
+        return Ok(ArchiveFormat::Tar);
     }
     // ISO: 43 44 30 30 31 at 32769
     // CAB: 4D 53 43 46
     if buf.starts_with(&[0x4D, 0x53, 0x43, 0x46]) {
         return Ok(ArchiveFormat::Cab);
+    }
+    // ARJ: 60 EA (archive header ID, followed by version in old/normal/fresh)
+    if buf[0] == 0x60 && buf[1] == 0xEA {
+        return Ok(ArchiveFormat::Arj);
     }
     Ok(ArchiveFormat::Unknown("unknown".into()))
 }
@@ -684,5 +686,30 @@ mod tests {
         ] {
             assert_eq!(fmt.backend(), BackendKind::SevenZip);
         }
+    }
+
+    #[test]
+    fn tar_detected_by_magic_without_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("blob");
+        let f = std::fs::File::create(&p).unwrap();
+        let mut b = tar::Builder::new(f);
+        let mut h = tar::Header::new_gnu();
+        h.set_size(1);
+        h.set_mode(0o644);
+        h.set_mtime(1);
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_cksum();
+        b.append_data(&mut h, "f.txt", &b"x"[..]).unwrap();
+        b.finish().unwrap();
+        assert_eq!(detect_by_header(&p).unwrap(), ArchiveFormat::Tar);
+    }
+
+    #[test]
+    fn arj_detected_by_magic_without_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("blob");
+        std::fs::write(&p, [0x60, 0xEA, 0x04, 0x00, 0x00]).unwrap();
+        assert_eq!(detect_by_header(&p).unwrap(), ArchiveFormat::Arj);
     }
 }

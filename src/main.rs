@@ -188,6 +188,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 eprintln!("Usage: arkx x <archive> [dest] [--here] [--dialog] [-p password]");
                 std::process::exit(1);
             }
+            // The GUI progress app handles one archive per invocation: with
+            // several inputs it would silently quit after the first one.
+            if progress && archives.len() > 1 {
+                eprintln!("--progress supports a single archive at a time.");
+                std::process::exit(1);
+            }
             // --dialog: ask only once (like Ark "Extract to...")
             let dialog_dest: Option<PathBuf> = if dialog {
                 let initial = archives
@@ -332,6 +338,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     }
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
+                        std::process::exit(1);
                     }
                     p => {
                         let f = crate::core::fm::decode_input_arg(p);
@@ -421,6 +428,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 match args[i].as_str() {
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
+                        std::process::exit(1);
                     }
                     p => entries.push(
                         crate::core::fm::decode_input_arg(p)
@@ -469,7 +477,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 match args[i].as_str() {
                     "-l" | "--level" => {
                         if let Some(v) = args.get(i + 1) {
-                            level = v.parse().unwrap_or(6);
+                            level = parse_level_or_exit(v);
                             i += 2;
                             continue;
                         } else {
@@ -479,8 +487,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     }
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
-                        i += 1;
-                        continue;
+                        std::process::exit(1);
                     }
                     _ => {
                         sources.push(PathBuf::from(&args[i]));
@@ -562,18 +569,41 @@ fn parse_common_flags(
         std::process::exit(1);
     }
     if let Some(v) = tok.strip_prefix("--threads=") {
-        *threads = crate::core::util::parse_threads_value(v);
+        *threads = parse_threads_or_exit(v);
         return 1;
     }
     if tok == "--threads" {
         if let Some(v) = next {
-            *threads = crate::core::util::parse_threads_value(v);
+            *threads = parse_threads_or_exit(v);
             return 2;
         }
         eprintln!("--threads requires a value");
         std::process::exit(1);
     }
     0
+}
+
+/// Strict CLI `--threads` value: `0` or a non-number is rejected instead of
+/// being silently downgraded to "auto".
+fn parse_threads_or_exit(v: &str) -> Option<usize> {
+    match v.trim().parse::<usize>() {
+        Ok(n) if n > 0 => Some(n),
+        _ => {
+            eprintln!("Invalid --threads value: {v} (expected a positive integer)");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Strict, clamped CLI `-l/--level` value (0-9).
+fn parse_level_or_exit(v: &str) -> u8 {
+    match v.trim().parse::<u8>() {
+        Ok(n) => n.min(9),
+        Err(_) => {
+            eprintln!("Invalid -l/--level value: {v} (expected 0-9)");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
@@ -599,6 +629,7 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
                 // Unknown flag before archives: clear error
                 // (after archives, a file starting with - is almost never intended)
                 eprintln!("Unknown flag: {}", s);
+                std::process::exit(1);
             }
             _ => {
                 let p = crate::core::fm::decode_input_arg(&args[i]);
@@ -682,7 +713,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             }
             "-l" | "--level" => {
                 if let Some(v) = args.get(i + 1) {
-                    level = v.parse().unwrap_or(6).min(9);
+                    level = parse_level_or_exit(v);
                     i += 1;
                 } else {
                     eprintln!("-l/--level requires a value (0-9)");
@@ -699,6 +730,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             }
             s if s.starts_with('-') => {
                 eprintln!("Unknown flag: {}", s);
+                std::process::exit(1);
             }
             _ => sources.push(crate::core::fm::decode_input_arg(&args[i])),
         }

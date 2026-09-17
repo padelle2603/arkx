@@ -308,7 +308,15 @@ impl BsdtarBackend {
 
 fn map_tar_error(stderr: &str) -> ArkxError {
     let m = stderr.trim();
-    // Known libarchive bug (< 3.9.0): on truncated archives or with non
+    // libarchive cannot decrypt encrypted entries (rar/zip): surface a
+    // password prompt instead of a raw backend error.
+    if m.contains("Encryption is not supported")
+        || m.contains("Password required")
+        || m.contains("Wrong password")
+    {
+        return ArkxError::WrongPassword;
+    }
+    // Known libarchive bug (&lt; 3.9.0): on truncated archives or with non
     // UTF-8 names `archive_error_string()` returns NULL and bsdtar prints "(null)".
     // Translate to a human message instead of showing "(null)" to the user.
     if m.contains("(null)") {
@@ -561,6 +569,14 @@ mod error_tests {
             }
             other => panic!("expected Corrupted, got: {}", other),
         }
+    }
+
+    #[test]
+    fn encrypted_archive_is_wrong_password() {
+        let err = map_tar_error(
+            "bsdtar: Encryption is not supported\nbsdtar: Error exit delayed from previous errors",
+        );
+        assert!(matches!(err, ArkxError::WrongPassword), "got: {}", err);
     }
 
     #[test]

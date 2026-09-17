@@ -10,6 +10,18 @@ use std::sync::{
 };
 use std::time::Instant;
 
+/// Zip-bomb guard: refuse to decompress more than this many bytes for a
+/// single archive in the native backend (honest quota, not a ratio heuristic).
+/// Extraction aborts with a clear error instead of filling the disk.
+const MAX_EXTRACTED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
+
+fn quota_error() -> ArkxError {
+    ArkxError::Corrupted(format!(
+        "decompressed data exceeds the {:.0} GiB safety quota; refusing to continue (possible zip bomb)",
+        MAX_EXTRACTED_BYTES as f64 / (1024.0 * 1024.0 * 1024.0)
+    ))
+}
+
 /// Final "Completed" progress: unknown total (0 bytes) reports a clean 100/100.
 fn completed(total: u64) -> ProgressInfo {
     if total > 0 {
@@ -360,6 +372,8 @@ impl NativeBackend {
         }
 
         let mut processed_bytes = 0u64;
+        // Reused across entries to avoid one 64KB allocation per file.
+        let mut buf = vec![0u8; 65536];
 
         for i in 0..zip.len() {
             let mut f = zip
@@ -373,6 +387,12 @@ impl NativeBackend {
                 {
                     continue;
                 }
+            }
+            // Declared size over the quota alone is enough to refuse up front:
+            // no point streaming gigabytes into a sink just to abort later.
+            let declared = f.size();
+            if processed_bytes.saturating_add(declared) > MAX_EXTRACTED_BYTES {
+                return Err(quota_error());
             }
             let out_path = match secure_join(dest, &name) {
                 Some(p) => p,
@@ -399,7 +419,6 @@ impl NativeBackend {
                     File::create(&out_path).map_err(ArkxError::Io)?,
                 );
                 // 64KB chunks throttled to 100ms / 512KB so the UI is not spammed
-                let mut buf = vec![0u8; 65536];
                 let mut last_emit = Instant::now();
                 let mut last_bytes = processed_bytes;
                 loop {
@@ -409,6 +428,11 @@ impl NativeBackend {
                     }
                     out.write_all(&buf[..n]).map_err(ArkxError::Io)?;
                     processed_bytes = processed_bytes.saturating_add(n as u64);
+                    // Runtime guard: declared sizes in the central directory can
+                    // lie, the read loop catches what the header check missed.
+                    if processed_bytes > MAX_EXTRACTED_BYTES {
+                        return Err(quota_error());
+                    }
                     // Throttle: emit every 100ms, every 512KB, or on file completion
                     let elapsed = last_emit.elapsed().as_millis() > 100
                         || processed_bytes - last_bytes >= 524288;
@@ -432,7 +456,7 @@ impl NativeBackend {
                     if let Some(mode) = f.unix_mode() {
                         let _ = std::fs::set_permissions(
                             &out_path,
-                            std::fs::Permissions::from_mode(mode),
+                            std::fs::Permissions::from_mode(mode & 0o777),
                         );
                     }
                 }
@@ -463,6 +487,9 @@ impl NativeBackend {
         let reader = create_tar_reader(file, archive)?;
         let mut ar = tar::Archive::new(reader);
         ar.set_preserve_permissions(true);
+        // Strip setuid/setgid/sticky bits from archive metadata: preserving
+        // them verbatim is a privilege-escalation vector when extracting as root.
+        ar.set_mask(0o7000);
         ar.set_preserve_mtime(true);
 
         let filter = filter.map(|f| f.to_vec());
@@ -492,6 +519,8 @@ impl NativeBackend {
         }
 
         let mut processed_bytes = 0u64;
+        // Reused across entries to avoid one 64KB allocation per file.
+        let mut buf = vec![0u8; 65536];
         for entry in ar
             .entries()
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?
@@ -529,7 +558,6 @@ impl NativeBackend {
                     1024 * 1024,
                     File::create(&out_path).map_err(ArkxError::Io)?,
                 );
-                let mut buf = vec![0u8; 65536];
                 let mut last_emit = Instant::now();
                 let mut last_bytes = processed_bytes;
                 loop {
@@ -561,7 +589,7 @@ impl NativeBackend {
                     if let Ok(mode) = entry.header().mode() {
                         let _ = std::fs::set_permissions(
                             &out_path,
-                            std::fs::Permissions::from_mode(mode),
+                            std::fs::Permissions::from_mode(mode & 0o777),
                         );
                     }
                 }
@@ -574,7 +602,28 @@ impl NativeBackend {
                     ));
                 }
             } else {
-                // Directories, symlinks, others: standard unpack_in
+                // Directories, symlinks, others. The tar crate validates the
+                // destination path, but creates symlinks with the declared
+                // target verbatim: reject links that resolve outside `dest`.
+                let out_path = match secure_join(dest, &path_norm) {
+                    Some(p) => p,
+                    None => {
+                        eprintln!("[native] skipped unsafe entry: {}", path_raw);
+                        continue;
+                    }
+                };
+                if let Some(target) = entry
+                    .link_name()
+                    .map_err(|e| ArkxError::Corrupted(e.to_string()))?
+                {
+                    let base = std::fs::canonicalize(dest).unwrap_or_else(|_| absolutize(dest));
+                    let link_abs = absolutize(&out_path);
+                    let parent = link_abs.parent().unwrap_or(&base);
+                    if !resolve_lexically(parent, &target).starts_with(&base) {
+                        eprintln!("[native] skipped link escaping destination: {}", path_raw);
+                        continue;
+                    }
+                }
                 entry
                     .unpack_in(dest)
                     .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
@@ -1333,12 +1382,16 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
     {
         return None;
     }
+    // `dest` itself may be reached through a symlink (e.g. a symlinked
+    // `~/Downloads`): compare against its resolved form, otherwise every entry
+    // would be discarded and extraction would silently produce nothing.
+    let base = std::fs::canonicalize(dest).unwrap_or_else(|_| absolutize(dest));
     let full = dest.join(&norm);
     // Reject if any component along the path is a symlink that resolves
     // outside dest (zip-slip via symlinks).
     match std::fs::canonicalize(&full) {
         Ok(canonical) => {
-            if canonical.starts_with(dest) {
+            if canonical.starts_with(&base) {
                 Some(full)
             } else {
                 None
@@ -1346,7 +1399,7 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
         }
         // File doesn't exist yet — check intermediate symlinks.
         Err(_) => {
-            let mut current = dest.to_path_buf();
+            let mut current = base.clone();
             for component in Path::new(&norm).components() {
                 current = current.join(component);
                 // If this component exists, it must be under dest.
@@ -1355,7 +1408,7 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
                         // Resolve symlink and verify target is under dest.
                         match std::fs::canonicalize(&current) {
                             Ok(canonical) => {
-                                if !canonical.starts_with(dest) {
+                                if !canonical.starts_with(&base) {
                                     return None;
                                 }
                             }
@@ -1367,6 +1420,27 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
             Some(full)
         }
     }
+}
+
+/// Lexically resolve `path` (which may contain `.`/`..`) against `base`,
+/// without touching the filesystem.
+fn resolve_lexically(base: &Path, path: &Path) -> PathBuf {
+    let joined = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    };
+    let mut out = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Absolutizes without touching the fs (dest may not exist yet).
@@ -1783,5 +1857,91 @@ mod tests {
             zip_path.exists(),
             "failed remove must not delete the archive"
         );
+    }
+
+    #[test]
+    fn secure_join_allows_symlinked_dest_and_rejects_escape() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        // zip-slip and empty names are always rejected.
+        assert!(secure_join(&real, "../escape").is_none());
+        assert!(secure_join(&real, "a/../../escape").is_none());
+        assert!(secure_join(&real, "").is_none());
+        #[cfg(unix)]
+        {
+            // A symlinked destination must still accept regular entries (bug:
+            // every entry was silently discarded).
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            assert!(secure_join(&link, "a/b.txt").is_some());
+        }
+    }
+
+    #[test]
+    fn resolve_lexically_collapses_dot_segments() {
+        let base = Path::new("/d");
+        assert_eq!(
+            resolve_lexically(base, Path::new("a/../b")),
+            PathBuf::from("/d/b")
+        );
+        assert_eq!(
+            resolve_lexically(base, Path::new("../../x")),
+            PathBuf::from("/x")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_extract_strips_setuid_bits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let tar_path = dir.path().join("a.tar");
+        {
+            let f = std::fs::File::create(&tar_path).unwrap();
+            let mut b = tar::Builder::new(f);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(1);
+            h.set_mode(0o4755);
+            h.set_mtime(1);
+            h.set_entry_type(tar::EntryType::Regular);
+            h.set_cksum();
+            b.append_data(&mut h, "s.sh", &b"x"[..]).unwrap();
+            b.finish().unwrap();
+        }
+        let out = dir.path().join("out");
+        backend()
+            .extract(&tar_path, &out, None, None, None)
+            .unwrap();
+        let mode = std::fs::metadata(out.join("s.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o7000, 0, "setuid/setgid leaked: {mode:o}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tar_extract_rejects_escaping_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let tar_path = dir.path().join("a.tar");
+        {
+            let f = std::fs::File::create(&tar_path).unwrap();
+            let mut b = tar::Builder::new(f);
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            h.set_mode(0o777);
+            h.set_mtime(1);
+            h.set_link_name("/etc").unwrap();
+            h.set_cksum();
+            b.append_data(&mut h, "evil", &[][..]).unwrap();
+            b.finish().unwrap();
+        }
+        let out = dir.path().join("out");
+        backend()
+            .extract(&tar_path, &out, None, None, None)
+            .unwrap();
+        assert!(!out.join("evil").exists(), "escaping symlink was created");
     }
 }

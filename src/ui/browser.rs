@@ -15,6 +15,45 @@ use crate::core::archive::{ArchiveEntry, ArchiveInfo};
 use crate::core::paths;
 
 // ---------------------------------------------------------------------------
+// Responsive layout
+// ---------------------------------------------------------------------------
+
+// GTK4 CSS has no `display`/`visibility` property, so columns flagged with the
+// `hide-narrow`/`hide-medium` marker classes are hidden from code instead.
+thread_local! {
+    static NARROW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MEDIUM: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn set_responsive(narrow: bool, medium: bool) {
+    NARROW.with(|c| c.set(narrow));
+    MEDIUM.with(|c| c.set(medium));
+}
+
+fn hidden_by_layout(class: &str) -> bool {
+    match class {
+        "hide-narrow" => NARROW.with(|c| c.get()),
+        "hide-medium" => MEDIUM.with(|c| c.get()),
+        _ => false,
+    }
+}
+
+/// Recursively hide/show every widget carrying a responsive marker class.
+pub(crate) fn apply_responsive_visibility<W: IsA<gtk::Widget>>(widget: &W) {
+    let w = widget.upcast_ref::<gtk::Widget>();
+    for class in ["hide-narrow", "hide-medium"] {
+        if w.has_css_class(class) {
+            w.set_visible(!hidden_by_layout(class));
+        }
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        apply_responsive_visibility(&c);
+        child = c.next_sibling();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
@@ -323,6 +362,7 @@ pub(crate) fn create_table_header() -> gtk::Box {
     date_lbl.set_width_request(110);
     date_lbl.add_css_class("heading");
     date_lbl.add_css_class("hide-narrow");
+    date_lbl.set_visible(!hidden_by_layout("hide-narrow"));
     hdr.append(&date_lbl);
 
     let method_lbl = gtk::Label::new(Some("METHOD"));
@@ -331,6 +371,7 @@ pub(crate) fn create_table_header() -> gtk::Box {
     method_lbl.add_css_class("heading");
     method_lbl.add_css_class("hide-medium");
     method_lbl.add_css_class("hide-narrow");
+    method_lbl.set_visible(!hidden_by_layout("hide-medium") && !hidden_by_layout("hide-narrow"));
     hdr.append(&method_lbl);
 
     hdr
@@ -560,6 +601,7 @@ fn create_file_row(entry: &ArchiveEntry) -> gtk::ListBoxRow {
     date_label.set_width_request(100);
     date_label.add_css_class("dim-label");
     date_label.add_css_class("hide-narrow");
+    date_label.set_visible(!hidden_by_layout("hide-narrow"));
 
     // Method.
     let method_label = gtk::Label::new(Some(entry.method.as_deref().unwrap_or("—")));
@@ -568,6 +610,7 @@ fn create_file_row(entry: &ArchiveEntry) -> gtk::ListBoxRow {
     method_label.add_css_class("dim-label");
     method_label.add_css_class("hide-medium");
     method_label.add_css_class("hide-narrow");
+    method_label.set_visible(!hidden_by_layout("hide-medium") && !hidden_by_layout("hide-narrow"));
     method_label.set_ellipsize(pango::EllipsizeMode::End);
 
     // Arrow for folders.

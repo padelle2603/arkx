@@ -375,6 +375,12 @@ impl ProgressWindow {
     pub fn close(&self) {
         self.window.close();
     }
+
+    /// Root window handle, e.g. to parent a modal dialog (password prompt)
+    /// shown by the standalone file-manager progress app.
+    pub fn root(&self) -> gtk::Window {
+        self.window.clone()
+    }
 }
 
 fn format_duration(secs: f64) -> String {

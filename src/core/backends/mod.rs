@@ -72,6 +72,13 @@ impl BackendManager {
                         }
                     }
                 } else if matches!(fmt.backend(), BackendKind::SevenZip) {
+                    if matches!(&first, ArkxError::WrongPassword) {
+                        eprintln!(
+                            "[core] 7z list failed (encrypted headers), no bsdtar fallback: {}",
+                            first
+                        );
+                        return Err(first);
+                    }
                     eprintln!(
                         "[core] 7z list failed for {:?}: {}, falling back to bsdtar",
                         fmt, first
@@ -89,6 +96,18 @@ impl BackendManager {
                 }
             }
         }
+    }
+
+    /// List a header-encrypted archive (7z/RAR) with its password. Listing is
+    /// 7z-only: no fallback chain, a wrong password must surface directly so
+    /// the caller re-prompts.
+    pub fn list_with_password(&self, path: &Path, password: &str) -> Result<ArchiveInfo> {
+        if !self.seven.is_available() {
+            return Err(ArkxError::Backend(
+                "cannot unlock header-encrypted archive: 7z is not installed".into(),
+            ));
+        }
+        self.seven.list_with_password(path, password)
     }
 
     pub fn extract(
@@ -135,6 +154,15 @@ impl BackendManager {
                     match self.seven.extract(archive, dest, entries, password, None) {
                         Ok(()) => Ok(()),
                         Err(second) => {
+                            if matches!(&second, ArkxError::WrongPassword)
+                                || seven_zip::is_missing_volume_error(&second)
+                            {
+                                eprintln!(
+                                    "[core] 7z extract failed (encrypted/multi-volume), no bsdtar fallback: {}",
+                                    second
+                                );
+                                return Err(second);
+                            }
                             eprintln!(
                                 "[core] 7z extract failed, falling back to bsdtar: {}",
                                 second
@@ -143,12 +171,29 @@ impl BackendManager {
                         }
                     }
                 } else if matches!(fmt.backend(), BackendKind::SevenZip) {
+                    if matches!(&e, ArkxError::WrongPassword)
+                        || seven_zip::is_missing_volume_error(&e)
+                    {
+                        eprintln!(
+                            "[core] 7z extract failed (encrypted/multi-volume), no bsdtar fallback: {}",
+                            e
+                        );
+                        return Err(e);
+                    }
                     eprintln!("[core] 7z extract failed, falling back to bsdtar: {}", e);
                     self.bsdtar.extract(archive, dest, entries, None, None)
                 } else {
                     eprintln!("[core] bsdtar extract failed, falling back to 7z: {}", e);
                     match self.seven.extract(archive, dest, entries, password, None) {
                         Ok(()) => Ok(()),
+                        // Prefer a password/multi-volume diagnosis over the
+                        // generic libarchive error so the UI can prompt.
+                        Err(second)
+                            if matches!(&second, ArkxError::WrongPassword)
+                                || seven_zip::is_missing_volume_error(&second) =>
+                        {
+                            Err(second)
+                        }
                         Err(_) => Err(e),
                     }
                 }
@@ -171,6 +216,25 @@ impl BackendManager {
             return Err(ArkxError::UnsupportedFormat(format!(
                 "cannot create {:?} (extract-only; use .tar.gz/.tar.xz/.tar.zst instead)",
                 fmt
+            )));
+        }
+        // Application bundles (AppImage) and these rare formats cannot be
+        // written at all: refuse up-front instead of a cryptic 7z error.
+        if matches!(
+            fmt,
+            ArchiveFormat::AppImage
+                | ArchiveFormat::Arj
+                | ArchiveFormat::Lzh
+                | ArchiveFormat::Iso
+                | ArchiveFormat::Cab
+                | ArchiveFormat::Deb
+                | ArchiveFormat::Rpm
+                | ArchiveFormat::Cpio
+                | ArchiveFormat::Xar
+                | ArchiveFormat::Ar
+        ) {
+            return Err(ArkxError::UnsupportedFormat(format!(
+                "cannot create {fmt:?}: extract-only format (no writer backend)"
             )));
         }
         // Disk-space preflight: a 68GB failing halfway with ENOSPC after

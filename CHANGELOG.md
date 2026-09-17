@@ -1,5 +1,42 @@
 # Changelog
 
+## v1.4.0 — password-protected extraction + hardening
+
+- **Password-protected extraction**: encrypted ZIPs and header-encrypted 7z/RAR
+  archives now prompt for a password (native, CLI `-p`, and the file-manager
+  progress app); a wrong password re-opens the same dialog with the destination
+  preserved, and password errors are typed (`ArkxError::WrongPassword`) instead
+  of matched on stderr strings.
+- **Typed worker events**: the worker pool carries `ArkxError` in `Finished`/
+  `Error` events, so the UI stops string-matching backend output; the shared
+  7z error classifier spots missing volumes before the misleading
+  "Wrong password?" hint and strips the 7z banner from user-facing messages.
+
+### Security
+
+- A hostile tar could write outside the extract directory through symlinks in
+  the archive and through a symlinked `dest`; both escapes are now rejected.
+- `setuid`/`setgid`/sticky bits from zip/tar metadata are stripped on extract.
+- Refuses to decompress past a 16 GiB quota, stopping zip-bomb fill-ups up
+  front (declared size) and during the read loop.
+
+### Performance
+
+- Reused 64 KB buffers across entries (no per-file allocation) and single-pass
+  zip extraction.
+
+### Detector & CLI
+
+- TAR and ARJ recognized by magic bytes without a matching extension; single
+  lzip (`.lz`) handling for composite tar.lz.
+- `--threads`/`-l` reject invalid values (no silent downgrade to auto), unknown
+  flags exit with an error, and `--progress` is limited to a single archive.
+
+### Fixed
+
+- Multi-format fallback chains stop on password/missing-volume errors instead
+  of masking them with an irrelevant libarchive retry.
+
 ## v1.3.0 — add/remove entries + hardening & speedups
 
 - **Add to archive**: `arkx a/u <archive> <file...>` appends files to an

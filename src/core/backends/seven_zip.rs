@@ -48,7 +48,7 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
     }
 
     fn list(&self, path: &Path) -> Result<ArchiveInfo> {
-        self.list_inner(path)
+        self.list_inner(path, None)
     }
 
     fn extract(
@@ -94,6 +94,93 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
     }
 }
 
+/// True if raw 7z output indicates a password problem. Case-insensitive and
+/// tolerant of wording variants across 7z releases/locales.
+fn is_password_error(msg: &str) -> bool {
+    let m = msg.to_lowercase();
+    [
+        "wrong password",
+        "enter password",
+        "password is incorrect",
+        "password is not correct",
+        "incorrect password",
+        "can not open encrypted",
+        "cannot open encrypted",
+        "can't open encrypted",
+        "cant open encrypted",
+        "password?",
+    ]
+    .iter()
+    .any(|pat| m.contains(pat))
+}
+
+/// Strip 7z banner/copyright/separator noise, keeping only substantial lines
+/// so user-facing errors stop leaking the raw `7-Zip 26.xx x64 (c) …` header.
+fn clean_7z_msg(raw: &str) -> String {
+    let mut kept: Vec<String> = Vec::new();
+    for line in raw.lines() {
+        let t = line.trim();
+        if t.is_empty()
+            || t.starts_with("----------")
+            || t.contains("Igor Pavlov")
+            || t.starts_with("p7zip Version")
+            || t.contains("Compilation date")
+        {
+            continue;
+        }
+        kept.push(t.to_string());
+    }
+    kept.join("\n")
+}
+
+/// Extract the referenced volume name from a `Missing volume` 7z message.
+fn missing_volume(msg: &str) -> Option<String> {
+    for line in msg.lines() {
+        let t = line.trim();
+        if let Some(idx) = t.find("Missing volume") {
+            let name = t[idx + "Missing volume".len()..]
+                .trim()
+                .trim_matches(|c| c == ':' || c == ' ' || c == '\'' || c == '"')
+                .trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Short user-facing message for a multi-volume archive with a missing part.
+const MISSING_VOLUME_PREFIX: &str = "Missing volume:";
+
+fn missing_volume_error(vol: &str) -> ArkxError {
+    ArkxError::Corrupted(format!(
+        "{MISSING_VOLUME_PREFIX} {vol} — multi-volume archive, all parts must be in the same folder"
+    ))
+}
+
+/// True for the synthetic multi-volume error above: used to stop the fallback
+/// chain (bsdtar cannot help an archive whose part is missing).
+pub fn is_missing_volume_error(e: &ArkxError) -> bool {
+    matches!(e, ArkxError::Corrupted(m) if m.starts_with(MISSING_VOLUME_PREFIX))
+}
+
+/// Classify raw 7z output into a typed error. Order matters: a `Missing volume`
+/// wins over the misleading `Wrong password?` that 7z emits for data continuing
+/// in the absent part, so a missing volume never re-prompts for a password.
+fn classify_7z_error(msg: &str) -> ArkxError {
+    if let Some(vol) = missing_volume(msg) {
+        return missing_volume_error(&vol);
+    }
+    if is_password_error(msg) {
+        return ArkxError::WrongPassword;
+    }
+    if msg.contains("Can not open file as archive") || msg.contains("Is not archive") {
+        return ArkxError::Corrupted(clean_7z_msg(msg));
+    }
+    ArkxError::Backend(clean_7z_msg(msg))
+}
+
 fn which_7z() -> PathBuf {
     use std::sync::OnceLock;
     static CACHE: OnceLock<PathBuf> = OnceLock::new();
@@ -122,33 +209,61 @@ fn which_7z() -> PathBuf {
 }
 
 impl SevenZipBackend {
-    fn list_inner(&self, path: &Path) -> Result<ArchiveInfo> {
+    fn list_inner(&self, path: &Path, password: Option<&str>) -> Result<ArchiveInfo> {
         // `7z l -slt` gives machine-parsable technical output
         // (-slt: technical info, -sccUTF-8: charset, -bsp0 -bso1: quiet progress)
-        let output = Command::new(&self.bin)
-            .args(["l", "-slt", "-sccUTF-8", "-bsp0", "-bso1"])
+        let mut cmd = Command::new(&self.bin);
+        cmd.args(["l", "-slt", "-sccUTF-8", "-bsp0", "-bso1"]);
+        if let Some(pw) = password {
+            cmd.arg(format!("-p{}", pw));
+        }
+        let output = cmd
             .arg(path)
             .output()
             .map_err(|e| ArkxError::Backend(format!("Cannot run 7z: {}", e)))?;
 
-        if !output.status.success() {
+        if !output.status.success() && output.status.code() != Some(1) {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let msg = format!("{}{}", stdout, stderr);
-            if msg.contains("Wrong password")
-                || msg.contains("Enter password")
-                || msg.contains("Can not open encrypted")
-            {
-                return Err(ArkxError::WrongPassword);
+            if let Some(vol) = missing_volume(&msg) {
+                // Multi-volume archive with a missing part: 7z still emits the
+                // full `-slt` index, so open the archive with the entries it has
+                // and let extraction of uncontained files fail individually.
+                // Checked before the password hint: 7z appends a misleading
+                // "Wrong password?" when the payload continues in the absent part.
+                eprintln!(
+                    "[7z] list: missing volume \"{}\", showing partial contents",
+                    vol
+                );
+                return parse_7z_slt(&stdout, path).map_err(|_| missing_volume_error(&vol));
             }
-            if msg.contains("Can not open file as archive") || msg.contains("Is not archive") {
-                return Err(ArkxError::Corrupted(msg.trim().to_string()));
+            let err = classify_7z_error(&msg);
+            if matches!(err, ArkxError::Backend(_)) {
+                // Unmapped: log the full raw output so the exact 7z message can
+                // be identified from a terminal run and mapped precisely.
+                eprintln!(
+                    "[7z] list failed (unmapped, code {:?}); raw output:\n{}",
+                    output.status.code(),
+                    msg.trim()
+                );
             }
-            return Err(ArkxError::Backend(msg.trim().to_string()));
+            return Err(err);
+        }
+        if output.status.code() == Some(1) {
+            // 7z exit code 1 = warning (non-fatal, e.g. trailing data after the
+            // payload): the listing is still complete and usable.
+            eprintln!("[7z] list warning code 1, treated as success");
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_7z_slt(&stdout, path)
+    }
+
+    /// List with a password, for header-encrypted archives that `list` alone
+    /// cannot open. Wrong credentials surface as `WrongPassword`.
+    pub fn list_with_password(&self, path: &Path, password: &str) -> Result<ArchiveInfo> {
+        self.list_inner(path, Some(password))
     }
 
     fn extract_inner(
@@ -282,16 +397,19 @@ impl SevenZipBackend {
                     Ok(data) => String::from_utf8_lossy(&data).to_string(),
                     Err(_) => String::new(),
                 };
-                if stderr_text.contains("Wrong password")
-                    || stderr_text.contains("Enter password")
-                    || stderr_text.contains("Can not open encrypted")
-                {
-                    return Err(ArkxError::WrongPassword);
+                let err = classify_7z_error(&stderr_text);
+                if matches!(err, ArkxError::WrongPassword) {
+                    eprintln!(
+                        "[7z] extract code 2 (password error); raw output:\n{}",
+                        stderr_text.trim()
+                    );
+                } else if matches!(err, ArkxError::Backend(_)) {
+                    eprintln!(
+                        "[7z] extract failed code 2 (unmapped); raw output:\n{}",
+                        stderr_text.trim()
+                    );
                 }
-                return Err(ArkxError::Backend(format!(
-                    "7z extract failed (code 2): {}",
-                    stderr_text.trim()
-                )));
+                return Err(err);
             }
             if !status.success() && code != 1 {
                 return Err(ArkxError::Backend(format!(
@@ -344,16 +462,19 @@ impl SevenZipBackend {
                         Ok(data) => String::from_utf8_lossy(&data).to_string(),
                         Err(_) => String::new(),
                     };
-                    if stderr_text.contains("Wrong password")
-                        || stderr_text.contains("Enter password")
-                        || stderr_text.contains("Can not open encrypted")
-                    {
-                        return Err(ArkxError::WrongPassword);
+                    let err = classify_7z_error(&stderr_text);
+                    if matches!(err, ArkxError::WrongPassword) {
+                        eprintln!(
+                            "[7z] extract code 2 (password error); raw output:\n{}",
+                            stderr_text.trim()
+                        );
+                    } else if matches!(err, ArkxError::Backend(_)) {
+                        eprintln!(
+                            "[7z] extract failed code 2 (unmapped); raw output:\n{}",
+                            stderr_text.trim()
+                        );
                     }
-                    return Err(ArkxError::Backend(format!(
-                        "7z extract failed (code 2): {}",
-                        stderr_text.trim()
-                    )));
+                    return Err(err);
                 }
                 return Err(ArkxError::Backend(format!(
                     "Extraction failed (code {})",
@@ -1224,9 +1345,85 @@ fn parse_7z_date(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        label_from_7z_add_line, label_from_7z_line, parse_percent, parse_proc_io, CreateProgress,
+        classify_7z_error, clean_7z_msg, is_missing_volume_error, is_password_error,
+        label_from_7z_add_line, label_from_7z_line, missing_volume, parse_percent, parse_proc_io,
+        CreateProgress,
     };
+    use crate::core::error::ArkxError;
     use std::collections::HashMap;
+
+    #[test]
+    fn missing_volume_error_is_detected_but_not_other_corrupted() {
+        assert!(is_missing_volume_error(&super::missing_volume_error(
+            "p2.rar"
+        )));
+        assert!(!is_missing_volume_error(&ArkxError::WrongPassword));
+        assert!(!is_missing_volume_error(&ArkxError::Corrupted(
+            "Can not open file as archive".into()
+        )));
+    }
+
+    #[test]
+    fn missing_volume_beats_wrong_password_hint() {
+        // Real 7z stderr for an encrypted multi-volume RAR whose next part is
+        // absent: 7z appends a misleading "Wrong password?".
+        let raw = "ERRORS:\nMissing volume : f146509ad88b71096240ddff9f13a650.rar\n\nERROR: Data Error in encrypted file. Wrong password? : TENOKE/game.iso\n";
+        match classify_7z_error(raw) {
+            ArkxError::Corrupted(m) => assert!(
+                m.contains("f146509ad88b71096240ddff9f13a650.rar"),
+                "volume name lost: {m}"
+            ),
+            other => panic!("expected Corrupted (missing volume), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn missing_volume_extracts_name() {
+        assert_eq!(
+            missing_volume(
+                "ERROR = Missing volume : f146509ad88b71096240ddff9f13a650.rar\nWARNINGS:"
+            ),
+            Some("f146509ad88b71096240ddff9f13a650.rar".to_string())
+        );
+        assert_eq!(
+            missing_volume("Missing volume : part.rar"),
+            Some("part.rar".to_string())
+        );
+        assert_eq!(missing_volume("all good here"), None);
+        assert!(
+            matches!(super::missing_volume_error("x.rar"), ArkxError::Corrupted(m) if m.contains("x.rar"))
+        );
+    }
+
+    #[test]
+    fn is_password_error_case_insensitive() {
+        assert!(is_password_error("ERROR: Wrong password"));
+        assert!(is_password_error(
+            "Can not open encrypted archive. Password?"
+        ));
+        assert!(is_password_error("enter password:"));
+        assert!(is_password_error("Password is not correct"));
+        assert!(!is_password_error("7-Zip (c) Igor Pavlov : file not found"));
+        assert!(!is_password_error("Is not archive"));
+    }
+
+    #[test]
+    fn clean_7z_msg_strips_banner() {
+        let raw = concat!(
+            "7-Zip 26.03 x64 (c) 1999-2024 Igor Pavlov : 2025-06-01\n",
+            "p7zip Version 26.03\n",
+            "Compilation date: 2025-06-01\n",
+            "Scanning the drive for archives:\n",
+            "----------\n",
+            "file.rar\n",
+            "ERROR: Can not open file as archive\n",
+        );
+        let clean = clean_7z_msg(raw);
+        assert!(!clean.contains("Igor Pavlov"), "banner leaked: {clean}");
+        assert!(!clean.contains("----------"), "separator leaked: {clean}");
+        assert!(clean.contains("file.rar"), "real content lost: {clean}");
+        assert!(clean.contains("ERROR:"), "error lost: {clean}");
+    }
     #[test]
     fn test_pct() {
         assert_eq!(parse_percent(" 12% 3 - file.txt"), Some(12));
@@ -1405,6 +1602,37 @@ mod tests {
             leftovers.is_empty(),
             "staging dirs left behind: {:?}",
             leftovers
+        );
+    }
+
+    #[test]
+    fn list_with_password_unlocks_header_encryption() {
+        use crate::core::archive::ArchiveBackend as _;
+        use std::sync::{atomic::AtomicBool, Arc};
+        let b = super::SevenZipBackend::with_cancel(Arc::new(AtomicBool::new(false)));
+        if !b.is_available() {
+            eprintln!("(7z unavailable, skipping)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("secret.7z");
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"top secret").unwrap();
+        // create with a password always turns on -mhe=on (header encryption).
+        b.create(&dest, std::slice::from_ref(&src), 6, Some("s3cret"), None)
+            .unwrap();
+
+        assert!(matches!(b.list(&dest), Err(ArkxError::WrongPassword)));
+        assert!(matches!(
+            b.list_with_password(&dest, "wrong"),
+            Err(ArkxError::WrongPassword)
+        ));
+        let info = b.list_with_password(&dest, "s3cret").unwrap();
+        assert!(info.has_encrypted, "encrypted archive not flagged");
+        assert!(
+            info.entries.iter().any(|e| e.path == "a.txt"),
+            "entries missing after unlock: {:?}",
+            info.entries
         );
     }
 

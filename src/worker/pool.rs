@@ -1,5 +1,6 @@
 use crate::core::archive::ProgressInfo;
 use crate::core::backends::BackendManager;
+use crate::core::error::ArkxError;
 use crate::worker::{Job, JobKind, JobResult};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
@@ -12,12 +13,20 @@ use std::thread;
 /// The UI submits jobs via Sender and receives progress/results via Receiver.
 /// Each job runs on its own thread with cancellation via AtomicBool.
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum WorkerEvent {
-    Started { kind: String },
-    Progress { info: ProgressInfo },
-    Finished { result: Result<JobResult, String> },
-    Error { msg: String },
+    Started {
+        kind: String,
+    },
+    Progress {
+        info: ProgressInfo,
+    },
+    Finished {
+        result: Result<JobResult, ArkxError>,
+    },
+    Error {
+        err: ArkxError,
+    },
 }
 
 pub struct WorkerPool {
@@ -70,19 +79,17 @@ impl WorkerPool {
                             let _ = evt_tx_inner.send(WorkerEvent::Finished { result: Ok(res) });
                         }
                         Err(e) => {
-                            let msg = e.to_string();
                             // Snapshot the cancel state BEFORE clearing it, so the
                             // next job after a cancel is not mistaken for one.
-                            let was_cancelled = msg.contains("Cancelled")
+                            let was_cancelled = matches!(e, ArkxError::Cancelled)
                                 || cancel_flag_inner.load(Ordering::Relaxed);
                             cancel_flag_inner.store(false, Ordering::Relaxed);
                             if was_cancelled {
                                 let _ = evt_tx_inner.send(WorkerEvent::Error {
-                                    msg: "Cancelled".into(),
+                                    err: ArkxError::Cancelled,
                                 });
                             } else {
-                                let _ =
-                                    evt_tx_inner.send(WorkerEvent::Finished { result: Err(msg) });
+                                let _ = evt_tx_inner.send(WorkerEvent::Finished { result: Err(e) });
                             }
                         }
                     }
@@ -115,8 +122,11 @@ impl WorkerPool {
         };
 
         match job.kind {
-            JobKind::List { path } => {
-                let info = backend.detect_and_list(&path)?;
+            JobKind::List { path, password } => {
+                let info = match password.as_deref() {
+                    Some(p) => backend.list_with_password(&path, p)?,
+                    None => backend.detect_and_list(&path)?,
+                };
                 Ok(JobResult::List(info))
             }
             JobKind::Extract {

@@ -4,6 +4,9 @@ use std::path::PathBuf;
 pub enum JobKind {
     List {
         path: PathBuf,
+        /// Password for header-encrypted archives (7z/RAR): the archive can
+        /// only be listed when the header password is known.
+        password: Option<String>,
     },
     Extract {
         archive: PathBuf,

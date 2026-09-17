@@ -17,7 +17,7 @@
 
 use adw::prelude::*;
 use gtk4 as gtk;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{mpsc, Arc};
@@ -25,6 +25,7 @@ use std::time::Duration;
 
 use crate::core::archive::ProgressInfo;
 use crate::core::backends::BackendManager;
+use crate::core::error::ArkxError;
 use crate::ui::progress_window::ProgressWindow;
 
 /// True when a graphical session is reachable (Wayland or X11).
@@ -34,7 +35,7 @@ pub fn has_display() -> bool {
 
 enum FmEvent {
     Progress(ProgressInfo),
-    Done(Result<(), String>),
+    Done(Result<(), ArkxError>),
 }
 
 /// Run the compression showing the in-app progress window. Blocks until the
@@ -115,7 +116,7 @@ fn activate(
                     let _ = tx_prog.send(FmEvent::Progress(info));
                 })),
             );
-            let _ = tx.send(FmEvent::Done(res.map_err(|e| e.to_string())));
+            let _ = tx.send(FmEvent::Done(res));
         });
     }
 
@@ -167,13 +168,13 @@ fn activate(
                             pw_c.borrow().close();
                             app_c.quit();
                         }
-                        Err(msg) => {
-                            if msg.contains("Cancelled") {
+                        Err(err) => {
+                            if matches!(err, ArkxError::Cancelled) {
                                 pw_c.borrow().close();
                                 app_c.quit();
                             } else {
                                 // Stay on screen: the user dismisses with Close.
-                                pw_c.borrow().set_error(&msg);
+                                pw_c.borrow().set_error(&err.to_string());
                                 let app_q = app_c.clone();
                                 pw_c.borrow().finish_dismiss(move || {
                                     app_q.quit();
@@ -193,6 +194,17 @@ fn activate(
     });
 }
 
+/// Shared state for one Dolphin extraction, reused across password retries.
+#[derive(Clone)]
+struct ExtractCtx {
+    app: adw::Application,
+    pw: Rc<RefCell<ProgressWindow>>,
+    manager: Arc<BackendManager>,
+    archive: PathBuf,
+    dest: PathBuf,
+    settled: Rc<Cell<bool>>,
+}
+
 fn activate_extract(
     app: &adw::Application,
     archive: PathBuf,
@@ -204,14 +216,47 @@ fn activate_extract(
     pw.borrow().set_operation("Extracting");
     pw.borrow().register_with_app(app);
 
-    let manager = Arc::new(BackendManager::new());
-    let (tx, rx) = mpsc::channel::<FmEvent>();
+    let ctx = ExtractCtx {
+        app: app.clone(),
+        pw: pw.clone(),
+        manager: Arc::new(BackendManager::new()),
+        archive,
+        dest,
+        settled: Rc::new(Cell::new(false)),
+    };
 
-    // Worker thread: identical backend call as the headless CLI path.
+    // Cancel path: abort the backend (kills 7z), then close quietly.
+    {
+        let ctx_c = ctx.clone();
+        pw.borrow().on_cancel(move || {
+            if ctx_c.settled.get() {
+                return;
+            }
+            ctx_c.settled.set(true);
+            ctx_c.manager.cancel_all();
+            ctx_c.pw.borrow().close();
+        });
+    }
+
+    spawn_extract_attempt(&ctx, password);
+}
+
+/// Run one extraction attempt in a worker thread and poll its events. On a
+/// wrong password it asks for it (same dialog as the in-app open flow) and
+/// retries; the window is never put in the error state for that case, so it
+/// stays alive under the dialog.
+fn spawn_extract_attempt(ctx: &ExtractCtx, password: Option<String>) {
+    if ctx.settled.get() {
+        return;
+    }
+    ctx.pw.borrow().reset();
+    ctx.pw.borrow().set_operation("Extracting");
+
+    let (tx, rx) = mpsc::channel::<FmEvent>();
     {
         let tx_prog = tx.clone();
-        let manager = manager.clone();
-        let (archive, dest, password) = (archive.clone(), dest.clone(), password.clone());
+        let manager = ctx.manager.clone();
+        let (archive, dest, password) = (ctx.archive.clone(), ctx.dest.clone(), password.clone());
         std::thread::spawn(move || {
             let res = manager.extract(
                 &archive,
@@ -222,70 +267,74 @@ fn activate_extract(
                     let _ = tx_prog.send(FmEvent::Progress(info));
                 })),
             );
-            let _ = tx.send(FmEvent::Done(res.map_err(|e| e.to_string())));
+            let _ = tx.send(FmEvent::Done(res));
         });
     }
 
-    // Cancel path: abort the backend (kills 7z), then close quietly.
-    let settled = Rc::new(Cell::new(false));
-    {
-        let pw_c = pw.clone();
-        let settled_c = settled.clone();
-        let manager_c = manager.clone();
-        pw.borrow().on_cancel(move || {
-            if settled_c.get() {
-                return;
-            }
-            settled_c.set(true);
-            manager_c.cancel_all();
-            pw_c.borrow().close();
-        });
-    }
-
-    // Poll the event channel and update the progress window.
-    let app_c = app.clone();
-    let settled_c = settled.clone();
-    let pw_c = pw.clone();
-    let dest_c = dest.clone();
+    let ctx_poll = ctx.clone();
     gtk::glib::timeout_add_local(Duration::from_millis(100), move || {
         let mut done = false;
         while let Ok(evt) = rx.try_recv() {
             match evt {
                 FmEvent::Progress(info) => {
                     if info.total == 0 {
-                        pw_c.borrow().pulse(&info.file);
+                        ctx_poll.pw.borrow().pulse(&info.file);
                     } else {
-                        pw_c.borrow().set_progress(&info);
+                        ctx_poll.pw.borrow().set_progress(&info);
                     }
                 }
                 FmEvent::Done(res) => {
                     done = true;
-                    if settled_c.get() {
+                    if ctx_poll.settled.get() {
                         break;
                     }
-                    settled_c.set(true);
                     match res {
                         Ok(()) => {
+                            ctx_poll.settled.set(true);
                             // Auto-close + reveal dest folder + notify.
-                            crate::core::fm::reveal_in_file_manager(&dest_c);
+                            crate::core::fm::reveal_in_file_manager(&ctx_poll.dest);
                             let _ = std::process::Command::new("notify-send")
                                 .args([
                                     "Arkx",
-                                    &format!("Extracted to {}", dest_c.display()),
+                                    &format!("Extracted to {}", ctx_poll.dest.display()),
                                     "--icon=arkx",
                                 ])
                                 .output();
-                            pw_c.borrow().close();
-                            app_c.quit();
+                            ctx_poll.pw.borrow().close();
+                            ctx_poll.app.quit();
                         }
-                        Err(msg) => {
-                            if msg.contains("Cancelled") {
-                                pw_c.borrow().close();
-                                app_c.quit();
+                        Err(err) if matches!(&err, ArkxError::WrongPassword) => {
+                            // Encrypted archive: ask for the password (same dialog
+                            // as opening in the app) and retry. The window is kept
+                            // as-is so GApplication does not quit meanwhile.
+                            let parent = ctx_poll.pw.borrow().root();
+                            let ctx_retry = ctx_poll.clone();
+                            let ctx_cancel = ctx_poll.clone();
+                            crate::ui::dialogs::ask_password(
+                                &parent,
+                                &ctx_poll.archive,
+                                "Type the password to extract it.",
+                                move |pwd| spawn_extract_attempt(&ctx_retry, Some(pwd)),
+                                move || {
+                                    if ctx_cancel.settled.get() {
+                                        return;
+                                    }
+                                    ctx_cancel.settled.set(true);
+                                    ctx_cancel.pw.borrow().close();
+                                    ctx_cancel.app.quit();
+                                },
+                            );
+                        }
+                        Err(err) => {
+                            if matches!(err, ArkxError::Cancelled) {
+                                ctx_poll.settled.set(true);
+                                ctx_poll.pw.borrow().close();
+                                ctx_poll.app.quit();
                             } else {
-                                pw_c.borrow().set_error(&msg);
-                                let app_q = app_c.clone();
-                                pw_c.borrow().finish_dismiss(move || {
+                                ctx_poll.settled.set(true);
+                                let app_q = ctx_poll.app.clone();
+                                ctx_poll.pw.borrow().set_error(&err.to_string());
+                                ctx_poll.pw.borrow().finish_dismiss(move || {
                                     app_q.quit();
                                 });
                             }
