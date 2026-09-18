@@ -2,6 +2,7 @@ use crate::core::archive::ProgressInfo;
 use crate::core::backends::BackendManager;
 use crate::core::error::ArkxError;
 use crate::worker::{Job, JobKind, JobResult};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -51,6 +52,11 @@ impl WorkerPool {
                     JobKind::Extract { .. } => "extract",
                     JobKind::Add { .. } => "add",
                     JobKind::Remove { .. } => "remove",
+                    JobKind::Rename { .. } => "rename",
+                    JobKind::Test { .. } => "test",
+                    JobKind::Paste { .. } => "paste",
+                    JobKind::OpenWith { .. } => "open-with",
+                    JobKind::SecureDelete { .. } => "secure-delete",
                 }
                 .to_string();
                 let _ = evt_tx.send(WorkerEvent::Started { kind: kind_str });
@@ -169,6 +175,122 @@ impl WorkerPool {
                     Some(Box::new(wrapped)),
                 )?;
                 Ok(JobResult::Remove)
+            }
+            JobKind::Rename {
+                archive,
+                old_name,
+                new_name,
+                password,
+            } => {
+                backend.rename(
+                    &archive,
+                    &old_name,
+                    &new_name,
+                    password.as_deref(),
+                    Some(Box::new(wrapped)),
+                )?;
+                Ok(JobResult::Rename)
+            }
+            JobKind::Test {
+                archive,
+                entries,
+                password,
+            } => {
+                let report = backend.test(&archive, entries.as_deref(), password.as_deref())?;
+                Ok(JobResult::Test(report))
+            }
+            JobKind::OpenWith {
+                archive,
+                entry,
+                password,
+            } => {
+                let temp_dir = std::env::temp_dir().join("arkx-open");
+                std::fs::create_dir_all(&temp_dir).map_err(ArkxError::Io)?;
+                let path = backend.open_with(&archive, &entry, password.as_deref(), &temp_dir)?;
+                // Launch the system default handler for the extracted entry.
+                let spawned = std::process::Command::new("xdg-open")
+                    .arg(&path)
+                    .spawn()
+                    .map_err(|e| ArkxError::Backend(format!("Cannot run xdg-open: {}", e)))?;
+                let _ = spawned;
+                Ok(JobResult::OpenWith(path))
+            }
+            JobKind::SecureDelete {
+                archive,
+                entries,
+                passes,
+                password,
+            } => {
+                backend.secure_delete(
+                    &archive,
+                    &entries,
+                    passes,
+                    password.as_deref(),
+                    Some(Box::new(wrapped)),
+                )?;
+                Ok(JobResult::SecureDelete)
+            }
+            JobKind::Paste {
+                archive,
+                dest,
+                source_archive,
+                entries,
+                cut,
+                password,
+            } => {
+                let dest_dir = dest.trim_end_matches('/');
+                // Cut+paste onto the original folder is a no-op.
+                if cut
+                    && entries
+                        .iter()
+                        .all(|e| e.rsplit_once('/').map(|(d, _)| d).unwrap_or("") == dest_dir)
+                {
+                    return Ok(JobResult::Paste);
+                }
+                let temp_dir =
+                    std::env::temp_dir().join(format!("arkx-paste-{}", std::process::id()));
+                std::fs::create_dir_all(&temp_dir).map_err(ArkxError::Io)?;
+                let result = (|| -> std::result::Result<(), ArkxError> {
+                    backend.extract(
+                        &source_archive,
+                        &temp_dir,
+                        Some(&entries),
+                        password.as_deref(),
+                        None,
+                    )?;
+                    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+                    for e in &entries {
+                        let leaf: &str = e.rsplit('/').next().unwrap_or(e);
+                        let tmp_path = temp_dir.join(leaf);
+                        let new_name = if cut {
+                            leaf.to_string()
+                        } else {
+                            let base = std::path::Path::new(leaf);
+                            let stem = base
+                                .file_stem()
+                                .unwrap_or(base.as_os_str())
+                                .to_string_lossy();
+                            match base.extension() {
+                                Some(ext) => format!("{} copy.{}", stem, ext.to_string_lossy()),
+                                None => format!("{} copy", stem),
+                            }
+                        };
+                        let internal = if dest_dir.is_empty() {
+                            new_name
+                        } else {
+                            format!("{}/{}", dest_dir, new_name)
+                        };
+                        sources.push((tmp_path, internal));
+                    }
+                    backend.add(&archive, &sources, password.as_deref(), None)?;
+                    if cut {
+                        backend.remove(&archive, &entries, password.as_deref(), None)?;
+                    }
+                    Ok(())
+                })();
+                std::fs::remove_dir_all(&temp_dir).ok();
+                result?;
+                Ok(JobResult::Paste)
             }
         }
     }

@@ -34,6 +34,9 @@ pub fn queue_open_path(path: PathBuf) {
 /// Parameters of a retriable extraction (archive, dest, entries).
 type PendingExtract = (PathBuf, PathBuf, Option<Vec<String>>);
 
+/// Clipboard item for copy/cut/paste: source archive + selected entries.
+type ClipboardItem = (PathBuf, Vec<String>);
+
 /// Handles shared by every UI callback. Cloning is cheap (Rc + refcounted widgets).
 #[derive(Clone)]
 struct Ui {
@@ -43,14 +46,11 @@ struct Ui {
     last_extract: Rc<RefCell<Option<(PathBuf, PathBuf, Instant)>>>,
     last_progress: Rc<RefCell<(f32, Instant)>>,
     progress_window: Rc<RefCell<Option<Rc<RefCell<ProgressWindow>>>>>,
-    /// A password prompt is awaiting its unlock job: the progress window is
-    /// deferred until real progress (or completion) proves the password right.
     pending_password: Rc<RefCell<bool>>,
-    /// Parameters of the pending/retriable extraction (archive, dest, entries).
     pending_extract: Rc<RefCell<Option<PendingExtract>>>,
-    /// Password remembered for the current archive: reused by every operation
-    /// until the archive is closed or a different one is opened.
     password_cache: Rc<RefCell<Option<String>>>,
+    cut_clipboard: Rc<RefCell<Option<ClipboardItem>>>,
+    copy_clipboard: Rc<RefCell<Option<ClipboardItem>>>,
     breadcrumb: gtk::Box,
     list: gtk::ListBox,
     empty: gtk::Box,
@@ -105,6 +105,9 @@ pub fn build_ui(app: &adw::Application) {
         .narrow .header-btn label { font-size: 12px; }
         .narrow .file-row { padding: 6px 8px; }
         .narrow .app-frame { margin: 6px; border-radius: 8px; }
+        /* Context menu: bounded height so it scrolls instead of overflowing. */
+        popover.context-menu { max-height: 340px; min-width: 220px; }
+        popover.context-menu scrolledwindow { border: none; }
     "#;
     let provider = gtk::CssProvider::new();
     provider.load_from_string(css);
@@ -334,6 +337,17 @@ pub fn build_ui(app: &adw::Application) {
     window.add_action(&action_copy);
     window.add_action(&action_remove);
 
+    let action_rename = gio::SimpleAction::new("rename", None);
+    let action_copy_entry = gio::SimpleAction::new("copy-entry", None);
+    let action_cut_entry = gio::SimpleAction::new("cut-entry", None);
+    let action_paste = gio::SimpleAction::new("paste", None);
+    let action_open_with = gio::SimpleAction::new("open-with", None);
+    window.add_action(&action_rename);
+    window.add_action(&action_copy_entry);
+    window.add_action(&action_cut_entry);
+    window.add_action(&action_paste);
+    window.add_action(&action_open_with);
+
     let open_menu: Rc<RefCell<Option<gtk::PopoverMenu>>> = Rc::new(RefCell::new(None));
 
     // Bundle shared handles for the callbacks below.
@@ -347,6 +361,8 @@ pub fn build_ui(app: &adw::Application) {
         pending_password: Rc::new(RefCell::new(false)),
         pending_extract: Rc::new(RefCell::new(None)),
         password_cache: Rc::new(RefCell::new(None)),
+        cut_clipboard: Rc::new(RefCell::new(None)),
+        copy_clipboard: Rc::new(RefCell::new(None)),
         breadcrumb: breadcrumb_content.clone(),
         list: list_box.clone(),
         empty: empty_state.clone(),
@@ -674,7 +690,11 @@ pub fn build_ui(app: &adw::Application) {
 
     // Double click / row activation for file-manager navigation
     let ui_nav = ui.clone();
+    let open_menu_row = open_menu.clone();
     list_box.connect_row_activated(move |_lb, row| {
+        // A row activation repopulates the list; never leave a (possibly
+        // closed) context popover parented to it while its children are rebuilt.
+        dismiss_context_menu(&open_menu_row);
         if let Some(path) = row.tooltip_text() {
             let path_str = path.to_string();
             let st = ui_nav.state.borrow();
@@ -794,22 +814,49 @@ pub fn build_ui(app: &adw::Application) {
             }
         }
         // Build the contextual popover menu (win.* actions read
-        // state.selected_entries when activated).
+        // state.selected_entries when activated). Items are grouped into
+        // titled sections so the menu reads as a small organized palette.
         let menu = gio::Menu::new();
-        menu.append(
+
+        let operations = gio::Menu::new();
+        operations.append(
             Some("Extract selected here"),
             Some("win.extract-selected-here"),
         );
-        menu.append(
+        operations.append(
             Some("Extract selected to…"),
             Some("win.extract-selected-to"),
         );
-        menu.append(Some("Copy path"), Some("win.copy-path"));
-        menu.append(Some("Remove from archive"), Some("win.remove-selected"));
+        operations.append(Some("Remove from archive"), Some("win.remove-selected"));
+        operations.append(Some("Rename"), Some("win.rename"));
+        menu.append_section(Some("Operations"), &operations);
+
+        let clipboard = gio::Menu::new();
+        clipboard.append(Some("Copy path"), Some("win.copy-path"));
+        clipboard.append(Some("Copy"), Some("win.copy-entry"));
+        clipboard.append(Some("Cut"), Some("win.cut-entry"));
+        clipboard.append(Some("Paste"), Some("win.paste"));
+        menu.append_section(Some("Clipboard"), &clipboard);
+
+        let system = gio::Menu::new();
+        system.append(Some("Open with"), Some("win.open-with"));
+        menu.append_section(Some("System"), &system);
         let popover = gtk::PopoverMenu::from_model(Some(&menu));
-        popover.set_parent(&list_gesture);
-        popover.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        // Parent the popover to the *window*, not to the list box: a list
+        // rebuild (populate_current_view → remove_all) must never try to remove
+        // the popover as a child, and the `win.*` actions resolve by walking up
+        // the tree to the window anyway.
+        let (p_x, p_y) = list_gesture
+            .compute_point(
+                &ui_menu.window,
+                &gtk::graphene::Point::new(x as f32, y as f32),
+            )
+            .map(|p| (p.x() as f64, p.y() as f64))
+            .unwrap_or((x, y));
+        popover.set_parent(&ui_menu.window);
+        popover.set_pointing_to(Some(&gdk::Rectangle::new(p_x as i32, p_y as i32, 1, 1)));
         popover.set_has_arrow(false);
+        popover.add_css_class("context-menu");
         popover.popup();
         *open_menu_g.borrow_mut() = Some(popover);
     });
@@ -819,11 +866,7 @@ pub fn build_ui(app: &adw::Application) {
     let ui_here = ui.clone();
     let open_menu_here = open_menu.clone();
     action_extract_here.connect_activate(move |_, _| {
-        dismiss_context_menu(&open_menu_here);
-        if *ui_here.is_busy.borrow() {
-            ui_here
-                .status_left
-                .set_text("An operation is already in progress…");
+        if dismiss_and_check_idle(&ui_here, &open_menu_here) {
             return;
         }
         let st = ui_here.state.borrow();
@@ -858,11 +901,7 @@ pub fn build_ui(app: &adw::Application) {
     let ui_to = ui.clone();
     let open_menu_to = open_menu.clone();
     action_extract_to.connect_activate(move |_, _| {
-        dismiss_context_menu(&open_menu_to);
-        if *ui_to.is_busy.borrow() {
-            ui_to
-                .status_left
-                .set_text("An operation is already in progress…");
+        if dismiss_and_check_idle(&ui_to, &open_menu_to) {
             return;
         }
         let st = ui_to.state.borrow();
@@ -913,11 +952,7 @@ pub fn build_ui(app: &adw::Application) {
     let ui_rm = ui.clone();
     let open_menu_rm = open_menu.clone();
     action_remove.connect_activate(move |_, _| {
-        dismiss_context_menu(&open_menu_rm);
-        if *ui_rm.is_busy.borrow() {
-            ui_rm
-                .status_left
-                .set_text("An operation is already in progress…");
+        if dismiss_and_check_idle(&ui_rm, &open_menu_rm) {
             return;
         }
         let st = ui_rm.state.borrow();
@@ -947,6 +982,218 @@ pub fn build_ui(app: &adw::Application) {
         });
     });
 
+    // --- Rename ---
+    let ui_rn = ui.clone();
+    let open_menu_rn = open_menu.clone();
+    action_rename.connect_activate(move |_, _| {
+        if dismiss_and_check_idle(&ui_rn, &open_menu_rn) {
+            return;
+        }
+        let st = ui_rn.state.borrow();
+        let archive = match st.current_archive.clone() {
+            Some(a) => a,
+            None => return,
+        };
+        let selected = st.selected_entries.clone();
+        drop(st);
+        if selected.len() != 1 {
+            ui_rn
+                .status_left
+                .set_text("Select exactly one entry to rename");
+            return;
+        }
+        let old_name = selected[0].clone();
+        let trimmed = old_name.trim_end_matches('/');
+        let name = trimmed.rsplit('/').next().unwrap_or(trimmed);
+        let name = name.rsplit('\\').next().unwrap_or(name);
+        let dialog = adw::AlertDialog::new(
+            Some("Rename entry"),
+            Some("Enter the new name for the selected entry"),
+        );
+        let entry = gtk::Entry::new();
+        entry.set_text(name);
+        entry.select_region(0, i32::MAX);
+        entry.set_margin_top(12);
+        entry.set_margin_bottom(12);
+        entry.set_margin_start(12);
+        entry.set_margin_end(12);
+        dialog.set_extra_child(Some(&entry));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("rename", "Rename");
+        dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("rename"));
+        dialog.set_close_response("cancel");
+        dialog.set_response_enabled("rename", !entry.text().is_empty());
+        let entry_c = entry.clone();
+        let dialog_c = dialog.clone();
+        entry.connect_changed(move |_| {
+            dialog_c.set_response_enabled("rename", !entry_c.text().is_empty());
+        });
+        let ui_rn_c = ui_rn.clone();
+        let archive_c = archive.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp == "rename" {
+                let new_base = entry.text().to_string();
+                if new_base.is_empty() {
+                    return;
+                }
+                // A plain base name renames in place (keep the enclosing
+                // folder); an explicit path ("a/b") moves the entry.
+                let trimmed = old_name.trim_end_matches('/');
+                let new_name = if new_base.contains('/') || new_base.contains('\\') {
+                    new_base
+                } else {
+                    match trimmed.rfind('/') {
+                        Some(i) => format!("{}/{}", &trimmed[..=i], new_base),
+                        None => new_base,
+                    }
+                };
+                // Folders keep their trailing slash so `normalize` matches.
+                let new_name = if old_name.ends_with('/') {
+                    crate::core::paths::with_trailing_slash(&new_name)
+                } else {
+                    new_name
+                };
+                ui_rn_c
+                    .status_left
+                    .set_text(&format!("Renaming '{}'…", new_name));
+                ui_rn_c.worker.borrow_mut().submit(JobKind::Rename {
+                    archive: archive_c.clone(),
+                    old_name: old_name.clone(),
+                    new_name,
+                    password: None,
+                });
+            }
+        });
+        dialog.present(Some(&ui_rn.window));
+    });
+
+    // --- Copy entry ---
+    let ui_cp = ui.clone();
+    let open_menu_cp = open_menu.clone();
+    action_copy_entry.connect_activate(move |_, _| {
+        dismiss_context_menu(&open_menu_cp);
+        let st = ui_cp.state.borrow();
+        let selected = st.selected_entries.clone();
+        let archive = st.current_archive.clone();
+        drop(st);
+        let count = selected.len();
+        if count > 0 {
+            if let Some(arc) = archive {
+                *ui_cp.copy_clipboard.borrow_mut() = Some((arc, selected));
+                ui_cp
+                    .status_left
+                    .set_text(&format!("Copied {} entry(ies)", count));
+            }
+        }
+    });
+
+    // --- Cut entry ---
+    let ui_ct = ui.clone();
+    let open_menu_ct = open_menu.clone();
+    action_cut_entry.connect_activate(move |_, _| {
+        dismiss_context_menu(&open_menu_ct);
+        let st = ui_ct.state.borrow();
+        let selected = st.selected_entries.clone();
+        let archive = st.current_archive.clone();
+        drop(st);
+        let count = selected.len();
+        if count > 0 {
+            if let Some(arc) = archive {
+                *ui_ct.cut_clipboard.borrow_mut() = Some((arc, selected));
+                ui_ct
+                    .status_left
+                    .set_text(&format!("Cut {} entry(ies)", count));
+            }
+        }
+    });
+
+    // --- Paste ---
+    let ui_ps = ui.clone();
+    let open_menu_ps = open_menu.clone();
+    action_paste.connect_activate(move |_, _| {
+        if dismiss_and_check_idle(&ui_ps, &open_menu_ps) {
+            return;
+        }
+        // Cut takes priority, copy is the fallback.
+        let cut_op = ui_ps.cut_clipboard.borrow().clone();
+        let copy_op = ui_ps.copy_clipboard.borrow().clone();
+        let (src_archive, entries, cut) = if let Some((a, e)) = cut_op {
+            (Some(a), e, true)
+        } else if let Some((a, e)) = copy_op {
+            (Some(a), e, false)
+        } else {
+            (None, Vec::new(), false)
+        };
+        let Some(src_archive) = src_archive else {
+            ui_ps.status_left.set_text("Nothing to paste");
+            return;
+        };
+        let st = ui_ps.state.borrow();
+        let dest_archive = st.current_archive.clone();
+        let dest_dir = st.current_path.clone();
+        drop(st);
+        let Some(dest_archive) = dest_archive else {
+            return;
+        };
+        if dest_archive != src_archive {
+            ui_ps
+                .status_left
+                .set_text("Cannot paste between different archives");
+            return;
+        }
+        if entries.is_empty() {
+            ui_ps.status_left.set_text("Nothing to paste");
+            return;
+        }
+        let count = entries.len();
+        ui_ps.worker.borrow_mut().submit(JobKind::Paste {
+            archive: dest_archive,
+            dest: dest_dir,
+            source_archive: src_archive,
+            entries,
+            cut,
+            password: None,
+        });
+        // Consume the clipboard: a paste is a one-shot operation.
+        *ui_ps.cut_clipboard.borrow_mut() = None;
+        *ui_ps.copy_clipboard.borrow_mut() = None;
+        ui_ps
+            .status_left
+            .set_text(&format!("Pasting {} entry(ies)…", count));
+    });
+
+    // --- Open with ---
+    let ui_ow = ui.clone();
+    let open_menu_ow = open_menu.clone();
+    action_open_with.connect_activate(move |_, _| {
+        if dismiss_and_check_idle(&ui_ow, &open_menu_ow) {
+            return;
+        }
+        let st = ui_ow.state.borrow();
+        let archive = match st.current_archive.clone() {
+            Some(a) => a,
+            None => return,
+        };
+        let selected = st.selected_entries.clone();
+        drop(st);
+        if selected.len() != 1 {
+            ui_ow
+                .status_left
+                .set_text("Select exactly one entry to open");
+            return;
+        }
+        let entry = selected[0].clone();
+        ui_ow
+            .status_left
+            .set_text(&format!("Opening '{}' with external app…", entry));
+        ui_ow.worker.borrow_mut().submit(JobKind::OpenWith {
+            archive,
+            entry,
+            password: None,
+        });
+    });
+
     // Shortcuts
     let shortcut_controller = gtk::ShortcutController::new();
     let ui_open_key = ui.clone();
@@ -969,6 +1216,24 @@ pub fn build_ui(app: &adw::Application) {
         Some(gtk::ShortcutTrigger::parse_string("<Alt>Left").unwrap()),
         Some(gtk::CallbackAction::new(move |_, _| {
             ui_keys.back.emit_clicked();
+            glib::Propagation::Stop
+        })),
+    ));
+    // Rename with F2
+    let action_rename_sc = action_rename.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("F2").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            action_rename_sc.activate(None);
+            glib::Propagation::Stop
+        })),
+    ));
+    // Paste with Ctrl+V
+    let action_paste_sc = action_paste.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("<Control>v").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            action_paste_sc.activate(None);
             glib::Propagation::Stop
         })),
     ));
@@ -1156,14 +1421,15 @@ pub fn build_ui(app: &adw::Application) {
                             let archive_path = PathBuf::from(&info.path);
                             let mut st = ui_poll.state.borrow_mut();
                             st.current_info = Some(info.clone());
-                            st.current_path = String::new();
                             st.selected_entries.clear();
                             let filter = st.filter_text.clone();
+                            let current_path = st.current_path.clone();
                             drop(st);
-                            // Refresh the root breadcrumb
+                            // Refresh the breadcrumb (keeps the current folder; an
+                            // initial open has current_path empty → root trail).
                             update_breadcrumb(
                                 &ui_poll.breadcrumb,
-                                "",
+                                &current_path,
                                 &info,
                                 ui_poll.state.clone(),
                                 ui_poll.list.clone(),
@@ -1171,7 +1437,7 @@ pub fn build_ui(app: &adw::Application) {
                                 ui_poll.status_right.clone(),
                             );
                             // Populate the current view (top level only)
-                            populate_current_view(&ui_poll.list, &info, "", &filter);
+                            populate_current_view(&ui_poll.list, &info, &current_path, &filter);
                             ui_poll.empty.set_visible(info.entries.is_empty());
                             status_left.set_text("");
                             let total_h =
@@ -1199,7 +1465,7 @@ pub fn build_ui(app: &adw::Application) {
                             ));
                             ui_poll.extract_all.set_sensitive(true);
                             ui_poll.extract_sel.set_sensitive(false);
-                            ui_poll.back.set_sensitive(false);
+                            ui_poll.back.set_sensitive(!current_path.is_empty());
                             // Full-path tooltip on the breadcrumb
                             ui_poll
                                 .breadcrumb
@@ -1215,30 +1481,64 @@ pub fn build_ui(app: &adw::Application) {
                             // the relist job mid-poll would re-enter the event
                             // dispatch and could tear down the window.
                             status_left.set_text("Added files to archive ✓");
-                            let archive = ui_poll.state.borrow().current_archive.clone();
-                            if let Some(archive) = archive {
-                                let ui_idle = ui_poll.clone();
-                                glib::timeout_add_local_once(
-                                    std::time::Duration::from_millis(0),
-                                    move || {
-                                        open_archive(archive, ui_idle.clone());
-                                    },
-                                );
-                            }
+                            let ui_idle = ui_poll.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(0),
+                                move || {
+                                    rebuild_list(ui_idle.clone());
+                                },
+                            );
                         }
                         Ok(JobResult::Remove) => {
-                            // Relist like Add (deferred, see above).
+                            // Relist to show the remaining entries in place
+                            // (deferred, see Add).
                             status_left.set_text("Removed entries from archive ✓");
-                            let archive = ui_poll.state.borrow().current_archive.clone();
-                            if let Some(archive) = archive {
-                                let ui_idle = ui_poll.clone();
-                                glib::timeout_add_local_once(
-                                    std::time::Duration::from_millis(0),
-                                    move || {
-                                        open_archive(archive, ui_idle.clone());
-                                    },
-                                );
-                            }
+                            let ui_idle = ui_poll.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(0),
+                                move || {
+                                    rebuild_list(ui_idle.clone());
+                                },
+                            );
+                        }
+                        Ok(JobResult::Rename) => {
+                            status_left.set_text("Renamed entry ✓");
+                            let ui_idle = ui_poll.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(0),
+                                move || {
+                                    rebuild_list(ui_idle.clone());
+                                },
+                            );
+                        }
+                        Ok(JobResult::Paste) => {
+                            status_left.set_text("Pasted entries ✓");
+                            let ui_idle = ui_poll.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(0),
+                                move || {
+                                    rebuild_list(ui_idle.clone());
+                                },
+                            );
+                        }
+                        Ok(JobResult::Test(report)) => {
+                            status_left.set_text(&format!(
+                                "Test: {} passed, {} failed",
+                                report.passed, report.failed
+                            ));
+                        }
+                        Ok(JobResult::OpenWith(path)) => {
+                            status_left.set_text(&format!("Opened: {}", path.display()));
+                        }
+                        Ok(JobResult::SecureDelete) => {
+                            status_left.set_text("Secure-deleted entries ✓");
+                            let ui_idle = ui_poll.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(0),
+                                move || {
+                                    rebuild_list(ui_idle.clone());
+                                },
+                            );
                         }
                         Err(err) => {
                             // Outcome shown in the progress window when one exists;
@@ -1375,6 +1675,18 @@ fn dismiss_context_menu(menu: &Rc<RefCell<Option<gtk::PopoverMenu>>>) {
     }
 }
 
+/// Dismiss the contextual menu and, if an operation is already running,
+/// surface it in the status bar. Returns `true` when busy (caller aborts).
+fn dismiss_and_check_idle(ui: &Ui, menu: &Rc<RefCell<Option<gtk::PopoverMenu>>>) -> bool {
+    dismiss_context_menu(menu);
+    if *ui.is_busy.borrow() {
+        ui.status_left
+            .set_text("An operation is already in progress…");
+        return true;
+    }
+    false
+}
+
 fn create_title_widget() -> gtk::Box {
     let bx = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     let icon = gtk::Image::from_icon_name("package-x-generic-symbolic");
@@ -1383,6 +1695,30 @@ fn create_title_widget() -> gtk::Box {
     bx.append(&icon);
     bx.append(&title);
     bx
+}
+
+/// Re-list the current folder in place after an archive-modifying job,
+/// keeping the current path (open_archive would jump back to the root).
+fn rebuild_list(ui: Ui) {
+    let st = ui.state.borrow();
+    let current_path = st.current_path.clone();
+    let archive = st.current_archive.clone();
+    drop(st);
+    let Some(archive) = archive else {
+        return;
+    };
+    let password = ui.password_cache.borrow().clone();
+    ui.list.remove_all();
+    let label = if current_path.is_empty() {
+        "root".to_string()
+    } else {
+        format!("/{}", current_path)
+    };
+    ui.status_left.set_text(&format!("Refreshing {}…", label));
+    ui.worker.borrow_mut().submit(JobKind::List {
+        path: archive,
+        password,
+    });
 }
 
 fn open_archive(path: PathBuf, ui: Ui) {
@@ -1531,7 +1867,6 @@ mod tests {
             num_files: 2,
             num_dirs: 1,
             has_encrypted,
-            comment: None,
         }
     }
 

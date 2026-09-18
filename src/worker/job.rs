@@ -24,6 +24,41 @@ pub enum JobKind {
         entries: Vec<String>,
         password: Option<String>,
     },
+    Rename {
+        archive: PathBuf,
+        old_name: String,
+        new_name: String,
+        password: Option<String>,
+    },
+    Test {
+        archive: PathBuf,
+        entries: Option<Vec<String>>,
+        password: Option<String>,
+    },
+    Paste {
+        /// Target archive (same as `source_archive` for in-archive moves).
+        archive: PathBuf,
+        /// Destination directory inside the archive (e.g. "docs/", empty = root).
+        dest: String,
+        /// Archive the pasted entries currently live in.
+        source_archive: PathBuf,
+        /// Full entry paths to paste.
+        entries: Vec<String>,
+        /// `true` = cut (move: originals are removed after the copy), `false` = copy.
+        cut: bool,
+        password: Option<String>,
+    },
+    OpenWith {
+        archive: PathBuf,
+        entry: String,
+        password: Option<String>,
+    },
+    SecureDelete {
+        archive: PathBuf,
+        entries: Vec<String>,
+        passes: usize,
+        password: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -37,4 +72,9 @@ pub enum JobResult {
     Extract,
     Add,
     Remove,
+    Rename,
+    Test(crate::core::archive::TestReport),
+    OpenWith(std::path::PathBuf),
+    Paste,
+    SecureDelete,
 }

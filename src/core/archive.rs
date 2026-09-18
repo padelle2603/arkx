@@ -35,7 +35,6 @@ pub struct ArchiveInfo {
     pub num_files: usize,
     pub num_dirs: usize,
     pub has_encrypted: bool,
-    pub comment: Option<String>,
 }
 
 /// Byte-based progress event: `percent` is always `current/total*100`.
@@ -63,9 +62,45 @@ impl ProgressInfo {
     }
 }
 
-/// Backends share this shape: list / extract / create with an optional
-/// byte-based progress callback. (Kept minimal on purpose: only the two
-/// real backends implement it via `BackendManager`.)
+/// Result of an integrity test.
+#[derive(Debug, Clone)]
+pub struct TestReport {
+    pub archive: String,
+    pub results: Vec<TestResult>,
+    pub passed: usize,
+    pub failed: usize,
+}
+
+/// Single-entry integrity test result.
+#[derive(Debug, Clone)]
+pub struct TestResult {
+    pub entry: String,
+    pub is_dir: bool,
+    pub crc32_expected: Option<String>,
+    pub crc32_actual: Option<String>,
+    pub passed: bool,
+}
+
+/// Detailed properties for an archive or entry.
+#[derive(Debug, Clone)]
+pub struct ArchiveProperties {
+    pub path: String,
+    pub format: String,
+    pub total_size: u64,
+    pub total_packed: u64,
+    pub num_files: usize,
+    pub num_dirs: usize,
+    pub has_encrypted: bool,
+    pub entry_name: Option<String>,
+    pub entry_size: Option<u64>,
+    pub entry_packed_size: Option<u64>,
+    pub entry_crc32: Option<String>,
+    pub entry_method: Option<String>,
+    pub entry_encrypted: bool,
+}
+
+/// Backends share this shape: list / extract / create / add / remove /
+/// rename / test / open_with / properties / secure_delete.
 pub trait ArchiveBackend: Send + Sync {
     fn list(&self, path: &Path) -> Result<ArchiveInfo>;
     fn extract(
@@ -84,9 +119,6 @@ pub trait ArchiveBackend: Send + Sync {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()>;
-    /// Add `sources` (filesystem path → entry path inside the archive) to an
-    /// existing archive. Implemented only by backends that can rewrite/update
-    /// in place (see `BackendManager::add`); the default is a clear error.
     fn add(
         &self,
         _archive: &Path,
@@ -98,9 +130,6 @@ pub trait ArchiveBackend: Send + Sync {
             "adding files to this archive format is not supported".into(),
         ))
     }
-    /// Remove archive entries by name from an existing archive. Implemented only
-    /// by backends that can rewrite/update in place (see `BackendManager::remove`);
-    /// the default is a clear error.
     fn remove(
         &self,
         _archive: &Path,
@@ -110,6 +139,61 @@ pub trait ArchiveBackend: Send + Sync {
     ) -> Result<()> {
         Err(super::error::ArkxError::UnsupportedFormat(
             "removing files from this archive format is not supported".into(),
+        ))
+    }
+    fn rename(
+        &self,
+        _archive: &Path,
+        _old_name: &str,
+        _new_name: &str,
+        _password: Option<&str>,
+        _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        Err(super::error::ArkxError::UnsupportedFormat(
+            "renaming entries in this archive format is not supported".into(),
+        ))
+    }
+    fn test(
+        &self,
+        _archive: &Path,
+        _entries: Option<&[String]>,
+        _password: Option<&str>,
+    ) -> Result<TestReport> {
+        Err(super::error::ArkxError::UnsupportedFormat(
+            "testing archives of this format is not supported".into(),
+        ))
+    }
+    fn open_with(
+        &self,
+        _archive: &Path,
+        _entry: &str,
+        _password: Option<&str>,
+        _temp_dir: &Path,
+    ) -> Result<PathBuf> {
+        Err(super::error::ArkxError::UnsupportedFormat(
+            "opening entries of this format with an external app is not supported".into(),
+        ))
+    }
+    fn properties(
+        &self,
+        _archive: &Path,
+        _entry: Option<&str>,
+        _password: Option<&str>,
+    ) -> Result<ArchiveProperties> {
+        Err(super::error::ArkxError::UnsupportedFormat(
+            "getting properties of this format is not supported".into(),
+        ))
+    }
+    fn secure_delete(
+        &self,
+        _archive: &Path,
+        _entries: &[String],
+        _passes: usize,
+        _password: Option<&str>,
+        _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        Err(super::error::ArkxError::UnsupportedFormat(
+            "secure delete is not supported for this format".into(),
         ))
     }
     fn supports(&self, format: &super::detector::ArchiveFormat) -> bool;

@@ -108,6 +108,82 @@ impl ArchiveBackend for NativeBackend {
             _ => Err(ArkxError::UnsupportedFormat(format!("remove {:?}", fmt))),
         }
     }
+
+    fn rename(
+        &self,
+        archive: &Path,
+        old_name: &str,
+        new_name: &str,
+        _password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let fmt = crate::core::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.rename_zip(archive, old_name, new_name, progress),
+            _ => Err(ArkxError::UnsupportedFormat(format!("rename {:?}", fmt))),
+        }
+    }
+
+    fn test(
+        &self,
+        archive: &Path,
+        entries: Option<&[String]>,
+        _password: Option<&str>,
+    ) -> Result<crate::core::archive::TestReport> {
+        let fmt = crate::core::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.test_zip(archive, entries),
+            _ => Err(ArkxError::UnsupportedFormat(format!("test {:?}", fmt))),
+        }
+    }
+
+    fn open_with(
+        &self,
+        archive: &Path,
+        entry: &str,
+        _password: Option<&str>,
+        temp_dir: &Path,
+    ) -> Result<PathBuf> {
+        let fmt = crate::core::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.open_with_zip(archive, entry, temp_dir),
+            _ => Err(ArkxError::UnsupportedFormat(format!("open_with {:?}", fmt))),
+        }
+    }
+
+    fn properties(
+        &self,
+        archive: &Path,
+        entry: Option<&str>,
+        _password: Option<&str>,
+    ) -> Result<crate::core::archive::ArchiveProperties> {
+        let fmt = crate::core::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.properties_zip(archive, entry),
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "properties {:?}",
+                fmt
+            ))),
+        }
+    }
+
+    fn secure_delete(
+        &self,
+        archive: &Path,
+        entries: &[String],
+        passes: usize,
+        _password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let fmt = crate::core::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.secure_delete_zip(archive, entries, passes, progress),
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "secure_delete {:?}",
+                fmt
+            ))),
+        }
+    }
 }
 
 impl NativeBackend {
@@ -201,7 +277,6 @@ impl NativeBackend {
             num_files,
             num_dirs,
             has_encrypted,
-            comment: None,
         })
     }
 
@@ -260,7 +335,6 @@ impl NativeBackend {
             num_files,
             num_dirs,
             has_encrypted: false,
-            comment: None,
         })
     }
 
@@ -294,7 +368,6 @@ impl NativeBackend {
             num_files: 1,
             num_dirs: 0,
             has_encrypted: false,
-            comment: None,
         })
     }
 
@@ -1481,6 +1554,399 @@ fn prefixed_name(path: &Path, base: &Path) -> String {
         .unwrap_or_else(|| "file".to_string())
 }
 
+impl NativeBackend {
+    fn rename_zip(
+        &self,
+        archive: &Path,
+        old_name: &str,
+        new_name: &str,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let file = File::open(archive).map_err(ArkxError::Io)?;
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+            .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+        let old_name_norm = crate::core::paths::normalize(old_name);
+        let new_name_norm = crate::core::paths::normalize(new_name);
+
+        // Renaming a folder `dir/` → `dir2/` also rebases its contents
+        // (`dir/a.txt` → `dir2/a.txt`); otherwise the children keep living in
+        // the old folder and the archive ends up with both, which looks like a
+        // copy instead of a rename.
+        let old_prefix = crate::core::paths::with_trailing_slash(&old_name_norm);
+        let new_prefix = crate::core::paths::with_trailing_slash(&new_name_norm);
+        // Target path of an entry affected by the rename.
+        let rebased = |norm: &str, is_dir: bool| -> String {
+            let target = if norm.starts_with(&old_prefix) && norm != old_name_norm {
+                format!("{}{}", new_prefix, &norm[old_prefix.len()..])
+            } else {
+                new_name_norm.clone()
+            };
+            if is_dir {
+                crate::core::paths::with_trailing_slash(&target)
+            } else {
+                target
+            }
+        };
+
+        // Which entries move, and which target names they claim: an unrelated
+        // entry that already has a claimed name is dropped (replaced).
+        let mut affected: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut claimed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for i in 0..z.len() {
+            let f = z
+                .by_index(i)
+                .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+            let norm = crate::core::paths::normalize(f.name());
+            if norm == old_name_norm || norm.starts_with(&old_prefix) {
+                affected.insert(norm.clone());
+                claimed.insert(rebased(&norm, f.is_dir()));
+            }
+        }
+
+        let mut tmp = archive.as_os_str().to_os_string();
+        tmp.push(format!(".arkx-{}.part", std::process::id()));
+        let tmp = PathBuf::from(tmp);
+
+        let total = z.len() as u64;
+        let result: Result<()> = (|| {
+            let file = File::create(&tmp).map_err(ArkxError::Io)?;
+            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+            let mut done = 0u64;
+            for i in 0..z.len() {
+                let mut f = z
+                    .by_index(i)
+                    .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+                let name = f.name().to_string();
+                let norm = crate::core::paths::normalize(&name);
+                // Affected entry → rebased name; otherwise keep the original,
+                // unless a renamed entry claims that target (then drop it).
+                let target = if affected.contains(&norm) {
+                    rebased(&norm, f.is_dir())
+                } else if claimed.contains(&norm) {
+                    continue;
+                } else {
+                    name.clone()
+                };
+                done += 1;
+                if let Some(cb) = &progress {
+                    cb(ProgressInfo::new(target.clone(), done, total.max(1)));
+                }
+                let opts: zip::write::FileOptions<()> =
+                    zip::write::FileOptions::default().compression_method(f.compression());
+                if f.is_dir() {
+                    zip.add_directory(&target, opts)
+                        .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                } else {
+                    zip.start_file(&target, opts)
+                        .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                    let mut buf = vec![0u8; 65536];
+                    loop {
+                        let n = f.read(&mut buf).map_err(ArkxError::Io)?;
+                        if n == 0 {
+                            break;
+                        }
+                        zip.write_all(&buf[..n]).map_err(ArkxError::Io)?;
+                    }
+                }
+            }
+            if let Some(cb) = &progress {
+                cb(ProgressInfo::new(
+                    "Completed".to_string(),
+                    total.max(1),
+                    total.max(1),
+                ));
+            }
+            let writer = zip
+                .finish()
+                .map_err(|e| ArkxError::Backend(e.to_string()))?;
+            let mut file = writer
+                .into_inner()
+                .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+            use std::io::Write as _WriteFlush;
+            file.flush().map_err(ArkxError::Io)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return result;
+        }
+        std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
+        Ok(())
+    }
+
+    fn test_zip(
+        &self,
+        archive: &Path,
+        entries: Option<&[String]>,
+    ) -> Result<crate::core::archive::TestReport> {
+        let file = File::open(archive).map_err(ArkxError::Io)?;
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+            .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+        let mut results = Vec::new();
+        let mut passed = 0usize;
+        let mut failed = 0usize;
+        for i in 0..z.len() {
+            let mut f = z
+                .by_index(i)
+                .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+            let name = f.name().to_string();
+            if let Some(sel) = entries {
+                if !sel
+                    .iter()
+                    .any(|s| crate::core::paths::entry_matches(&name, s))
+                {
+                    continue;
+                }
+            }
+            let is_dir = f.is_dir();
+            let crc_expected = f.crc32();
+            // Recompute CRC32 by reading the entry data
+            let crc_actual = if is_dir {
+                crc_expected
+            } else {
+                let mut hasher = crc32fast::Hasher::new();
+                let mut buf = vec![0u8; 65536];
+                loop {
+                    let n = f.read(&mut buf).map_err(ArkxError::Io)?;
+                    if n == 0 {
+                        break;
+                    }
+                    hasher.update(&buf[..n]);
+                }
+                hasher.finalize()
+            };
+            let passed_entry = crc_expected == crc_actual;
+            if passed_entry {
+                passed += 1;
+            } else {
+                failed += 1;
+            }
+            results.push(crate::core::archive::TestResult {
+                entry: name,
+                is_dir,
+                crc32_expected: Some(format!("{:08X}", crc_expected)),
+                crc32_actual: Some(format!("{:08X}", crc_actual)),
+                passed: passed_entry,
+            });
+        }
+        Ok(crate::core::archive::TestReport {
+            archive: archive.to_string_lossy().to_string(),
+            results,
+            passed,
+            failed,
+        })
+    }
+
+    fn open_with_zip(&self, archive: &Path, entry: &str, temp_dir: &Path) -> Result<PathBuf> {
+        let file = File::open(archive).map_err(ArkxError::Io)?;
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+            .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+        let idx = (0..z.len())
+            .find(|&i| z.by_index(i).ok().map(|f| f.name().to_string()) == Some(entry.to_string()))
+            .ok_or_else(|| ArkxError::Corrupted(format!("entry not found: {}", entry)))?;
+        let mut f = z
+            .by_index(idx)
+            .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+        let out_path = temp_dir.join(crate::core::paths::normalize(entry));
+        std::fs::create_dir_all(out_path.parent().unwrap_or(temp_dir)).map_err(ArkxError::Io)?;
+        if f.is_dir() {
+            std::fs::create_dir_all(&out_path).map_err(ArkxError::Io)?;
+            return Ok(out_path);
+        }
+        // Avoid clobbering a same-named file extracted earlier by another
+        // entry: keep the first occurrence.
+        if out_path.exists() {
+            return Ok(out_path);
+        }
+        let mut out = File::create(&out_path).map_err(ArkxError::Io)?;
+        let mut buf = vec![0u8; 65536];
+        loop {
+            let n = f.read(&mut buf).map_err(ArkxError::Io)?;
+            if n == 0 {
+                break;
+            }
+            out.write_all(&buf[..n]).map_err(ArkxError::Io)?;
+        }
+        out.flush().map_err(ArkxError::Io)?;
+        Ok(out_path)
+    }
+
+    fn properties_zip(
+        &self,
+        archive: &Path,
+        entry: Option<&str>,
+    ) -> Result<crate::core::archive::ArchiveProperties> {
+        let file = File::open(archive).map_err(ArkxError::Io)?;
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+            .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+        let mut total_size = 0u64;
+        let mut total_packed = 0u64;
+        let mut num_files = 0usize;
+        let mut num_dirs = 0usize;
+        let mut has_encrypted = false;
+        let mut entry_props = (None, None, None, None, None, false);
+        for i in 0..z.len() {
+            let f = z
+                .by_index(i)
+                .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+            let name = f.name().to_string();
+            let is_dir = f.is_dir();
+            let size = f.size();
+            let packed = f.compressed_size();
+            total_size += size;
+            total_packed += packed;
+            if is_dir {
+                num_dirs += 1;
+            } else {
+                num_files += 1;
+            }
+            if f.encrypted() {
+                has_encrypted = true;
+            }
+            if let Some(entry_name) = entry {
+                if crate::core::paths::entry_matches(&name, entry_name) {
+                    entry_props = (
+                        Some(name),
+                        Some(size),
+                        Some(packed),
+                        Some(format!("{:08X}", f.crc32())),
+                        Some(format!("{:?}", f.compression())),
+                        f.encrypted(),
+                    );
+                }
+            }
+        }
+        if let Some(_entry_name) = entry {
+            let (name, size, packed, crc, method, encrypted) = entry_props;
+            Ok(crate::core::archive::ArchiveProperties {
+                path: archive.to_string_lossy().to_string(),
+                format: "ZIP".into(),
+                total_size,
+                total_packed,
+                num_files,
+                num_dirs,
+                has_encrypted,
+                entry_name: name,
+                entry_size: size,
+                entry_packed_size: packed,
+                entry_crc32: crc,
+                entry_method: method,
+                entry_encrypted: encrypted,
+            })
+        } else {
+            Ok(crate::core::archive::ArchiveProperties {
+                path: archive.to_string_lossy().to_string(),
+                format: "ZIP".into(),
+                total_size,
+                total_packed,
+                num_files,
+                num_dirs,
+                has_encrypted,
+                entry_name: None,
+                entry_size: None,
+                entry_packed_size: None,
+                entry_crc32: None,
+                entry_method: None,
+                entry_encrypted: false,
+            })
+        }
+    }
+
+    fn secure_delete_zip(
+        &self,
+        archive: &Path,
+        entries: &[String],
+        passes: usize,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let file = File::open(archive).map_err(ArkxError::Io)?;
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+            .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+        let archive_len = archive.metadata().map(|m| m.len()).unwrap_or(0);
+        let mut tmp = archive.as_os_str().to_os_string();
+        tmp.push(format!(".arkx-secure-{}.part", std::process::id()));
+        let tmp = PathBuf::from(tmp);
+
+        let total = z.len() as u64;
+        let result: Result<()> = (|| {
+            let file = File::create(&tmp).map_err(ArkxError::Io)?;
+            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+            let mut done = 0u64;
+            for i in 0..z.len() {
+                let mut f = z
+                    .by_index(i)
+                    .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+                let name = f.name().to_string();
+                if entries
+                    .iter()
+                    .any(|e| crate::core::paths::entry_matches(&name, e))
+                {
+                    done += 1;
+                    continue;
+                }
+                done += 1;
+                if let Some(cb) = &progress {
+                    cb(ProgressInfo::new(name.clone(), done, total.max(1)));
+                }
+                let opts: zip::write::FileOptions<()> =
+                    zip::write::FileOptions::default().compression_method(f.compression());
+                if f.is_dir() {
+                    zip.add_directory(&name, opts)
+                        .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                } else {
+                    zip.start_file(&name, opts)
+                        .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                    let mut buf = vec![0u8; 65536];
+                    loop {
+                        let n = f.read(&mut buf).map_err(ArkxError::Io)?;
+                        if n == 0 {
+                            break;
+                        }
+                        zip.write_all(&buf[..n]).map_err(ArkxError::Io)?;
+                    }
+                }
+            }
+            let writer = zip
+                .finish()
+                .map_err(|e| ArkxError::Backend(e.to_string()))?;
+            let mut file = writer
+                .into_inner()
+                .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+            use std::io::Write as _WriteFlush;
+            file.flush().map_err(ArkxError::Io)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return result;
+        }
+        // Overwrite the original archive's inode data before replacing
+        // it with the clean archive. The original inode contained the
+        // entries-to-delete data; after overwrite it's unrecoverable.
+        for _ in 0..passes {
+            let mut f = File::create(archive).map_err(ArkxError::Io)?;
+            let mut urandom = File::open("/dev/urandom").map_err(ArkxError::Io)?;
+            let mut buf = vec![0u8; 65536];
+            let mut written = 0u64;
+            while written < archive_len {
+                let n = std::cmp::min(buf.len() as u64, archive_len - written) as usize;
+                urandom.read_exact(&mut buf[..n]).map_err(ArkxError::Io)?;
+                f.write_all(&buf[..n]).map_err(ArkxError::Io)?;
+                written += n as u64;
+            }
+            f.flush().map_err(ArkxError::Io)?;
+        }
+        {
+            let mut f = File::create(archive).map_err(ArkxError::Io)?;
+            let zeros = vec![0u8; archive_len as usize];
+            f.write_all(&zeros).map_err(ArkxError::Io)?;
+            f.flush().map_err(ArkxError::Io)?;
+        }
+        std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1943,5 +2409,94 @@ mod tests {
             .extract(&tar_path, &out, None, None, None)
             .unwrap();
         assert!(!out.join("evil").exists(), "escaping symlink was created");
+    }
+
+    #[test]
+    fn zip_rename_file_renames_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("r.zip");
+        let seed = dir.path().join("seed.txt");
+        std::fs::write(&seed, b"seed").unwrap();
+        backend()
+            .create(&zip_path, std::slice::from_ref(&seed), 6, None, None)
+            .unwrap();
+        let new_file = dir.path().join("new.txt");
+        std::fs::write(&new_file, b"new").unwrap();
+        backend()
+            .add(
+                &zip_path,
+                &[(new_file.clone(), "folder/new.txt".to_string())],
+                None,
+                None,
+            )
+            .unwrap();
+
+        backend()
+            .rename(
+                &zip_path,
+                "folder/new.txt",
+                "folder/renamed.txt",
+                None,
+                None,
+            )
+            .unwrap();
+
+        let info = backend().list(&zip_path).unwrap();
+        let names: Vec<&str> = info.entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            names.contains(&"folder/renamed.txt"),
+            "renamed entry missing: {:?}",
+            names
+        );
+        assert!(
+            !names.contains(&"folder/new.txt"),
+            "original entry still present: {:?}",
+            names
+        );
+        let out = dir.path().join("out");
+        backend()
+            .extract(&zip_path, &out, None, None, None)
+            .unwrap();
+        assert_eq!(
+            std::fs::read(out.join("folder/renamed.txt")).unwrap(),
+            b"new"
+        );
+    }
+
+    #[test]
+    fn zip_rename_folder_rebases_children() {
+        let dir = tempfile::tempdir().unwrap();
+        let zip_path = dir.path().join("rf.zip");
+        let folder = dir.path().join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("a.txt"), b"a").unwrap();
+        std::fs::write(folder.join("b.txt"), b"b").unwrap();
+        backend()
+            .create(&zip_path, std::slice::from_ref(&folder), 6, None, None)
+            .unwrap();
+
+        backend()
+            .rename(&zip_path, "folder/", "photos/", None, None)
+            .unwrap();
+
+        let info = backend().list(&zip_path).unwrap();
+        let names: Vec<&str> = info.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            names.iter().filter(|n| n.starts_with("folder")).count(),
+            0,
+            "old folder still present: {:?}",
+            names
+        );
+        assert!(
+            names.contains(&"photos/a.txt") && names.contains(&"photos/b.txt"),
+            "children not rebased: {:?}",
+            names
+        );
+        let out = dir.path().join("out");
+        backend()
+            .extract(&zip_path, &out, None, None, None)
+            .unwrap();
+        assert_eq!(std::fs::read(out.join("photos/a.txt")).unwrap(), b"a");
+        assert_eq!(std::fs::read(out.join("photos/b.txt")).unwrap(), b"b");
     }
 }

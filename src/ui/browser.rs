@@ -715,7 +715,6 @@ mod tests {
             num_files: 0,
             num_dirs: 0,
             has_encrypted: false,
-            comment: None,
         }
     }
 

@@ -323,6 +323,108 @@ impl BackendManager {
             ))),
         }
     }
+
+    /// Rename an entry inside an archive. Routing:
+    /// Zip→native rewrite; 7z and plain tar→`7z rn`.
+    pub fn rename(
+        &self,
+        archive: &Path,
+        old_name: &str,
+        new_name: &str,
+        password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let fmt = super::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self
+                .native
+                .rename(archive, old_name, new_name, password, progress),
+            ArchiveFormat::SevenZip | ArchiveFormat::Tar => self
+                .seven
+                .rename(archive, old_name, new_name, password, progress),
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "cannot rename in {fmt:?}: stream-compressed formats are not updatable"
+            ))),
+        }
+    }
+
+    /// Test integrity of archive entries.
+    pub fn test(
+        &self,
+        archive: &Path,
+        entries: Option<&[String]>,
+        password: Option<&str>,
+    ) -> Result<crate::core::archive::TestReport> {
+        let fmt = super::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.native.test(archive, entries, password),
+            ArchiveFormat::SevenZip | ArchiveFormat::Tar => {
+                self.seven.test(archive, entries, password)
+            }
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "cannot test {fmt:?}: integrity check not supported"
+            ))),
+        }
+    }
+
+    /// Extract a single entry to a temp dir for external app launch.
+    pub fn open_with(
+        &self,
+        archive: &Path,
+        entry: &str,
+        password: Option<&str>,
+        temp_dir: &Path,
+    ) -> Result<PathBuf> {
+        let fmt = super::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.native.open_with(archive, entry, password, temp_dir),
+            ArchiveFormat::SevenZip | ArchiveFormat::Tar => {
+                self.seven.open_with(archive, entry, password, temp_dir)
+            }
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "cannot open entries of {fmt:?} with an external app"
+            ))),
+        }
+    }
+
+    /// Get archive/entry properties.
+    pub fn properties(
+        &self,
+        archive: &Path,
+        entry: Option<&str>,
+        password: Option<&str>,
+    ) -> Result<crate::core::archive::ArchiveProperties> {
+        let fmt = super::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.native.properties(archive, entry, password),
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "cannot get properties of {fmt:?}"
+            ))),
+        }
+    }
+
+    /// Securely delete entries by overwriting them before removal.
+    pub fn secure_delete(
+        &self,
+        archive: &Path,
+        entries: &[String],
+        passes: usize,
+        password: Option<&str>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let fmt = super::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self
+                .native
+                .secure_delete(archive, entries, passes, password, progress),
+            ArchiveFormat::SevenZip | ArchiveFormat::Tar => self
+                .seven
+                .secure_delete(archive, entries, passes, password, progress),
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "cannot secure-delete from {fmt:?}"
+            ))),
+        }
+    }
 }
 
 impl Default for BackendManager {

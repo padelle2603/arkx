@@ -1,4 +1,5 @@
 use arkx::core;
+use arkx::core::error::ArkxError;
 use arkx::ui;
 
 use adw::prelude::*;
@@ -10,8 +11,10 @@ fn main() -> anyhow::Result<()> {
     if args.len() >= 2 {
         match args[1].as_str() {
             "x" | "extract" | "l" | "list" | "a" | "create" | "c" | "compress" | "u" | "add"
-            | "update" | "r" | "rm" | "d" | "delete" | "remove" | "--help" | "-h" | "--version"
-            | "-V" => return run_cli(args),
+            | "update" | "r" | "rm" | "d" | "delete" | "remove" | "rn" | "rename" | "t"
+            | "test" | "o" | "open" | "w" | "wipe" | "--help" | "-h" | "--version" | "-V" => {
+                return run_cli(args)
+            }
             _ => {
                 // An existing file argument goes to the GUI (handled by ui)
                 let p = std::path::Path::new(&args[1]);
@@ -452,6 +455,189 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             let start = std::time::Instant::now();
             backend.remove(&archive, &entries, password.as_deref(), None)?;
             println!("\nRemoved in {:.2}s", start.elapsed().as_secs_f32());
+        }
+        "rn" | "rename" => {
+            if args.len() < 5 {
+                eprintln!("Usage: arkx rename <archive> <old_entry> <new_entry> [-p password]");
+                std::process::exit(1);
+            }
+            let archive = crate::core::fm::decode_input_arg(&args[2]);
+            if !archive.exists() {
+                eprintln!("Not found: {}", archive.display());
+                std::process::exit(1);
+            }
+            let old_name = crate::core::fm::decode_input_arg(&args[3]);
+            let new_name = crate::core::fm::decode_input_arg(&args[4]);
+            let mut password: Option<String> = None;
+            let mut i = 5;
+            while i < args.len() {
+                if args[i] == "-p" || args[i] == "--password" {
+                    if let Some(v) = args.get(i + 1) {
+                        password = Some(v.clone());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            println!(
+                "Renaming '{}' → '{}' in {}...",
+                old_name.display(),
+                new_name.display(),
+                archive.display()
+            );
+            let start = std::time::Instant::now();
+            backend.rename(
+                &archive,
+                &old_name.to_string_lossy(),
+                &new_name.to_string_lossy(),
+                password.as_deref(),
+                None,
+            )?;
+            println!("Renamed in {:.2}s", start.elapsed().as_secs_f32());
+        }
+        "t" | "test" => {
+            if args.len() < 3 {
+                eprintln!("Usage: arkx test <archive> [entries...] [-p password]");
+                std::process::exit(1);
+            }
+            let archive = crate::core::fm::decode_input_arg(&args[2]);
+            if !archive.exists() {
+                eprintln!("Not found: {}", archive.display());
+                std::process::exit(1);
+            }
+            let mut password: Option<String> = None;
+            let mut entries: Vec<String> = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut None);
+                if consumed > 0 {
+                    i += consumed;
+                    continue;
+                }
+                if args[i] == "-p" || args[i] == "--password" {
+                    if let Some(v) = args.get(i + 1) {
+                        password = Some(v.clone());
+                    }
+                    i += 2;
+                } else {
+                    entries.push(
+                        crate::core::fm::decode_input_arg(&args[i])
+                            .to_string_lossy()
+                            .into(),
+                    );
+                    i += 1;
+                }
+            }
+            println!("Testing {}...", archive.display());
+            let start = std::time::Instant::now();
+            let report = backend.test(
+                &archive,
+                if entries.is_empty() {
+                    None
+                } else {
+                    Some(&entries)
+                },
+                password.as_deref(),
+            )?;
+            println!(
+                "Completed in {:.2}s: {} passed, {} failed",
+                start.elapsed().as_secs_f32(),
+                report.passed,
+                report.failed
+            );
+            for r in &report.results {
+                let icon = if r.passed { "✅" } else { "❌" };
+                println!("  {} {}", icon, r.entry);
+            }
+        }
+        "o" | "open" => {
+            if args.len() < 4 {
+                eprintln!("Usage: arkx open <archive> <entry> [-p password]");
+                std::process::exit(1);
+            }
+            let archive = crate::core::fm::decode_input_arg(&args[2]);
+            if !archive.exists() {
+                eprintln!("Not found: {}", archive.display());
+                std::process::exit(1);
+            }
+            let entry = crate::core::fm::decode_input_arg(&args[3])
+                .to_string_lossy()
+                .to_string();
+            let mut password: Option<String> = None;
+            let mut i = 4;
+            while i < args.len() {
+                if args[i] == "-p" || args[i] == "--password" {
+                    if let Some(v) = args.get(i + 1) {
+                        password = Some(v.clone());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            let temp_dir = std::env::temp_dir().join("arkx-open");
+            std::fs::create_dir_all(&temp_dir).map_err(ArkxError::Io)?;
+            let path = backend.open_with(&archive, &entry, password.as_deref(), &temp_dir)?;
+            println!("Extracted to: {}", path.display());
+            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+        }
+        "w" | "wipe" => {
+            if args.len() < 4 {
+                eprintln!("Usage: arkx wipe <archive> <entry...> [-p password] [--passes N]");
+                std::process::exit(1);
+            }
+            let archive = crate::core::fm::decode_input_arg(&args[2]);
+            if !archive.exists() {
+                eprintln!("Not found: {}", archive.display());
+                std::process::exit(1);
+            }
+            let mut password: Option<String> = None;
+            let mut passes = 3usize;
+            let mut entries: Vec<String> = Vec::new();
+            let mut i = 3;
+            while i < args.len() {
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut None);
+                if consumed > 0 {
+                    i += consumed;
+                    continue;
+                }
+                if args[i] == "--passes" {
+                    if let Some(v) = args.get(i + 1) {
+                        passes = v.parse().unwrap_or(3);
+                    }
+                    i += 2;
+                } else if args[i].starts_with("--passes=") {
+                    passes = args[i]
+                        .strip_prefix("--passes=")
+                        .unwrap()
+                        .parse()
+                        .unwrap_or(3);
+                    i += 1;
+                } else {
+                    entries.push(
+                        crate::core::fm::decode_input_arg(&args[i])
+                            .to_string_lossy()
+                            .into(),
+                    );
+                    i += 1;
+                }
+            }
+            if entries.is_empty() {
+                eprintln!("No entries specified");
+                std::process::exit(1);
+            }
+            println!(
+                "Secure-deleting {} entries from {} ({} passes)...",
+                entries.len(),
+                archive.display(),
+                passes
+            );
+            let start = std::time::Instant::now();
+            backend.secure_delete(&archive, &entries, passes, password.as_deref(), None)?;
+            println!("Secure-deleted in {:.2}s", start.elapsed().as_secs_f32());
         }
         "a" | "create" => {
             if args.len() < 4 {

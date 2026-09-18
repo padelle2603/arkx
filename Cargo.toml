@@ -1,6 +1,6 @@
 [package]
 name = "arkx"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 description = "Fast multi-threaded Linux archive manager (PeaZip-inspired)"
 authors = ["padelle"]
@@ -20,7 +20,7 @@ thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
 infer = "0.16"
 walkdir = "2.5"
-zip = { version = "2.2", default-features = false, features = ["deflate", "bzip2", "zstd", "xz", "time"] }
+zip = { version = "2.2", default-features = false, features = ["deflate", "bzip2", "zstd", "xz", "time", "aes-crypto"] }
 tar = "0.4"
 flate2 = "1.0"
 bzip2 = "0.4"
@@ -29,6 +29,8 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 lz4_flex = "0.11"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 humansize = "2.1"
+sha2 = "0.10"
+crc32fast = "1.3"
 
 [dev-dependencies]
 tempfile = "3.12"

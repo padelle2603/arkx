@@ -1,5 +1,46 @@
 # Changelog
 
+## v1.5.0 — archive editing: rename, copy/paste, open-with, integrity check
+
+- **Rename entries**: entries can be renamed in place on `.zip` (native rewrite)
+  and `.7z`; in the GUI press `F2` or use the context menu → *Rename* (an
+  explicit path in the dialog moves the entry); from the CLI use
+  `arkx rename <archive> <old_entry> <new_entry>`.
+- **Integrity check**: new `arkx test / t <archive> [entries...]` verifies
+  entries against the stored CRC32 on zip/tar/7z (native recompute through
+  `crc32fast`, `7z t` for 7z) and prints a per-entry pass/fail report in the
+  CLI; the worker/gui already carry the published `TestReport`.
+- **Copy / cut / paste inside the archive**: the context menu gained *Copy*,
+  *Cut*, *Paste* and *Copy path* working on an internal clipboard; paste
+  duplicates or moves the selection to the browsed folder (temp + atomic
+  update, originals removed on cut). Same-archive only, cross-archive paste
+  reports a clear error.
+- **Open with external app**: extract an entry to a temp dir and launch the
+  default application (`xdg-open`) — context menu → *Open with*, or
+  `arkx open / o <archive> <entry>`.
+- **Secure delete (CLI)**: `arkx wipe / w <archive> <entry...> [--passes N]`
+  overwrites then removes the selected entries (destructive, no GUI by design).
+- **AES-encrypted zip foundation**: the `zip` crate now builds with the
+  `aes-crypto` feature (and `sha2` is added), so native AES-encrypted ZIP
+  support has its dependency groundwork in place; encrypted reads/creates
+  still route through `7z` until the native path consumes the password.
+
+### Fixed
+
+- The browser no longer jumps back to the archive root after adding,
+  removing, renaming or pasting: the current folder is re-listed in place.
+- The context menu no longer crashes/freezes when the file list is rebuilt
+  while the popover is open (the popover is now parented to the window, so a
+  `remove_all` on the list can never hit a "Tried to remove non-child"
+  state).
+
+### Chore
+
+- Removed dead code: unused `JobKind::Copy`/`Cut` variants and the always
+  `None` `ArchiveInfo`/`ArchiveProperties.comment` field (plus all backend
+  stubs). Same-release refactor of the repeated busy-guard/dismiss pattern
+  into a single helper.
+
 ## v1.4.0 — password-protected extraction + hardening
 
 - **Password-protected extraction**: encrypted ZIPs and header-encrypted 7z/RAR

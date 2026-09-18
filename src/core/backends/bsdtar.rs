@@ -390,7 +390,6 @@ fn parse_tvf(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
         num_files,
         num_dirs,
         has_encrypted: false,
-        comment: None,
     })
 }
 

@@ -92,6 +92,117 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
     ) -> Result<()> {
         self.remove_inner(archive, entries, password, progress)
     }
+
+    fn rename(
+        &self,
+        archive: &Path,
+        old_name: &str,
+        new_name: &str,
+        password: Option<&str>,
+        _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        let archive = super::native::absolutize(archive);
+        let threads = crate::core::util::effective_threads().min(32);
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("rn").arg("-y").arg(format!("-mmt={}", threads));
+        if let Some(pw) = password {
+            cmd.arg(format!("-p{}", pw));
+        }
+        cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
+        cmd.arg(old_name);
+        cmd.arg(new_name);
+        let output = cmd
+            .arg("-bsp0")
+            .arg("-bso0")
+            .output()
+            .map_err(|e| ArkxError::Backend(format!("Cannot run 7z: {}", e)))?;
+        if !output.status.success() {
+            let msg = String::from_utf8_lossy(&output.stderr);
+            return Err(ArkxError::Backend(format!(
+                "7z rename failed: {}",
+                msg.trim()
+            )));
+        }
+        Ok(())
+    }
+
+    fn test(
+        &self,
+        archive: &Path,
+        entries: Option<&[String]>,
+        password: Option<&str>,
+    ) -> Result<crate::core::archive::TestReport> {
+        let archive = super::native::absolutize(archive);
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("t").arg("-y").arg("-bsp0").arg("-bso0");
+        if let Some(pw) = password {
+            cmd.arg(format!("-p{}", pw));
+        }
+        if let Some(sel) = entries {
+            for e in sel {
+                cmd.arg(e);
+            }
+        }
+        cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
+        let output = cmd
+            .output()
+            .map_err(|e| ArkxError::Backend(format!("Cannot run 7z: {}", e)))?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() {
+            let msg = format!("{}{}", stdout, stderr);
+            return Err(ArkxError::Backend(format!(
+                "7z test failed: {}",
+                msg.trim()
+            )));
+        }
+        let archive_path = archive.to_string_lossy().to_string();
+        // Parse results from 7z output
+        let mut results = Vec::new();
+        let mut passed = 0usize;
+        let mut failed = 0usize;
+        for line in stdout.lines() {
+            let line = line.trim();
+            if line.starts_with("Everything is Ok") || line.contains("Testing") {
+                continue;
+            }
+            if line.is_empty() {
+                continue;
+            }
+            // Detect errors in 7z output
+            if is_password_error(line)
+                || line.contains("Cannot open")
+                || line.contains("CRC")
+                || line.starts_with("Can't open file")
+                || line.contains("Error")
+            {
+                failed += 1;
+                results.push(crate::core::archive::TestResult {
+                    entry: line.to_string(),
+                    is_dir: false,
+                    crc32_expected: None,
+                    crc32_actual: None,
+                    passed: false,
+                });
+            }
+        }
+        if failed == 0 {
+            passed = 1; // All OK
+            results.push(crate::core::archive::TestResult {
+                entry: "(all entries)".to_string(),
+                is_dir: false,
+                crc32_expected: None,
+                crc32_actual: None,
+                passed: true,
+            });
+        }
+        Ok(crate::core::archive::TestReport {
+            archive: archive_path,
+            results,
+            passed,
+            failed,
+        })
+    }
 }
 
 /// True if raw 7z output indicates a password problem. Case-insensitive and
@@ -1331,7 +1442,6 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
         num_files,
         num_dirs,
         has_encrypted,
-        comment: None,
     })
 }
 
