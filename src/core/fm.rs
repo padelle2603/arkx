@@ -156,7 +156,17 @@ fn sanitize_name(s: &str) -> String {
 pub fn default_archive_path(sources: &[PathBuf], format: &str) -> PathBuf {
     let parent = common_parent(sources);
     let ext = format_extension(format);
-    let base = base_name_for(sources, &parent);
+    // Single-file codecs keep the file name whole (`report.txt.gz`, gzip
+    // style); archive formats keep the stem (`report.zip`).
+    let single = matches!(ext.as_str(), "gz" | "bz2" | "xz" | "zst" | "lz4");
+    let base = if single && sources.len() == 1 && sources[0].is_file() {
+        sources[0]
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "archive".to_string())
+    } else {
+        base_name_for(sources, &parent)
+    };
     let candidate = parent.join(format!("{}.{}", base, ext));
     uniquify(&candidate)
 }
@@ -353,6 +363,21 @@ mod tests {
         let name = dest.file_name().unwrap().to_string_lossy().to_string();
         assert!(name.starts_with("photos"));
         assert!(name.ends_with(".tar.gz"));
+    }
+
+    #[test]
+    fn default_name_single_file_keeps_full_name_for_gz() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("report.txt");
+        std::fs::write(&f, "x").unwrap();
+        let dest = default_archive_path(std::slice::from_ref(&f), "gz");
+        assert_eq!(dest.file_name().unwrap().to_string_lossy(), "report.txt.gz");
+        // The same file as an archive format still strips the extension.
+        let zip_dest = default_archive_path(std::slice::from_ref(&f), "zip");
+        assert_eq!(
+            zip_dest.file_name().unwrap().to_string_lossy(),
+            "report.zip"
+        );
     }
 
     #[test]

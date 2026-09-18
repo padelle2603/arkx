@@ -780,6 +780,11 @@ impl NativeBackend {
             | ArchiveFormat::TarXz
             | ArchiveFormat::TarZst
             | ArchiveFormat::TarLz4 => self.create_tar(dest, sources, &fmt, level, progress),
+            ArchiveFormat::Gz
+            | ArchiveFormat::Bz2
+            | ArchiveFormat::Xz
+            | ArchiveFormat::Zst
+            | ArchiveFormat::Lz4 => self.create_single(dest, sources, &fmt, level, progress),
             _ => Err(ArkxError::UnsupportedFormat(format!("create {:?}", fmt))),
         }
     }
@@ -1260,6 +1265,70 @@ impl NativeBackend {
         writer.finish()?;
         Ok(())
     }
+
+    /// Create a single-file compressed stream (gz/bz2/xz/zst/lz4): exactly one
+    /// source file, streamed codec-style (no tar wrapper). The output name
+    /// carries the extension (`report.txt.gz`), so extraction (and `gzip -d`)
+    /// recover `report.txt` from the file name itself.
+    fn create_single(
+        &self,
+        dest: &Path,
+        sources: &[PathBuf],
+        fmt: &ArchiveFormat,
+        level: u8,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        if sources.len() != 1 || !sources[0].is_file() {
+            return Err(ArkxError::Backend(
+                "single-file formats (gz/bz2/xz/zst/lz4) compress exactly one file; use .tar.gz/.tar.xz/.tar.zstd/.tar.bz2/.tar.lz4 for folders".into(),
+            ));
+        }
+        let src = &sources[0];
+        if is_same_path(src, &absolutize(dest)) {
+            return Err(ArkxError::Backend(
+                "cannot compress a file into itself".into(),
+            ));
+        }
+        let name = src
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+        let total = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
+
+        let file = File::create(dest).map_err(ArkxError::Io)?;
+        let mut writer = create_tar_writer(file, fmt, level)?;
+        let mut input =
+            BufReader::with_capacity(1024 * 1024, File::open(src).map_err(ArkxError::Io)?);
+        let mut buf = vec![0u8; 65536];
+        let mut current = 0u64;
+        if let Some(cb) = &progress {
+            cb(ProgressInfo::new(name.clone(), 0, total));
+        }
+        loop {
+            if self.cancelled() {
+                drop(writer);
+                Self::discard_partial(dest);
+                return Err(ArkxError::Cancelled);
+            }
+            let n = input.read(&mut buf).map_err(ArkxError::Io)?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n]).map_err(ArkxError::Io)?;
+            current = current.saturating_add(n as u64);
+            if total > 0 {
+                if let Some(cb) = &progress {
+                    cb(ProgressInfo::new(name.clone(), current.min(total), total));
+                }
+            }
+        }
+        writer.finish()?;
+        if let Some(cb) = &progress {
+            cb(completed(total));
+        }
+        Ok(())
+    }
 }
 
 fn create_tar_reader(file: File, path: &Path) -> Result<Box<dyn std::io::Read>> {
@@ -1406,18 +1475,18 @@ fn create_tar_writer(file: File, fmt: &ArchiveFormat, level: u8) -> Result<TarWr
     // The user -l flag applies to all codecs (previously ignored:
     // fixed levels gz6/best/xz6/zst3). 0 = fast, 9 = max ratio.
     let writer = match fmt {
-        ArchiveFormat::TarGz => TarWriter::Gz(flate2::write::GzEncoder::new(
+        ArchiveFormat::TarGz | ArchiveFormat::Gz => TarWriter::Gz(flate2::write::GzEncoder::new(
             buf,
             flate2::Compression::new(level.clamp(0, 9) as u32),
         )),
-        ArchiveFormat::TarBz2 => TarWriter::Bz(bzip2::write::BzEncoder::new(
+        ArchiveFormat::TarBz2 | ArchiveFormat::Bz2 => TarWriter::Bz(bzip2::write::BzEncoder::new(
             buf,
             bzip2::Compression::new(level.clamp(1, 9) as u32),
         )),
-        ArchiveFormat::TarXz => {
+        ArchiveFormat::TarXz | ArchiveFormat::Xz => {
             TarWriter::Xz(xz2::write::XzEncoder::new(buf, level.clamp(0, 9) as u32))
         }
-        ArchiveFormat::TarZst => {
+        ArchiveFormat::TarZst | ArchiveFormat::Zst => {
             let mut enc = zstd::stream::write::Encoder::new(buf, zstd_level(level))
                 .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
             // Adaptive multithreaded zstd compression (workers scaled on
@@ -1430,7 +1499,9 @@ fn create_tar_writer(file: File, fmt: &ArchiveFormat, level: u8) -> Result<TarWr
             }
             TarWriter::Zst(enc)
         }
-        ArchiveFormat::TarLz4 => TarWriter::Lz4(lz4_flex::frame::FrameEncoder::new(buf)),
+        ArchiveFormat::TarLz4 | ArchiveFormat::Lz4 => {
+            TarWriter::Lz4(lz4_flex::frame::FrameEncoder::new(buf))
+        }
         _ => TarWriter::Plain(buf),
     };
     Ok(writer)

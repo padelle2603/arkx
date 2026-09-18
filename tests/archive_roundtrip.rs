@@ -111,6 +111,46 @@ fn tar_zst_roundtrip() {
 }
 
 #[test]
+fn single_file_roundtrip_all_codecs() {
+    let content = b"single-file payload".to_vec();
+    for ext in ["gz", "bz2", "xz", "zst", "lz4"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("hello.txt");
+        fs::write(&src, &content).unwrap();
+        let archive = tmp.path().join(format!("hello.txt.{ext}"));
+        let out = tmp.path().join("out");
+
+        let bm = backend();
+        bm.create(&archive, &[src], 6, None, None).unwrap();
+        assert!(archive.exists());
+        assert!(fs::metadata(&archive).unwrap().len() > 0);
+
+        bm.extract(&archive, &out, None, None, None).unwrap();
+        // Archive named hello.txt.<ext> extracts back to hello.txt
+        // (file_stem of the archive name).
+        assert_eq!(fs::read(out.join("hello.txt")).unwrap(), content);
+    }
+}
+
+#[test]
+fn single_file_rejects_folders_and_multi() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (src, _) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("src.gz");
+    let bm = backend();
+    assert!(bm.create(&archive, &[src], 6, None, None).is_err());
+    assert!(!archive.exists());
+
+    let a = tmp.path().join("a.txt");
+    let b = tmp.path().join("b.txt");
+    fs::write(&a, "a").unwrap();
+    fs::write(&b, "b").unwrap();
+    let archive2 = tmp.path().join("multi.gz");
+    assert!(bm.create(&archive2, &[a, b], 6, None, None).is_err());
+    assert!(!archive2.exists());
+}
+
+#[test]
 fn list_shows_correct_sizes() {
     let tmp = tempfile::tempdir().unwrap();
     let (_, sources) = create_src_dir(tmp.path());

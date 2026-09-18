@@ -237,6 +237,21 @@ impl BackendManager {
                 "cannot create {fmt:?}: extract-only format (no writer backend)"
             )));
         }
+        // Single-file streams have no password support; refuse clearly
+        // instead of routing a -p call into a misleading 7z container.
+        if matches!(
+            fmt,
+            ArchiveFormat::Gz
+                | ArchiveFormat::Bz2
+                | ArchiveFormat::Xz
+                | ArchiveFormat::Zst
+                | ArchiveFormat::Lz4
+        ) && password.is_some()
+        {
+            return Err(ArkxError::UnsupportedFormat(format!(
+                "cannot create encrypted {fmt:?}: single-file formats have no password support"
+            )));
+        }
         // Disk-space preflight: a 68GB failing halfway with ENOSPC after
         // hours is worse than an immediate error. Worst-case estimate (total input,
         // incompressible data); if `df` does not respond the check is skipped.
