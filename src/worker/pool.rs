@@ -51,6 +51,7 @@ impl WorkerPool {
                     JobKind::List { .. } => "list",
                     JobKind::Extract { .. } => "extract",
                     JobKind::Add { .. } => "add",
+                    JobKind::NewFolder { .. } => "add",
                     JobKind::Remove { .. } => "remove",
                     JobKind::Rename { .. } => "rename",
                     JobKind::Test { .. } => "test",
@@ -176,6 +177,14 @@ impl WorkerPool {
                 )?;
                 Ok(JobResult::Remove)
             }
+            JobKind::NewFolder {
+                archive,
+                name,
+                password,
+            } => {
+                backend.new_folder(&archive, &name, password.as_deref())?;
+                Ok(JobResult::Add)
+            }
             JobKind::Rename {
                 archive,
                 old_name,
@@ -261,7 +270,7 @@ impl WorkerPool {
                     let mut sources: Vec<(PathBuf, String)> = Vec::new();
                     for e in &entries {
                         let leaf: &str = e.rsplit('/').next().unwrap_or(e);
-                        let tmp_path = temp_dir.join(leaf);
+                        let tmp_path = temp_dir.join(e);
                         let new_name = if cut {
                             leaf.to_string()
                         } else {

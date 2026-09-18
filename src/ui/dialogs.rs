@@ -65,6 +65,17 @@ pub(crate) fn ask_password(
         dialog_c.set_response_enabled("unlock", !entry_c.text().is_empty());
     });
 
+    // The PasswordEntry consumes Enter instead of letting the dialog's default
+    // response fire: forward Enter to the unlock response explicitly.
+    let dialog_enter = dialog.clone();
+    let entry_enter = entry.clone();
+    entry.connect_activate(move |_| {
+        if !entry_enter.text().is_empty() {
+            let unlock = "unlock".to_value();
+            dialog_enter.emit_by_name_with_values("response", &[unlock]);
+        }
+    });
+
     dialog.connect_response(None, move |_, resp| {
         if resp == "unlock" {
             on_unlock(entry.text().to_string());

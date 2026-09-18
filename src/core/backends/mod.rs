@@ -304,6 +304,34 @@ impl BackendManager {
         }
     }
 
+    /// Create an empty folder entry inside an existing archive. Routes through
+    /// `add` (zip native rewrite / 7z update) from a temporary empty directory,
+    /// which the backends record as a bare directory entry; the temp dir is
+    /// cleaned up on every path.
+    pub fn new_folder(&self, archive: &Path, name: &str, password: Option<&str>) -> Result<()> {
+        // Entry is a full archive path (trailing slash): each component must be a
+        // clean, non-empty name. Rejects "..", "." and double slashes (zip-slip
+        // and traversal guard, same rules the extractor enforces).
+        let components: Vec<&str> = name.trim_end_matches('/').split('/').collect();
+        if components.is_empty()
+            || components
+                .iter()
+                .any(|c| c.is_empty() || *c == "." || *c == ".." || c.contains('\\'))
+        {
+            return Err(ArkxError::InvalidInput(name.to_string()));
+        }
+        let nano = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let tmp =
+            std::env::temp_dir().join(format!("arkx-newdir-{}-{:09}", std::process::id(), nano));
+        std::fs::create_dir_all(&tmp).map_err(ArkxError::Io)?;
+        let result = self.add(archive, &[(tmp.clone(), name.to_string())], password, None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        result
+    }
+
     /// Remove entries from an existing archive. Same routing as `add`.
     pub fn remove(
         &self,

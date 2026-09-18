@@ -19,6 +19,12 @@ pub enum JobKind {
         sources: Vec<(PathBuf, String)>,
         password: Option<String>,
     },
+    NewFolder {
+        archive: PathBuf,
+        /// Full folder entry path inside the archive, trailing slash included.
+        name: String,
+        password: Option<String>,
+    },
     Remove {
         archive: PathBuf,
         entries: Vec<String>,

@@ -59,9 +59,13 @@ struct Ui {
     info: gtk::Label,
     extract_all: gtk::Button,
     extract_sel: gtk::Button,
+    props: gtk::Button,
     back: gtk::Button,
     open: gtk::Button,
     window: adw::ApplicationWindow,
+    /// Set when an archive is opened; the next successful List runs the
+    /// background integrity check once.
+    auto_test: Rc<RefCell<bool>>,
 }
 
 // Builds the main UI
@@ -154,6 +158,12 @@ pub fn build_ui(app: &adw::Application) {
     extract_all_btn.add_css_class("suggested-action");
     extract_all_btn.set_sensitive(false);
     header.pack_start(&extract_all_btn);
+
+    let props_btn = gtk::Button::from_icon_name("dialog-information-symbolic");
+    props_btn.set_tooltip_text(Some("Archive properties"));
+    props_btn.add_css_class("header-btn");
+    props_btn.set_sensitive(false);
+    header.pack_start(&props_btn);
 
     let extract_sel_btn = gtk::Button::new();
     let sel_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -342,11 +352,15 @@ pub fn build_ui(app: &adw::Application) {
     let action_cut_entry = gio::SimpleAction::new("cut-entry", None);
     let action_paste = gio::SimpleAction::new("paste", None);
     let action_open_with = gio::SimpleAction::new("open-with", None);
+    let action_new_folder = gio::SimpleAction::new("new-folder", None);
+    let action_properties = gio::SimpleAction::new("show-properties", None);
     window.add_action(&action_rename);
     window.add_action(&action_copy_entry);
     window.add_action(&action_cut_entry);
     window.add_action(&action_paste);
     window.add_action(&action_open_with);
+    window.add_action(&action_new_folder);
+    window.add_action(&action_properties);
 
     let open_menu: Rc<RefCell<Option<gtk::PopoverMenu>>> = Rc::new(RefCell::new(None));
 
@@ -371,9 +385,11 @@ pub fn build_ui(app: &adw::Application) {
         info: info_label.clone(),
         extract_all: extract_all_btn.clone(),
         extract_sel: extract_sel_btn.clone(),
+        props: props_btn.clone(),
         back: back_btn.clone(),
         open: open_btn.clone(),
         window: window.clone(),
+        auto_test: Rc::new(RefCell::new(false)),
     };
 
     // === DRAG & DROP ===
@@ -827,6 +843,7 @@ pub fn build_ui(app: &adw::Application) {
             Some("Extract selected to…"),
             Some("win.extract-selected-to"),
         );
+        operations.append(Some("New folder"), Some("win.new-folder"));
         operations.append(Some("Remove from archive"), Some("win.remove-selected"));
         operations.append(Some("Rename"), Some("win.rename"));
         menu.append_section(Some("Operations"), &operations);
@@ -1194,6 +1211,80 @@ pub fn build_ui(app: &adw::Application) {
         });
     });
 
+    // --- New folder (inside the archive) ---
+    let ui_nf = ui.clone();
+    let open_menu_nf = open_menu.clone();
+    action_new_folder.connect_activate(move |_, _| {
+        if dismiss_and_check_idle(&ui_nf, &open_menu_nf) {
+            return;
+        }
+        let st = ui_nf.state.borrow();
+        let archive = match st.current_archive.clone() {
+            Some(a) => a,
+            None => return,
+        };
+        let cur = st.current_path.clone();
+        drop(st);
+        let dialog =
+            adw::AlertDialog::new(Some("New folder"), Some("Enter the name of the new folder"));
+        let entry = gtk::Entry::new();
+        entry.set_placeholder_text(Some("Name"));
+        entry.set_margin_top(12);
+        entry.set_margin_bottom(12);
+        entry.set_margin_start(12);
+        entry.set_margin_end(12);
+        dialog.set_extra_child(Some(&entry));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("create", "Create");
+        dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("create"));
+        dialog.set_close_response("cancel");
+        dialog.set_response_enabled("create", false);
+        let entry_c = entry.clone();
+        let dialog_c = dialog.clone();
+        entry.connect_changed(move |_| {
+            dialog_c.set_response_enabled("create", !entry_c.text().trim().is_empty());
+        });
+        let ui_nf_c = ui_nf.clone();
+        let archive_c = archive.clone();
+        dialog.connect_response(None, move |_, resp| {
+            if resp == "create" {
+                let name = entry.text().trim().to_string();
+                // Single component only: no traversal or nesting from a
+                // trusted-input dialog; the CLI `mkdir` handles real paths.
+                let valid = !name.is_empty()
+                    && name != "."
+                    && name != ".."
+                    && !name.contains('/')
+                    && !name.contains('\\');
+                if !valid {
+                    ui_nf_c.status_left.set_text("Invalid folder name");
+                    return;
+                }
+                let full = crate::core::paths::with_trailing_slash(&format!("{}{}", cur, name));
+                ui_nf_c
+                    .status_left
+                    .set_text(&format!("Creating folder '{}'…", name));
+                ui_nf_c.worker.borrow_mut().submit(JobKind::NewFolder {
+                    archive: archive_c.clone(),
+                    name: full,
+                    password: None,
+                });
+            }
+        });
+        dialog.present(Some(&ui_nf.window));
+    });
+
+    // --- Archive properties ---
+    let ui_pr = ui.clone();
+    action_properties.connect_activate(move |_, _| {
+        show_properties(&ui_pr);
+    });
+    let ui_prop_btn = ui.clone();
+    props_btn.connect_clicked(move |_| {
+        show_properties(&ui_prop_btn);
+    });
+
     // Shortcuts
     let shortcut_controller = gtk::ShortcutController::new();
     let ui_open_key = ui.clone();
@@ -1237,6 +1328,67 @@ pub fn build_ui(app: &adw::Application) {
             glib::Propagation::Stop
         })),
     ));
+    // Copy with Ctrl+C
+    let action_copy_sc = action_copy_entry.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("<Control>c").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            action_copy_sc.activate(None);
+            glib::Propagation::Stop
+        })),
+    ));
+    // Cut with Ctrl+X
+    let action_cut_sc = action_cut_entry.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("<Control>x").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            action_cut_sc.activate(None);
+            glib::Propagation::Stop
+        })),
+    ));
+    // Delete selected entries
+    let action_remove_sc = action_remove.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("Delete").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            action_remove_sc.activate(None);
+            glib::Propagation::Stop
+        })),
+    ));
+    // Enter opens an archive
+    let ui_enter = ui.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("Return").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            ui_enter.open.emit_clicked();
+            glib::Propagation::Stop
+        })),
+    ));
+    // Select all rows in the current view (Ctrl+A)
+    let ui_sel_all = ui.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("<Control>a").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            let lb = &ui_sel_all.list;
+            lb.select_all();
+            // Never select the fake ".. (go back)" row.
+            for row in lb.selected_rows() {
+                if row.tooltip_text().as_deref() == Some("__UP__") {
+                    lb.unselect_row(&row);
+                }
+            }
+            glib::Propagation::Stop
+        })),
+    ));
+    // New folder inside the archive (Ctrl+Shift+N)
+    let action_new_folder_sc = action_new_folder.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("<Control><Shift>n").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            action_new_folder_sc.activate(None);
+            glib::Propagation::Stop
+        })),
+    ));
     window.add_controller(shortcut_controller);
 
     window.present();
@@ -1258,7 +1410,12 @@ pub fn build_ui(app: &adw::Application) {
                     *ui_poll.last_progress.borrow_mut() = (0.0, Instant::now());
                     ui_poll.extract_all.set_sensitive(false);
                     ui_poll.extract_sel.set_sensitive(false);
-                    status_left.set_text("Working…");
+                    ui_poll.props.set_sensitive(false);
+                    status_left.set_text(if kind == "test" {
+                        "Checking archive integrity…"
+                    } else {
+                        "Working…"
+                    });
                     if kind == "extract" || kind == "add" || kind == "remove" {
                         let (title, verb) = match kind.as_str() {
                             "add" => ("Adding to archive", "Adding"),
@@ -1392,6 +1549,7 @@ pub fn build_ui(app: &adw::Application) {
                             }
                             *ui_poll.is_busy.borrow_mut() = false;
                             ui_poll.extract_all.set_sensitive(true);
+                            ui_poll.props.set_sensitive(true);
                             if !ui_poll.state.borrow().selected_entries.is_empty() {
                                 ui_poll.extract_sel.set_sensitive(true);
                             }
@@ -1408,6 +1566,9 @@ pub fn build_ui(app: &adw::Application) {
                             *ui_poll.is_busy.borrow_mut() = false;
                             ui_poll
                                 .extract_all
+                                .set_sensitive(ui_poll.state.borrow().current_info.is_some());
+                            ui_poll
+                                .props
                                 .set_sensitive(ui_poll.state.borrow().current_info.is_some());
                             ui_poll
                                 .extract_sel
@@ -1465,11 +1626,31 @@ pub fn build_ui(app: &adw::Application) {
                             ));
                             ui_poll.extract_all.set_sensitive(true);
                             ui_poll.extract_sel.set_sensitive(false);
+                            ui_poll.props.set_sensitive(true);
                             ui_poll.back.set_sensitive(!current_path.is_empty());
                             // Full-path tooltip on the breadcrumb
                             ui_poll
                                 .breadcrumb
                                 .set_tooltip_text(Some(&archive_path.display().to_string()));
+                            // Background integrity check once per open: silent
+                            // unless entries fail (dialog), and skipped for
+                            // encrypted archives (would need a password prompt).
+                            // Only the initial open sets the flag (open_archive);
+                            // re-lists from add/remove/rename do not re-test.
+                            // ponytail: test also marks the UI busy; on huge
+                            // archives that locks the buttons for the test
+                            // duration — move to a low-priority queue if it ever
+                            // outlives an acceptable delay.
+                            let should_test = *ui_poll.auto_test.borrow() && !info.has_encrypted;
+                            *ui_poll.auto_test.borrow_mut() = false;
+                            if should_test {
+                                let pw = ui_poll.password_cache.borrow().clone();
+                                ui_poll.worker.borrow_mut().submit(JobKind::Test {
+                                    archive: archive_path,
+                                    entries: None,
+                                    password: pw,
+                                });
+                            }
                         }
                         Ok(JobResult::Extract) => {
                             // Outcome already shown in the progress window; status only.
@@ -1522,10 +1703,25 @@ pub fn build_ui(app: &adw::Application) {
                             );
                         }
                         Ok(JobResult::Test(report)) => {
-                            status_left.set_text(&format!(
-                                "Test: {} passed, {} failed",
-                                report.passed, report.failed
-                            ));
+                            // Silently reported when clean; a dialog only when
+                            // entries actually failed the integrity check.
+                            if report.failed > 0 {
+                                let mut body = format!(
+                                    "{} of {} entries failed the integrity check:\n",
+                                    report.failed,
+                                    report.passed + report.failed
+                                );
+                                for r in report.results.iter().filter(|r| !r.passed).take(8) {
+                                    body.push_str(&format!("• {}\n", r.entry));
+                                }
+                                let dialog = adw::AlertDialog::new(
+                                    Some("Integrity check failed"),
+                                    Some(&body),
+                                );
+                                dialog.add_response("ok", "OK");
+                                dialog.set_default_response(Some("ok"));
+                                dialog.present(Some(&ui_poll.window));
+                            }
                         }
                         Ok(JobResult::OpenWith(path)) => {
                             status_left.set_text(&format!("Opened: {}", path.display()));
@@ -1643,6 +1839,9 @@ pub fn build_ui(app: &adw::Application) {
                         .extract_all
                         .set_sensitive(ui_poll.state.borrow().current_info.is_some());
                     ui_poll
+                        .props
+                        .set_sensitive(ui_poll.state.borrow().current_info.is_some());
+                    ui_poll
                         .extract_sel
                         .set_sensitive(!ui_poll.state.borrow().selected_entries.is_empty());
                     status_left.set_text(&format!("Error: {}", msg));
@@ -1737,6 +1936,7 @@ fn open_archive(path: PathBuf, ui: Ui) {
     // the List result will fill it in.
     ui.state.borrow_mut().current_archive = Some(path.clone());
     ui.state.borrow_mut().current_path = String::new();
+    *ui.auto_test.borrow_mut() = true;
     // Drop the previous archive's contents immediately: if the List below
     // fails (wrong password, corrupt file) stale entries must not stay visible.
     {
@@ -1748,6 +1948,7 @@ fn open_archive(path: PathBuf, ui: Ui) {
     ui.empty.set_visible(false);
     ui.extract_all.set_sensitive(false);
     ui.extract_sel.set_sensitive(false);
+    ui.props.set_sensitive(false);
     ui.back.set_sensitive(false);
     ui.status_left
         .set_text(&format!("Opening {}…", path.display()));
@@ -1837,15 +2038,138 @@ fn needs_password(info: &ArchiveInfo, entries: Option<&[String]>) -> bool {
     }
 }
 
+/// Key/value rows for the archive-properties dialog: archive summary plus,
+/// when exactly one entry is selected, that entry's details. Data comes
+/// straight from memory (`ArchiveInfo`) — no backend call.
+fn properties_rows(info: &ArchiveInfo, selected: &[String]) -> Vec<(String, String)> {
+    let file = PathBuf::from(&info.path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| info.path.clone());
+    let mut rows = vec![
+        ("File".to_string(), file),
+        ("Format".to_string(), info.format.clone()),
+        ("Folders".to_string(), info.num_dirs.to_string()),
+        ("Files".to_string(), info.num_files.to_string()),
+        (
+            "Size".to_string(),
+            humansize::format_size(info.total_size, humansize::BINARY),
+        ),
+        (
+            "Packed".to_string(),
+            humansize::format_size(info.total_packed, humansize::BINARY),
+        ),
+    ];
+    if info.total_size > 0 {
+        let ratio = 100.0 * (1.0 - info.total_packed as f32 / info.total_size as f32);
+        rows.push(("Ratio".to_string(), format!("{:.1}%", ratio)));
+    }
+    rows.push((
+        "Encrypted".to_string(),
+        if info.has_encrypted {
+            "yes".to_string()
+        } else {
+            "no".to_string()
+        },
+    ));
+    if selected.len() == 1 {
+        if let Some(e) = info.entries.iter().find(|e| e.path == selected[0]) {
+            rows.push(("—".to_string(), String::new()));
+            rows.push(("Entry".to_string(), e.file_name().to_string()));
+            rows.push((
+                "Type".to_string(),
+                if e.is_dir {
+                    "Folder".to_string()
+                } else {
+                    "File".to_string()
+                },
+            ));
+            if !e.is_dir {
+                rows.push((
+                    "Size".to_string(),
+                    humansize::format_size(e.size, humansize::BINARY),
+                ));
+                rows.push((
+                    "Packed".to_string(),
+                    humansize::format_size(e.packed_size, humansize::BINARY),
+                ));
+                if let Some(m) = &e.method {
+                    rows.push(("Method".to_string(), m.clone()));
+                }
+                if let Some(c) = &e.crc32 {
+                    rows.push(("CRC32".to_string(), c.clone()));
+                }
+            }
+            if let Some(d) = e.modified {
+                rows.push(("Modified".to_string(), d.to_string()));
+            }
+            rows.push((
+                "Encrypted".to_string(),
+                if e.encrypted {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                },
+            ));
+        }
+    }
+    rows
+}
+
+/// Modal dialog with archive + (single) selected-entry properties, fed by the
+/// entry data already in memory (no job, no backend round-trip).
+fn show_properties(ui: &Ui) {
+    let st = ui.state.borrow();
+    let Some(info) = st.current_info.clone() else {
+        return;
+    };
+    let selected = st.selected_entries.clone();
+    drop(st);
+    let rows = properties_rows(&info, &selected);
+
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    for (k, v) in rows {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let key = gtk::Label::new(Some(if k.is_empty() { "—" } else { &k }));
+        key.set_xalign(0.0);
+        key.set_width_request(110);
+        if v.is_empty() {
+            row.add_css_class("dim-label");
+        }
+        let val = gtk::Label::new(Some(if v.is_empty() { "" } else { &v }));
+        val.set_xalign(0.0);
+        val.set_hexpand(true);
+        val.add_css_class("monospace");
+        val.set_ellipsize(pango::EllipsizeMode::Middle);
+        val.set_selectable(true);
+        if !v.is_empty() {
+            key.add_css_class("heading");
+        }
+        row.append(&key);
+        row.append(&val);
+        body.append(&row);
+    }
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    scroll.set_max_content_height(420);
+    scroll.set_min_content_width(380);
+    scroll.set_child(Some(&body));
+    let dialog = adw::AlertDialog::new(Some("Archive properties"), None);
+    dialog.set_extra_child(Some(&scroll));
+    dialog.add_response("ok", "OK");
+    dialog.set_default_response(Some("ok"));
+    dialog.present(Some(&ui.window));
+}
+
 #[cfg(test)]
 mod tests {
-    use super::needs_password;
+    use super::{needs_password, properties_rows};
     use crate::core::archive::{ArchiveEntry, ArchiveInfo};
 
     fn info(has_encrypted: bool) -> ArchiveInfo {
-        let enc = |name: &str, encrypted: bool| ArchiveEntry {
+        let enc = |name: &str, encrypted: bool, is_dir: bool| ArchiveEntry {
             path: name.to_string(),
-            is_dir: false,
+            is_dir,
             size: 1,
             packed_size: 1,
             modified: None,
@@ -1858,9 +2182,9 @@ mod tests {
             path: "a.rar".to_string(),
             format: "RAR".to_string(),
             entries: vec![
-                enc("open.txt", false),
-                enc("secret.txt", true),
-                enc("sub/", true),
+                enc("open.txt", false, false),
+                enc("secret.txt", true, false),
+                enc("sub/", true, true),
             ],
             total_size: 3,
             total_packed: 3,
@@ -1888,5 +2212,25 @@ mod tests {
         let i = info(true);
         assert!(needs_password(&i, Some(&["secret.txt".into()])));
         assert!(!needs_password(&i, Some(&["open.txt".into()])));
+    }
+
+    #[test]
+    fn properties_rows_summarizes_archive_and_selected_entry() {
+        let i = info(true);
+        let rows = properties_rows(&i, &[]);
+        assert!(rows.iter().any(|(k, v)| k == "Format" && v == "RAR"));
+        assert!(rows.iter().any(|(k, _)| k == "Encrypted"));
+        assert!(rows.iter().any(|(k, v)| k == "Ratio" && v == "0.0%"));
+        assert!(rows.iter().all(|(k, _)| k != "Entry"));
+        let sel = properties_rows(&i, &["secret.txt".into()]);
+        assert!(sel.iter().any(|(k, v)| k == "Entry" && v == "secret.txt"));
+        assert!(sel.iter().any(|(k, v)| k == "Type" && v == "File"));
+        // Multiple selected entries do not show entry details.
+        let multi = properties_rows(&i, &["secret.txt".into(), "open.txt".into()]);
+        assert!(multi.iter().all(|(k, _)| k != "Entry"));
+        // A directory entry shows folder rows, not size/method rows.
+        let dir = properties_rows(&i, &["sub/".into()]);
+        assert!(dir.iter().any(|(k, v)| k == "Type" && v == "Folder"));
+        assert!(dir.iter().all(|(k, _)| k != "Method"));
     }
 }

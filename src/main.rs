@@ -12,9 +12,8 @@ fn main() -> anyhow::Result<()> {
         match args[1].as_str() {
             "x" | "extract" | "l" | "list" | "a" | "create" | "c" | "compress" | "u" | "add"
             | "update" | "r" | "rm" | "d" | "delete" | "remove" | "rn" | "rename" | "t"
-            | "test" | "o" | "open" | "w" | "wipe" | "--help" | "-h" | "--version" | "-V" => {
-                return run_cli(args)
-            }
+            | "test" | "o" | "open" | "w" | "wipe" | "mk" | "mkdir" | "--help" | "-h"
+            | "--version" | "-V" => return run_cli(args),
             _ => {
                 // An existing file argument goes to the GUI (handled by ui)
                 let p = std::path::Path::new(&args[1]);
@@ -77,6 +76,10 @@ Commands:
                [--threads <N>]
 
   r, remove <archive> <entry...>   Delete entries from an archive (zip/7z/tar)
+               [-p <password>]     Password for encrypted 7z/zip
+               [--threads <N>]
+
+  mk, mkdir <archive> <folder>     Create an empty folder inside the archive
                [-p <password>]     Password for encrypted 7z/zip
                [--threads <N>]
 
@@ -455,6 +458,42 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             let start = std::time::Instant::now();
             backend.remove(&archive, &entries, password.as_deref(), None)?;
             println!("\nRemoved in {:.2}s", start.elapsed().as_secs_f32());
+        }
+        "mk" | "mkdir" => {
+            if args.len() < 4 {
+                eprintln!("Usage: arkx mkdir <archive> <folder> [-p password]");
+                std::process::exit(1);
+            }
+            let archive = crate::core::fm::decode_input_arg(&args[2]);
+            if !archive.exists() {
+                eprintln!("Not found: {}", archive.display());
+                std::process::exit(1);
+            }
+            let raw = crate::core::fm::decode_input_arg(&args[3])
+                .to_string_lossy()
+                .to_string();
+            let folder =
+                crate::core::paths::with_trailing_slash(&crate::core::paths::normalize(&raw));
+            if folder.is_empty() || folder == "/" || folder == "./" {
+                eprintln!("Invalid folder name: {}", raw);
+                std::process::exit(1);
+            }
+            let mut password: Option<String> = None;
+            let mut i = 4;
+            while i < args.len() {
+                if args[i] == "-p" || args[i] == "--password" {
+                    if let Some(v) = args.get(i + 1) {
+                        password = Some(v.clone());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            println!("Creating folder '{}' in {}...", folder, archive.display());
+            let start = std::time::Instant::now();
+            backend.new_folder(&archive, &folder, password.as_deref())?;
+            println!("Created in {:.2}s", start.elapsed().as_secs_f32());
         }
         "rn" | "rename" => {
             if args.len() < 5 {

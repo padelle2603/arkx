@@ -8,6 +8,9 @@ pub enum ArkxError {
     #[error("Unsupported format: {0}")]
     UnsupportedFormat(String),
 
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
     #[error("Corrupted archive: {0}")]
     Corrupted(String),
 
