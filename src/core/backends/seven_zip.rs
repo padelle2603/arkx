@@ -68,9 +68,10 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         sources: &[PathBuf],
         level: u8,
         password: Option<&str>,
+        volume_size: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
-        self.create_inner(dest, sources, level, password, progress)
+        self.create_inner(dest, sources, level, password, volume_size, progress)
     }
 
     fn add(
@@ -624,6 +625,7 @@ impl SevenZipBackend {
         sources: &[PathBuf],
         level: u8,
         password: Option<&str>,
+        volume_size: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         if let Some(parent) = dest.parent() {
@@ -633,6 +635,11 @@ impl SevenZipBackend {
         let fmt = crate::core::detector::detect_format(dest);
         let mut cmd = Command::new(&self.bin);
         cmd.arg("a").arg(format!("-mmt={}", threads)).arg("-y");
+
+        // Multi-volume split via 7z's native `-v` switch.
+        if let Some(v) = volume_size {
+            cmd.arg(format!("-v{}", v));
+        }
 
         // Compression level
         let mx = level.clamp(0, 9);
@@ -1673,7 +1680,7 @@ mod tests {
         let src = dir.path().join("folder");
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("old.txt"), b"old").unwrap();
-        b.create(&dest, std::slice::from_ref(&src), 6, None, None)
+        b.create(&dest, std::slice::from_ref(&src), 6, None, None, None)
             .unwrap();
 
         let new = dir.path().join("new.txt");
@@ -1738,8 +1745,15 @@ mod tests {
         let src = dir.path().join("a.txt");
         std::fs::write(&src, b"top secret").unwrap();
         // create with a password always turns on -mhe=on (header encryption).
-        b.create(&dest, std::slice::from_ref(&src), 6, Some("s3cret"), None)
-            .unwrap();
+        b.create(
+            &dest,
+            std::slice::from_ref(&src),
+            6,
+            Some("s3cret"),
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(matches!(b.list(&dest), Err(ArkxError::WrongPassword)));
         assert!(matches!(
@@ -1770,7 +1784,7 @@ mod tests {
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("keep.txt"), b"keep").unwrap();
         std::fs::write(src.join("drop.txt"), b"drop").unwrap();
-        b.create(&dest, std::slice::from_ref(&src), 6, None, None)
+        b.create(&dest, std::slice::from_ref(&src), 6, None, None, None)
             .unwrap();
 
         b.remove(&dest, &["folder/drop.txt".to_string()], None, None)
@@ -1787,5 +1801,60 @@ mod tests {
         let out = dir.path().join("out");
         b.extract(&dest, &out, None, None, None).unwrap();
         assert_eq!(std::fs::read(out.join("folder/keep.txt")).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn create_splits_multi_volumes() {
+        use crate::core::archive::ArchiveBackend as _;
+        use std::sync::{atomic::AtomicBool, Arc};
+        let b = super::SevenZipBackend::with_cancel(Arc::new(AtomicBool::new(false)));
+        if !b.is_available() {
+            eprintln!("(7z unavailable, skipping)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("vol.7z");
+        let src = dir.path().join("big.bin");
+        // Incompressible pseudo-random data so LZMA2 cannot shrink below the
+        // requested volume size (identical bytes compress to a few hundred).
+        let mut seed = 0x5EED_2026u64;
+        let mut data = vec![0u8; 200_000];
+        for b in data.iter_mut() {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            *b = seed as u8;
+        }
+        std::fs::write(&src, &data).unwrap();
+        b.create(
+            &dest,
+            std::slice::from_ref(&src),
+            6,
+            None,
+            Some("40k"),
+            None,
+        )
+        .unwrap();
+
+        // 7z volume naming: <dest>.001..N; the base file itself does not exist.
+        assert!(
+            !dest.exists(),
+            "base archive should not exist for a multi-volume split"
+        );
+        let vol1 = dir.path().join("vol.7z.001");
+        assert!(vol1.exists(), "first volume missing");
+        let mut n = 1;
+        while dir.path().join(format!("vol.7z.{n:03}")).exists() {
+            n += 1;
+        }
+        assert!(n >= 3, "expected at least 3 volumes, found {}", n - 1);
+
+        // The split archive lists and extracts through the first volume.
+        let info = b.list(&vol1).unwrap();
+        assert_eq!(info.entries.len(), 1);
+        assert!(info.entries[0].path.ends_with("big.bin"));
+        let out = dir.path().join("out");
+        b.extract(&vol1, &out, None, None, None).unwrap();
+        assert_eq!(std::fs::read(out.join("big.bin")).unwrap(), data);
     }
 }

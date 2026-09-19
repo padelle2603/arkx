@@ -76,8 +76,14 @@ impl ArchiveBackend for NativeBackend {
         sources: &[PathBuf],
         level: u8,
         password: Option<&str>,
+        volume_size: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        if let Some(v) = volume_size {
+            return Err(ArkxError::UnsupportedFormat(format!(
+                "split volumes are not supported by the native backend (volume: {v})"
+            )));
+        }
         self.create_inner(dest, sources, level, password, progress)
     }
 
@@ -2125,7 +2131,7 @@ mod tests {
 
         let dest = dir.path().join("folder.zip");
         backend()
-            .create(&dest, std::slice::from_ref(&folder), 6, None, None)
+            .create(&dest, std::slice::from_ref(&folder), 6, None, None, None)
             .unwrap();
 
         let info = backend().list(&dest).unwrap();
@@ -2161,7 +2167,14 @@ mod tests {
         std::fs::write(&src, b"classified").unwrap();
         let archive = dir.path().join("sec.zip");
         backend()
-            .create(&archive, std::slice::from_ref(&src), 6, Some("pw"), None)
+            .create(
+                &archive,
+                std::slice::from_ref(&src),
+                6,
+                Some("pw"),
+                None,
+                None,
+            )
             .unwrap();
 
         let out = dir.path().join("out");
@@ -2185,7 +2198,7 @@ mod tests {
 
         let dest = dir.path().join("DL.zip");
         backend()
-            .create(&dest, std::slice::from_ref(&dl), 6, None, None)
+            .create(&dest, std::slice::from_ref(&dl), 6, None, None, None)
             .unwrap();
 
         assert!(
@@ -2228,7 +2241,7 @@ mod tests {
             };
             let dest = dir.path().join(format!("a.{}", ext));
             backend()
-                .create(&dest, std::slice::from_ref(&src), 6, None, None)
+                .create(&dest, std::slice::from_ref(&src), 6, None, None, None)
                 .unwrap();
             let info = backend().list(&dest).unwrap();
             assert!(info.entries.iter().any(|e| e.path == "dati/grosso.bin"));
@@ -2303,7 +2316,7 @@ mod tests {
         std::fs::create_dir(&src).unwrap();
         std::fs::write(src.join("old.txt"), b"old").unwrap();
         backend()
-            .create(&zip_path, std::slice::from_ref(&src), 6, None, None)
+            .create(&zip_path, std::slice::from_ref(&src), 6, None, None, None)
             .unwrap();
 
         // Add a file into a subfolder of the archive.
@@ -2351,7 +2364,7 @@ mod tests {
         let seed = dir.path().join("seed.txt");
         std::fs::write(&seed, b"seed").unwrap();
         backend()
-            .create(&zip_path, std::slice::from_ref(&seed), 6, None, None)
+            .create(&zip_path, std::slice::from_ref(&seed), 6, None, None, None)
             .unwrap();
         let a = dir.path().join("a.txt");
         std::fs::write(&a, b"root").unwrap();
@@ -2370,7 +2383,7 @@ mod tests {
         let src = dir.path().join("doc.txt");
         std::fs::write(&src, b"old").unwrap();
         backend()
-            .create(&zip_path, std::slice::from_ref(&src), 6, None, None)
+            .create(&zip_path, std::slice::from_ref(&src), 6, None, None, None)
             .unwrap();
 
         let new = dir.path().join("new.txt");
@@ -2442,7 +2455,7 @@ mod tests {
         std::fs::write(&a, b"keep").unwrap();
         std::fs::write(&b, b"drop").unwrap();
         backend()
-            .create(&zip_path, &[a, b.clone()], 6, None, None)
+            .create(&zip_path, &[a, b.clone()], 6, None, None, None)
             .unwrap();
 
         backend()
@@ -2592,7 +2605,7 @@ mod tests {
         let seed = dir.path().join("seed.txt");
         std::fs::write(&seed, b"seed").unwrap();
         backend()
-            .create(&zip_path, std::slice::from_ref(&seed), 6, None, None)
+            .create(&zip_path, std::slice::from_ref(&seed), 6, None, None, None)
             .unwrap();
         let new_file = dir.path().join("new.txt");
         std::fs::write(&new_file, b"new").unwrap();
@@ -2646,7 +2659,14 @@ mod tests {
         std::fs::write(folder.join("a.txt"), b"a").unwrap();
         std::fs::write(folder.join("b.txt"), b"b").unwrap();
         backend()
-            .create(&zip_path, std::slice::from_ref(&folder), 6, None, None)
+            .create(
+                &zip_path,
+                std::slice::from_ref(&folder),
+                6,
+                None,
+                None,
+                None,
+            )
             .unwrap();
 
         backend()

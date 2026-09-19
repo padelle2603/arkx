@@ -119,6 +119,7 @@ pub trait ArchiveBackend: Send + Sync {
         sources: &[PathBuf],
         level: u8,
         password: Option<&str>,
+        _volume_size: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()>;
     fn add(

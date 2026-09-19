@@ -81,6 +81,7 @@ impl ArchiveBackend for BsdtarBackend {
         _sources: &[PathBuf],
         _level: u8,
         _password: Option<&str>,
+        _volume_size: Option<&str>,
         _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         Err(ArkxError::UnsupportedFormat(

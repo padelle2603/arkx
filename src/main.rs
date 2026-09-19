@@ -69,6 +69,7 @@ Commands:
   a, create <dest> <file...>       Create archive (format from extension)
                [-l <0-9>]          Compression level (default 6)
                [-p <password>]     Password (AES256 for 7z/zip)
+               [-v <size>]         Split into volumes (7z only): e.g. 50m, 1g
 
   u, add <archive> <file...>       Add files to an existing archive (zip/7z/tar)
                [--to <dir>]        Entry paths relative to <dir> (default: archive root)
@@ -112,6 +113,7 @@ Examples:
   arkx x archive.7z ~/Downloads
   arkx x archive.rar . -p secret
   arkx a archive.7z file1.txt folder/ -l 9 -p pwd
+  arkx a movie.7z movie.mkv -v 100m                # split 100MB volumes
   arkx add archive.zip backup.txt --to docs/     # add into docs/
   arkx remove archive.zip docs/backup.txt        # delete an entry
   arkx compress --here --format=zip docs/        # docs.zip next to docs/
@@ -158,7 +160,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 eprintln!("Usage: arkx l <archive>");
                 std::process::exit(1);
             }
-            let path = PathBuf::from(&args[2]);
+            let path = resolve_volume_path(&PathBuf::from(&args[2]));
             let info = backend.detect_and_list(&path)?;
             println!("Archive: {} ({})", info.path, info.format);
             println!(
@@ -687,16 +689,17 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         "a" | "create" => {
             if args.len() < 4 {
                 eprintln!(
-                    "Usage: arkx a <dest.zip|dest.7z|dest.tar.gz> <file...> [-l 0-9] [-p password]"
+                    "Usage: arkx a <dest.zip|dest.7z|dest.tar.gz> <file...> [-l 0-9] [-p password] [-v <size>]"
                 );
                 std::process::exit(1);
             }
             let dest = PathBuf::from(&args[2]);
-            // Collect sources (up to -l / -p flags)
+            // Collect sources (up to -l / -p / -v flags)
             let mut sources = Vec::new();
             let mut level = 6u8;
             let mut password: Option<String> = None;
             let mut threads: Option<usize> = None;
+            let mut volume: Option<String> = None;
             let mut i = 3;
             while i < args.len() {
                 let consumed =
@@ -716,6 +719,16 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                             std::process::exit(1);
                         }
                     }
+                    "-v" | "--volume-size" => {
+                        if let Some(v) = args.get(i + 1) {
+                            volume = Some(parse_volume_or_exit(v));
+                            i += 2;
+                            continue;
+                        } else {
+                            eprintln!("-v/--volume-size requires a value (e.g. 50m, 1g, 1000000)");
+                            std::process::exit(1);
+                        }
+                    }
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
                         std::process::exit(1);
@@ -732,11 +745,15 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
             crate::core::util::set_thread_override(threads);
             println!(
-                "Creating {} ({} files, level {}, {} threads)...",
+                "Creating {} ({} files, level {}, {} threads){}...",
                 dest.display(),
                 sources.len(),
                 level,
-                crate::core::util::effective_threads()
+                crate::core::util::effective_threads(),
+                volume
+                    .as_deref()
+                    .map(|v| format!(", volume {}", v))
+                    .unwrap_or_default()
             );
             let start = std::time::Instant::now();
             backend.create(
@@ -744,6 +761,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 &sources,
                 level,
                 password.as_deref(),
+                volume.as_deref(),
                 Some(Box::new(|p| {
                     print!(
                         "\r{:>7} {}",
@@ -757,10 +775,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             println!(
                 "\nCreated in {:.2}s ({})",
                 start.elapsed().as_secs_f32(),
-                humansize::format_size(
-                    std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
-                    humansize::BINARY
-                )
+                humansize::format_size(created_size(&dest, volume.as_deref()), humansize::BINARY)
             );
         }
         "convert" => {
@@ -770,7 +785,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 );
                 std::process::exit(1);
             }
-            let src = PathBuf::from(&args[2]);
+            let src = resolve_volume_path(&PathBuf::from(&args[2]));
             let dest = PathBuf::from(&args[3]);
             if !src.exists() {
                 eprintln!("Source not found: {}", src.display());
@@ -889,6 +904,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     &sources,
                     level,
                     password.as_deref(),
+                    None,
                     Some(Box::new(progress)),
                 )?;
                 Ok((
@@ -979,6 +995,58 @@ fn parse_level_or_exit(v: &str) -> u8 {
     }
 }
 
+/// Validate a `-v/--volume-size` value: digits plus an optional unit suffix
+/// (b/k/m/g). Kept as a string passed through to 7z, which understands it.
+fn parse_volume_or_exit(v: &str) -> String {
+    let t = v.trim().to_ascii_lowercase();
+    let valid = !t.is_empty()
+        && t.bytes().take_while(|b| b.is_ascii_digit()).count() > 0
+        && t.bytes()
+            .skip_while(|b| !b.is_ascii_alphabetic())
+            .all(|b| matches!(b, b'b' | b'k' | b'm' | b'g'));
+    if !valid {
+        eprintln!("Invalid -v/--volume-size value: {v} (examples: 50m, 1g, 1000000)");
+        std::process::exit(1);
+    }
+    t
+}
+
+/// Total bytes produced by `arkx a`: for multi-volume archives the volumes
+/// live next to the archive as `<dest>.001`... (7z naming), so the base file
+/// may not exist; sum whatever was written.
+fn created_size(dest: &std::path::Path, volume: Option<&str>) -> u64 {
+    if volume.is_none() {
+        return std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+    }
+    let mut total = 0u64;
+    let base = dest.to_string_lossy().into_owned();
+    for n in 1..=999 {
+        let part = std::path::PathBuf::from(format!("{base}.{n:03}"));
+        match std::fs::metadata(&part) {
+            Ok(m) => total += m.len(),
+            Err(_) => break,
+        }
+    }
+    total
+}
+
+/// If `p` is missing but a `<p>.001` sibling exists, point at that first
+/// volume: 7z multi-volume archives are named `<name>.7z.001...` and the base
+/// file never exists, so the CLI can open them as naturally as the `.001`.
+fn resolve_volume_path(p: &std::path::Path) -> std::path::PathBuf {
+    if p.exists() {
+        return p.to_path_buf();
+    }
+    let mut first = p.as_os_str().to_os_string();
+    first.push(".001");
+    let cand = std::path::PathBuf::from(first);
+    if cand.exists() {
+        cand
+    } else {
+        p.to_path_buf()
+    }
+}
+
 fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
     let mut archives = Vec::new();
     let mut dest_arg: Option<PathBuf> = None;
@@ -1025,9 +1093,9 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
                         i += 1;
                         continue;
                     }
-                    archives.push(p);
+                    archives.push(resolve_volume_path(&p));
                 } else {
-                    archives.push(p);
+                    archives.push(resolve_volume_path(&p));
                 }
             }
         }
@@ -1178,6 +1246,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
         &sources,
         level,
         password.as_deref(),
+        None,
         Some(Box::new(|p| {
             print!(
                 "\r{:>7} {}",

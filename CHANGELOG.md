@@ -20,6 +20,11 @@
   temporary dir, then re-create with the existing backends and progressive
   output. Single-file stream destinations are refused up front, as is
   overwriting the source archive itself.
+- **Multi-volume split**: `arkx a dest.7z ... -v <size>` splits the output into
+  volumes (e.g. `50m`, `1g`) via 7z's `-v` switch — only `.7z` destinations
+  accept it (clear refusal elsewhere). The CLI also auto-opens a multi-volume
+  archive when pointed at the base name (`out.7z` → `out.7z.001`), and the
+  created size reports the sum of all volume files.
 
 ## v1.5.0 — archive editing: rename, copy/paste, open-with, integrity check
 

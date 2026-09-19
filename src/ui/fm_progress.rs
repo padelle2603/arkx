@@ -112,6 +112,7 @@ fn activate(
                 &sources,
                 level,
                 password.as_deref(),
+                None,
                 Some(Box::new(move |info| {
                     let _ = tx_prog.send(FmEvent::Progress(info));
                 })),

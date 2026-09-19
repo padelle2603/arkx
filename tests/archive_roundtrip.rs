@@ -25,7 +25,7 @@ fn zip_roundtrip() {
     let extract_dir = tmp.path().join("out_zip");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
     assert!(archive.exists());
     assert!(fs::metadata(&archive).unwrap().len() > 0);
 
@@ -58,7 +58,7 @@ fn tar_roundtrip() {
     let extract_dir = tmp.path().join("out_tar");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
 
     let info = bm.detect_and_list(&archive).unwrap();
     assert!(info.format.contains("TAR"));
@@ -79,7 +79,7 @@ fn tar_gz_roundtrip() {
     let extract_dir = tmp.path().join("out_tgz");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
 
     let info = bm.detect_and_list(&archive).unwrap();
     assert!(info.format.contains("TAR.GZ") || info.format.contains("TAR"));
@@ -100,7 +100,7 @@ fn tar_zst_roundtrip() {
     let extract_dir = tmp.path().join("out_zst");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
 
     bm.extract(&archive, &extract_dir, None, None, None)
         .unwrap();
@@ -121,7 +121,7 @@ fn single_file_roundtrip_all_codecs() {
         let out = tmp.path().join("out");
 
         let bm = backend();
-        bm.create(&archive, &[src], 6, None, None).unwrap();
+        bm.create(&archive, &[src], 6, None, None, None).unwrap();
         assert!(archive.exists());
         assert!(fs::metadata(&archive).unwrap().len() > 0);
 
@@ -138,7 +138,7 @@ fn single_file_rejects_folders_and_multi() {
     let (src, _) = create_src_dir(tmp.path());
     let archive = tmp.path().join("src.gz");
     let bm = backend();
-    assert!(bm.create(&archive, &[src], 6, None, None).is_err());
+    assert!(bm.create(&archive, &[src], 6, None, None, None).is_err());
     assert!(!archive.exists());
 
     let a = tmp.path().join("a.txt");
@@ -146,7 +146,7 @@ fn single_file_rejects_folders_and_multi() {
     fs::write(&a, "a").unwrap();
     fs::write(&b, "b").unwrap();
     let archive2 = tmp.path().join("multi.gz");
-    assert!(bm.create(&archive2, &[a, b], 6, None, None).is_err());
+    assert!(bm.create(&archive2, &[a, b], 6, None, None, None).is_err());
     assert!(!archive2.exists());
 }
 
@@ -157,7 +157,7 @@ fn list_shows_correct_sizes() {
     let archive = tmp.path().join("sized.zip");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
 
     let info = bm.detect_and_list(&archive).unwrap();
     let hello = info
@@ -176,7 +176,7 @@ fn extract_to_empty_dir_works() {
     let archive = tmp.path().join("test.zip");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
 
     let extract_dir = tmp.path().join("brand_new_dir");
     bm.extract(&archive, &extract_dir, None, None, None)
@@ -197,7 +197,7 @@ fn create_empty_sources_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let archive = tmp.path().join("empty.zip");
     let bm = backend();
-    let result = bm.create(&archive, &[], 6, None, None);
+    let result = bm.create(&archive, &[], 6, None, None, None);
     assert!(result.is_err());
 }
 
@@ -208,7 +208,7 @@ fn backend_manager_detects_and_lists() {
     let archive = tmp.path().join("detect.zip");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
 
     let info = bm.detect_and_list(&archive).unwrap();
     assert!(info.num_files >= 1);
@@ -222,7 +222,7 @@ fn add_to_zip_roundtrip() {
     let archive = tmp.path().join("add.zip");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
 
     let extra = tmp.path().join("extra.txt");
     fs::write(&extra, b"added content").unwrap();
@@ -270,7 +270,7 @@ fn remove_from_zip_roundtrip() {
     let archive = tmp.path().join("rm.zip");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
 
     bm.remove(&archive, &["src/data.bin".to_string()], None, None)
         .unwrap();
@@ -306,7 +306,7 @@ fn set_comment_zip_roundtrip() {
     let archive = tmp.path().join("cmt.zip");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, None, None).unwrap();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
     assert_eq!(
         bm.detect_and_list(&archive).unwrap().comment.as_deref(),
         None
@@ -336,7 +336,7 @@ fn zip_aes_roundtrip() {
     let archive = tmp.path().join("sec.zip");
 
     let bm = backend();
-    bm.create(&archive, &sources, 6, Some("secret"), None)
+    bm.create(&archive, &sources, 6, Some("secret"), None, None)
         .unwrap();
 
     let info = bm.detect_and_list(&archive).unwrap();

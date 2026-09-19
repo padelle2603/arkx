@@ -214,9 +214,18 @@ impl BackendManager {
         sources: &[PathBuf],
         level: u8,
         password: Option<&str>,
+        volume_size: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let fmt = super::detector::detect_format(dest);
+        // Split volumes only make sense where 7z drives the archive; the native
+        // zip writer cannot split and the libarchive tree has no volume support.
+        if volume_size.is_some() && fmt != ArchiveFormat::SevenZip {
+            return Err(ArkxError::UnsupportedFormat(format!(
+                "split volumes are only supported for .7z destinations (got {fmt:?})\n\
+                 hint: use `arkx a dest.7z ... -v <size>`"
+            )));
+        }
         if matches!(fmt.backend(), BackendKind::Libarchive) {
             // lzip/lzo/lrzip tar flavors: creation needs rare external
             // encoders; keep them extract-only with a clear message.
@@ -280,7 +289,9 @@ impl BackendManager {
             if matches!(fmt, ArchiveFormat::Zip) && password.is_some() {
                 // Encrypted zip → native AES-256 (7z -p has no CLI-safe
                 // password plumbing through this path for creation either).
-                return self.native.create(dest, sources, level, password, progress);
+                return self
+                    .native
+                    .create(dest, sources, level, password, None, progress);
             }
             if password.is_none() {
                 // Large zips → multithreaded 7z (-mmt) with fallback to native:
@@ -293,18 +304,24 @@ impl BackendManager {
                         "[core] big zip ({} threads): using 7z",
                         crate::core::util::effective_threads()
                     );
-                    match self.seven.create(dest, sources, level, None, progress) {
+                    match self
+                        .seven
+                        .create(dest, sources, level, None, None, progress)
+                    {
                         Ok(()) => return Ok(()),
                         Err(e) => {
                             eprintln!("[core] 7z create failed, falling back to native: {}", e);
-                            return self.native.create(dest, sources, level, None, None);
+                            return self.native.create(dest, sources, level, None, None, None);
                         }
                     }
                 }
-                return self.native.create(dest, sources, level, password, progress);
+                return self
+                    .native
+                    .create(dest, sources, level, password, None, progress);
             }
         }
-        self.seven.create(dest, sources, level, password, progress)
+        self.seven
+            .create(dest, sources, level, password, volume_size, progress)
     }
 
     /// Set the archive comment. Only zip has a writer backend (7z CLI cannot
