@@ -109,7 +109,7 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         if let Some(pw) = password {
             cmd.arg(format!("-p{}", pw));
         }
-        cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
+        cmd.arg(&archive);
         cmd.arg(entry_arg(old_name));
         cmd.arg(entry_arg(new_name));
         let output = cmd
@@ -144,7 +144,7 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
                 cmd.arg(entry_arg(e));
             }
         }
-        cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
+        cmd.arg(&archive);
         let output = cmd
             .output()
             .map_err(|e| ArkxError::Backend(format!("Cannot run 7z: {}", e)))?;
@@ -877,7 +877,7 @@ impl SevenZipBackend {
         if let Some(pw) = password {
             cmd.arg(format!("-p{}", pw));
         }
-        cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
+        cmd.arg(&archive);
 
         let mut input_paths: Vec<PathBuf> = Vec::new();
         // Kept alive until the end of the function (Drop cleans the temp dir).
@@ -1008,7 +1008,7 @@ impl SevenZipBackend {
         if let Some(pw) = password {
             cmd.arg(format!("-p{}", pw));
         }
-        cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
+        cmd.arg(&archive);
         for name in entries {
             cmd.arg(entry_arg(name));
         }

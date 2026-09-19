@@ -116,11 +116,13 @@ pub fn build_ui(app: &adw::Application) {
     "#;
     let provider = gtk::CssProvider::new();
     provider.load_from_string(css);
-    gtk::style_context_add_provider_for_display(
-        &gtk::gdk::Display::default().unwrap(),
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
 
     let window = adw::ApplicationWindow::new(app);
     window.set_title(Some("Arkx"));
@@ -640,7 +642,7 @@ pub fn build_ui(app: &adw::Application) {
                 let mut le = ui_all.last_extract.borrow_mut();
                 if let Some((la, ld, t)) = &*le {
                     if la == &archive && ld == &dest && t.elapsed().as_secs() < 2 {
-                        eprintln!("[guard] duplicate Extract-all ignored");
+                        ui_all.status_left.set_text("Extract already started…");
                         return;
                     }
                 }
@@ -679,7 +681,7 @@ pub fn build_ui(app: &adw::Application) {
                 let mut le = ui_sel.last_extract.borrow_mut();
                 if let Some((la, ld, t)) = &*le {
                     if la == &archive && ld == &dest && t.elapsed().as_secs() < 2 {
-                        eprintln!("[guard] duplicate Extract-selected ignored");
+                        ui_sel.status_left.set_text("Extract already started…");
                         return;
                     }
                 }
@@ -961,7 +963,7 @@ pub fn build_ui(app: &adw::Application) {
                 let mut le = ui_here.last_extract.borrow_mut();
                 if let Some((la, ld, t)) = &*le {
                     if la == &archive && ld == &dest && t.elapsed().as_secs() < 2 {
-                        eprintln!("[guard] duplicate context Extract-here ignored");
+                        ui_here.status_left.set_text("Extract already started…");
                         return;
                     }
                 }
@@ -1855,6 +1857,10 @@ pub fn build_ui(app: &adw::Application) {
                                         },
                                         ui_poll.worker.clone(),
                                         ui_poll.password_cache.clone(),
+                                        {
+                                            let ui_c = ui_poll.clone();
+                                            move || *ui_c.pending_password.borrow_mut() = false
+                                        },
                                     );
                                 } else if let Some(archive) =
                                     ui_poll.state.borrow().current_archive.clone()
@@ -1867,6 +1873,10 @@ pub fn build_ui(app: &adw::Application) {
                                         dialogs::PasswordAction::Open { archive },
                                         ui_poll.worker.clone(),
                                         ui_poll.password_cache.clone(),
+                                        {
+                                            let ui_c = ui_poll.clone();
+                                            move || *ui_c.pending_password.borrow_mut() = false
+                                        },
                                     );
                                 } else if let Some(pw) = ui_poll.progress_window.borrow().as_ref() {
                                     *ui_poll.pending_password.borrow_mut() = false;
@@ -2108,6 +2118,10 @@ fn start_extract(
             },
             worker,
             ui.password_cache.clone(),
+            {
+                let ui_c = ui.clone();
+                move || *ui_c.pending_password.borrow_mut() = false
+            },
         );
         return;
     }

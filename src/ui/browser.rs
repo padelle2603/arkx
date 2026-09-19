@@ -246,7 +246,6 @@ pub(crate) fn get_all_descendants(info: &ArchiveInfo, selected_paths: &[String])
             };
         if sel_is_dir {
             let prefix = sel_slash;
-            let mut found = false;
             for e in &info.entries {
                 let ep = paths::normalize(&e.path);
                 if ep == prefix.trim_end_matches('/') {
@@ -254,19 +253,10 @@ pub(crate) fn get_all_descendants(info: &ArchiveInfo, selected_paths: &[String])
                 }
                 if ep.starts_with(&prefix) || paths::with_trailing_slash(&ep).starts_with(&prefix) {
                     expanded.insert(e.path.clone());
-                    found = true;
                 }
             }
-            if !found {
-                // Fallback: keep the selection itself.
-                expanded.insert(sel.clone());
-            } else {
-                // Also keep the dir itself when explicit.
-                expanded.insert(sel.clone());
-            }
-        } else {
-            expanded.insert(sel.clone());
         }
+        expanded.insert(sel.clone());
     }
     expanded.into_iter().collect()
 }

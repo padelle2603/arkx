@@ -66,7 +66,7 @@ impl WorkerPool {
                 let cancel_flag = Arc::new(AtomicBool::new(false));
                 flags
                     .lock()
-                    .expect("pool cancel flags")
+                    .unwrap_or_else(|e| e.into_inner())
                     .push(cancel_flag.clone());
                 let _ = evt_tx.send(WorkerEvent::Started { kind: kind_str });
                 let evt_tx_clone = evt_tx.clone();
@@ -108,7 +108,7 @@ impl WorkerPool {
                     }
                     job_flags
                         .lock()
-                        .expect("pool cancel flags")
+                        .unwrap_or_else(|e| e.into_inner())
                         .retain(|f| !Arc::ptr_eq(f, &cancel_flag));
                 });
             }
@@ -327,7 +327,12 @@ impl WorkerPool {
     }
 
     pub fn cancel_all(&self) {
-        for f in self.cancel_flags.lock().expect("pool cancel flags").iter() {
+        for f in self
+            .cancel_flags
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
             f.store(true, Ordering::Relaxed);
         }
     }

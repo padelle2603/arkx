@@ -96,6 +96,7 @@ pub(crate) fn prompt_password(
     action: PasswordAction,
     worker: Rc<RefCell<WorkerPool>>,
     remember: Rc<RefCell<Option<String>>>,
+    on_cancel: impl Fn() + 'static,
 ) {
     let (archive, hint) = match &action {
         PasswordAction::Open { archive } => {
@@ -130,6 +131,6 @@ pub(crate) fn prompt_password(
                 }),
             }
         },
-        || {},
+        on_cancel,
     );
 }
