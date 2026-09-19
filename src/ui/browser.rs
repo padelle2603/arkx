@@ -57,6 +57,27 @@ pub(crate) fn apply_responsive_visibility<W: IsA<gtk::Widget>>(widget: &W) {
 // State
 // ---------------------------------------------------------------------------
 
+/// Column used for the sort order of the current view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SortCol {
+    #[default]
+    Name,
+    Size,
+    Date,
+    Method,
+}
+
+impl SortCol {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            SortCol::Name => "NAME",
+            SortCol::Size => "SIZE",
+            SortCol::Date => "DATE",
+            SortCol::Method => "METHOD",
+        }
+    }
+}
+
 /// Browser state: opened archive, current folder and selection.
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
@@ -66,6 +87,8 @@ pub(crate) struct AppState {
     pub(crate) current_path: String,
     pub(crate) selected_entries: Vec<String>,
     pub(crate) filter_text: String,
+    pub(crate) sort_col: SortCol,
+    pub(crate) sort_asc: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -180,9 +203,27 @@ pub(crate) fn get_children(info: &ArchiveInfo, current_path: &str) -> Vec<Archiv
         }
     }
 
-    let mut vec: Vec<ArchiveEntry> = map.into_values().collect();
-    vec.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.path.cmp(&b.path)));
-    vec
+    map.into_values().collect()
+}
+
+/// Sort `children` by `sort_col` with the given direction; directories stay
+/// first regardless of direction.
+pub(crate) fn sort_children(children: &mut [ArchiveEntry], sort_col: SortCol, sort_asc: bool) {
+    children.sort_by(|a, b| {
+        b.is_dir.cmp(&a.is_dir).then_with(|| {
+            let ord = match sort_col {
+                SortCol::Name => a.path.cmp(&b.path),
+                SortCol::Size => a.size.cmp(&b.size),
+                SortCol::Date => a.modified.cmp(&b.modified),
+                SortCol::Method => a.method.cmp(&b.method),
+            };
+            if sort_asc {
+                ord
+            } else {
+                ord.reverse()
+            }
+        })
+    });
 }
 
 /// Expand selected folders to every descendant entry (by prefix).
@@ -272,10 +313,11 @@ pub(crate) fn update_breadcrumb(
     let sr_c = status_right.clone();
     let info_c = info.clone();
     root_btn.connect_clicked(move |_| {
-        let mut st = state_c.borrow_mut();
-        st.current_path = String::new();
-        let f = st.filter_text.clone();
-        drop(st);
+        let (f, sc, sa) = {
+            let mut st = state_c.borrow_mut();
+            st.current_path = String::new();
+            (st.filter_text.clone(), st.sort_col, st.sort_asc)
+        };
         update_breadcrumb(
             &bc_c,
             "",
@@ -285,7 +327,7 @@ pub(crate) fn update_breadcrumb(
             sl_c.clone(),
             sr_c.clone(),
         );
-        populate_current_view(&list_c, &info_c, "", &f);
+        populate_current_view(&list_c, &info_c, "", &f, sc, sa);
         sl_c.set_text("Root");
     });
     breadcrumb_box.append(&root_btn);
@@ -315,10 +357,11 @@ pub(crate) fn update_breadcrumb(
         let sr_cc = status_right.clone();
         let info_cc = info.clone();
         btn.connect_clicked(move |_| {
-            let mut st = state_cc.borrow_mut();
-            st.current_path = target.clone();
-            let f = st.filter_text.clone();
-            drop(st);
+            let (f, sc, sa) = {
+                let mut st = state_cc.borrow_mut();
+                st.current_path = target.clone();
+                (st.filter_text.clone(), st.sort_col, st.sort_asc)
+            };
             update_breadcrumb(
                 &bc_cc,
                 &target,
@@ -328,15 +371,17 @@ pub(crate) fn update_breadcrumb(
                 sl_cc.clone(),
                 sr_cc.clone(),
             );
-            populate_current_view(&list_cc, &info_cc, &target, &f);
+            populate_current_view(&list_cc, &info_cc, &target, &f, sc, sa);
             sl_cc.set_text(&format!("Folder: /{}", target));
         });
         breadcrumb_box.append(&btn);
     }
 }
 
-/// Responsive table header (NAME / SIZE / DATE / METHOD).
-pub(crate) fn create_table_header() -> gtk::Box {
+/// Responsive table header (NAME / SIZE / DATE / METHOD). Returns the box plus
+/// the clickable column labels so the caller can wire sort toggling (the
+/// labels only exist once the header is built).
+pub(crate) fn create_table_header() -> (gtk::Box, Vec<(SortCol, gtk::Label)>) {
     let hdr = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     hdr.set_margin_top(4);
     hdr.set_margin_bottom(4);
@@ -344,37 +389,42 @@ pub(crate) fn create_table_header() -> gtk::Box {
     hdr.set_margin_end(12);
     hdr.add_css_class("table-header");
     hdr.add_css_class("hide-narrow"); // hidden on narrow; rows go vertical via CSS
-                                      // Responsive columns: flexible name, fixed others hidden on narrow.
-    let name_lbl = gtk::Label::new(Some("NAME"));
+    let mut sortables = Vec::new();
+    // Responsive columns: flexible name, fixed others hidden on narrow.
+    let name_lbl = gtk::Label::new(Some(SortCol::Name.title()));
     name_lbl.set_xalign(0.0);
     name_lbl.set_hexpand(true);
     name_lbl.add_css_class("heading");
+    sortables.push((SortCol::Name, name_lbl.clone()));
     hdr.append(&name_lbl);
 
-    let size_lbl = gtk::Label::new(Some("SIZE"));
+    let size_lbl = gtk::Label::new(Some(SortCol::Size.title()));
     size_lbl.set_xalign(1.0);
     size_lbl.set_width_request(90);
     size_lbl.add_css_class("heading");
+    sortables.push((SortCol::Size, size_lbl.clone()));
     hdr.append(&size_lbl);
 
-    let date_lbl = gtk::Label::new(Some("DATE"));
+    let date_lbl = gtk::Label::new(Some(SortCol::Date.title()));
     date_lbl.set_xalign(0.5);
     date_lbl.set_width_request(110);
     date_lbl.add_css_class("heading");
     date_lbl.add_css_class("hide-narrow");
     date_lbl.set_visible(!hidden_by_layout("hide-narrow"));
+    sortables.push((SortCol::Date, date_lbl.clone()));
     hdr.append(&date_lbl);
 
-    let method_lbl = gtk::Label::new(Some("METHOD"));
+    let method_lbl = gtk::Label::new(Some(SortCol::Method.title()));
     method_lbl.set_xalign(0.5);
     method_lbl.set_width_request(90);
     method_lbl.add_css_class("heading");
     method_lbl.add_css_class("hide-medium");
     method_lbl.add_css_class("hide-narrow");
     method_lbl.set_visible(!hidden_by_layout("hide-medium") && !hidden_by_layout("hide-narrow"));
+    sortables.push((SortCol::Method, method_lbl.clone()));
     hdr.append(&method_lbl);
 
-    hdr
+    (hdr, sortables)
 }
 
 /// Empty state shown before any archive is opened.
@@ -410,17 +460,21 @@ pub(crate) fn create_empty_state() -> gtk::Box {
     bx
 }
 
-/// Fill the list with the current folder's children (max 5000 rows).
+/// Fill the list with the current folder's children (max 5000 rows), sorted
+/// by `sort_col`/`sort_asc` with directories always first.
 pub(crate) fn populate_current_view(
     list_box: &gtk::ListBox,
     info: &ArchiveInfo,
     current_path: &str,
     filter: &str,
+    sort_col: SortCol,
+    sort_asc: bool,
 ) {
     list_box.remove_all();
 
     let filter_lower = filter.to_lowercase();
-    let children = get_children(info, current_path);
+    let mut children = get_children(info, current_path);
+    sort_children(&mut children, sort_col, sort_asc);
     let mut visible = 0;
 
     for entry in children {
@@ -767,6 +821,37 @@ mod tests {
         assert_eq!(children_a.len(), 2);
         assert!(children_a.iter().any(|e| e.path == "a/b/" && e.is_dir));
         assert!(children_a.iter().any(|e| e.path == "a/d.txt"));
+    }
+
+    #[test]
+    fn test_sort_children_dir_first_and_size() {
+        let mk = |path: &str, is_dir: bool, size: u64| ArchiveEntry {
+            path: path.to_string(),
+            is_dir,
+            size,
+            packed_size: size,
+            modified: None,
+            mode: None,
+            crc32: None,
+            method: None,
+            encrypted: false,
+        };
+        let mut children = vec![
+            mk("b.txt", false, 3),
+            mk("dir2/", true, 0),
+            mk("a.bin", false, 9),
+            mk("dir1/", true, 0),
+            mk("c.txt", false, 1),
+        ];
+        sort_children(&mut children, SortCol::Size, true);
+        assert!(children[0].path.starts_with("dir"));
+        assert!(children[1].path.starts_with("dir"));
+        let sizes: Vec<u64> = children[2..].iter().map(|e| e.size).collect();
+        assert!(sizes.windows(2).all(|w| w[0] <= w[1]));
+
+        sort_children(&mut children, SortCol::Size, false);
+        let sizes_desc: Vec<u64> = children[2..].iter().map(|e| e.size).collect();
+        assert!(sizes_desc.windows(2).all(|w| w[0] >= w[1]));
     }
 
     #[test]

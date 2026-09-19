@@ -12,6 +12,9 @@
   feature). Encrypted entries decrypt per entry and a wrong password surfaces
   the typed `WrongPassword`; the 7z re-run is skipped once the native backend
   already rejected the credentials (it left partial garbage behind).
+- **Sortable columns**: clicking a table header sorts the current view by that
+  column (asc/desc toggle), directories always first, numeric order for
+  size/date. The properties dialog is also wider and taller.
 
 ## v1.5.0 — archive editing: rename, copy/paste, open-with, integrity check
 

@@ -132,6 +132,8 @@ pub fn build_ui(app: &adw::Application) {
         current_path: String::new(),
         selected_entries: Vec::new(),
         filter_text: String::new(),
+        sort_col: crate::ui::browser::SortCol::Name,
+        sort_asc: true,
     }));
 
     let worker = Rc::new(RefCell::new(WorkerPool::new()));
@@ -227,7 +229,7 @@ pub fn build_ui(app: &adw::Application) {
 
     // Responsive table header wrapped in a horizontal ScrolledWindow synced
     // with the list for the X scrollbar
-    let table_header = create_table_header();
+    let (table_header, sort_labels) = create_table_header();
     let header_scroll = gtk::ScrolledWindow::new();
     header_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
     header_scroll.set_overlay_scrolling(false);
@@ -277,6 +279,42 @@ pub fn build_ui(app: &adw::Application) {
     empty_overlay.set_child(Some(&scrolled));
     empty_overlay.add_overlay(&empty_state);
     scrolled.set_child(Some(&list_box));
+
+    // Column headers: click toggles asc/desc on the same column, switches
+    // column otherwise, and re-populates the current view in place.
+    let sort_state = state.clone();
+    let sort_list = list_box.clone();
+    for (col, label) in sort_labels {
+        let st_c = sort_state.clone();
+        let list_c = sort_list.clone();
+        let label_c = label.clone();
+        let gesture = gtk::GestureClick::new();
+        label.add_controller(gesture.clone());
+        gesture.connect_pressed(move |_, _, _, _| {
+            let (col, asc) = {
+                let mut st = st_c.borrow_mut();
+                if st.sort_col == col {
+                    st.sort_asc = !st.sort_asc;
+                } else {
+                    st.sort_col = col;
+                    st.sort_asc = true;
+                }
+                (st.sort_col, st.sort_asc)
+            };
+            label_c.set_text(&format!("{} {}", col.title(), if asc { "▾" } else { "▴" }));
+            let (info, path, filter) = {
+                let st = st_c.borrow();
+                (
+                    st.current_info.clone(),
+                    st.current_path.clone(),
+                    st.filter_text.clone(),
+                )
+            };
+            if let Some(info) = info {
+                populate_current_view(&list_c, &info, &path, &filter, col, asc);
+            }
+        });
+    }
 
     content_box.append(&empty_overlay);
 
@@ -671,7 +709,11 @@ pub fn build_ui(app: &adw::Application) {
                 ui_back.status_left.clone(),
                 ui_back.status_right.clone(),
             );
-            populate_current_view(&ui_back.list, &info, &cur, &filter);
+            let (sc, sa) = {
+                let st = ui_back.state.borrow();
+                (st.sort_col, st.sort_asc)
+            };
+            populate_current_view(&ui_back.list, &info, &cur, &filter, sc, sa);
             ui_back.back.set_sensitive(!cur.is_empty());
             ui_back.status_left.set_text(&format!(
                 "Folder: /{}",
@@ -736,7 +778,11 @@ pub fn build_ui(app: &adw::Application) {
                     ui_nav.status_left.clone(),
                     ui_nav.status_right.clone(),
                 );
-                populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c);
+                let (sc, sa) = {
+                    let st = ui_nav.state.borrow();
+                    (st.sort_col, st.sort_asc)
+                };
+                populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c, sc, sa);
                 ui_nav.back.set_sensitive(!new_path.is_empty());
                 ui_nav.status_left.set_text(&format!(
                     "Folder: /{}",
@@ -771,7 +817,11 @@ pub fn build_ui(app: &adw::Application) {
                             ui_nav.status_left.clone(),
                             ui_nav.status_right.clone(),
                         );
-                        populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c);
+                        let (sc, sa) = {
+                            let st = ui_nav.state.borrow();
+                            (st.sort_col, st.sort_asc)
+                        };
+                        populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c, sc, sa);
                         ui_nav.back.set_sensitive(true);
                         ui_nav
                             .status_left
@@ -1598,7 +1648,18 @@ pub fn build_ui(app: &adw::Application) {
                                 ui_poll.status_right.clone(),
                             );
                             // Populate the current view (top level only)
-                            populate_current_view(&ui_poll.list, &info, &current_path, &filter);
+                            let (sc, sa) = {
+                                let st = ui_poll.state.borrow();
+                                (st.sort_col, st.sort_asc)
+                            };
+                            populate_current_view(
+                                &ui_poll.list,
+                                &info,
+                                &current_path,
+                                &filter,
+                                sc,
+                                sa,
+                            );
                             ui_poll.empty.set_visible(info.entries.is_empty());
                             status_left.set_text("");
                             let total_h =
@@ -2169,8 +2230,8 @@ fn show_properties(ui: &Ui) {
     }
     let scroll = gtk::ScrolledWindow::new();
     scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroll.set_max_content_height(420);
-    scroll.set_min_content_width(380);
+    scroll.set_max_content_height(760);
+    scroll.set_min_content_width(520);
     scroll.set_child(Some(&body));
     let dialog = adw::AlertDialog::new(Some("Archive properties"), None);
     if is_zip {
