@@ -230,32 +230,30 @@ pub(crate) fn sort_children(children: &mut [ArchiveEntry], sort_col: SortCol, so
 }
 
 /// Expand selected folders to every descendant entry (by prefix).
+/// Every selection acts as a folder prefix (a synthetic dir carries its
+/// slash, and `with_trailing_slash` normalizes the rest), so one pass over
+/// the entries covers all selections; exact matches are excluded and
+/// re-added at the end.
 pub(crate) fn get_all_descendants(info: &ArchiveInfo, selected_paths: &[String]) -> Vec<String> {
+    let sels: Vec<(String, String)> = selected_paths
+        .iter()
+        .map(|s| {
+            let n = paths::normalize(s);
+            (n.clone(), paths::with_trailing_slash(&n))
+        })
+        .collect();
     let mut expanded = HashSet::new();
-    for sel in selected_paths {
-        let sel_norm = paths::normalize(sel);
-        let sel_slash = paths::with_trailing_slash(&sel_norm);
-        let sel_is_dir = sel.ends_with('/')
-            || info
-                .entries
-                .iter()
-                .any(|e| paths::normalize(&e.path) == sel_norm && e.is_dir)
-            || {
-                // A synthetic dir always carries its slash.
-                sel_slash != sel_norm
-            };
-        if sel_is_dir {
-            let prefix = sel_slash;
-            for e in &info.entries {
-                let ep = paths::normalize(&e.path);
-                if ep == prefix.trim_end_matches('/') {
-                    continue;
-                }
-                if ep.starts_with(&prefix) || paths::with_trailing_slash(&ep).starts_with(&prefix) {
-                    expanded.insert(e.path.clone());
-                }
-            }
+    for e in &info.entries {
+        let ep = paths::normalize(&e.path);
+        let hit = sels.iter().any(|(sel_norm, prefix)| {
+            ep != *sel_norm
+                && (ep.starts_with(prefix) || paths::with_trailing_slash(&ep).starts_with(prefix))
+        });
+        if hit {
+            expanded.insert(e.path.clone());
         }
+    }
+    for sel in selected_paths {
         expanded.insert(sel.clone());
     }
     expanded.into_iter().collect()

@@ -181,8 +181,6 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
                 results.push(crate::core::archive::TestResult {
                     entry: line.to_string(),
                     is_dir: false,
-                    crc32_expected: None,
-                    crc32_actual: None,
                     passed: false,
                 });
             }
@@ -192,8 +190,6 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             results.push(crate::core::archive::TestResult {
                 entry: "(all entries)".to_string(),
                 is_dir: false,
-                crc32_expected: None,
-                crc32_actual: None,
                 passed: true,
             });
         }
@@ -466,7 +462,7 @@ impl SevenZipBackend {
         if let Some(cb) = progress {
             let total = self.extract_total(archive, entries);
             // Immediate 0% (total 0 = encrypted headers → pulsing UI, never a fake %).
-            cb(ProgressInfo::new("Preparing…".to_string(), 0, total));
+            cb(ProgressInfo::preparing(total));
 
             let baseline = dir_size(dest);
             let cb_arc: SharedCallback = Arc::new(Mutex::new(cb));
@@ -700,7 +696,7 @@ impl SevenZipBackend {
             .filter(|(k, _)| std::path::Path::new(k.as_str()).is_absolute())
             .map(|(_, v)| *v)
             .sum();
-        cb(ProgressInfo::new("Preparing…".to_string(), 0, total));
+        cb(ProgressInfo::preparing(total));
 
         // Drain stderr on a separate thread to avoid pipe deadlock (64KB).
         let stderr_handle = std::thread::spawn({
@@ -912,7 +908,7 @@ impl SevenZipBackend {
             return Ok(());
         };
 
-        cb(ProgressInfo::new("Preparing…".to_string(), 0, total.max(1)));
+        cb(ProgressInfo::preparing(total.max(1)));
         cmd.arg("-bsp1").arg("-bso1");
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(e.to_string()))?;
@@ -1445,8 +1441,7 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
         ));
     }
 
-    let num_files = entries.iter().filter(|e| !e.is_dir).count();
-    let num_dirs = entries.len() - num_files;
+    let (num_files, num_dirs) = crate::core::archive::count_files_dirs(&entries);
 
     Ok(ArchiveInfo {
         path: archive_path.to_string_lossy().to_string(),

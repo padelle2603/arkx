@@ -13,6 +13,8 @@ use std::time::Instant;
 /// Zip-bomb guard: refuse to decompress more than this many bytes for a
 /// single archive in the native backend (honest quota, not a ratio heuristic).
 /// Extraction aborts with a clear error instead of filling the disk.
+const IO_BUF_SIZE: usize = 1024 * 1024;
+const COPY_CHUNK: usize = 65536;
 const MAX_EXTRACTED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
 fn quota_error() -> ArkxError {
@@ -211,7 +213,7 @@ impl NativeBackend {
 
     fn list_zip(&self, path: &Path) -> Result<ArchiveInfo> {
         let file = File::open(path).map_err(ArkxError::Io)?;
-        let reader = BufReader::with_capacity(1024 * 1024, file);
+        let reader = BufReader::with_capacity(IO_BUF_SIZE, file);
         let mut zip =
             zip::ZipArchive::new(reader).map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let mut entries = Vec::with_capacity(zip.len());
@@ -246,8 +248,7 @@ impl NativeBackend {
             });
         }
 
-        let num_files = entries.iter().filter(|e| !e.is_dir).count();
-        let num_dirs = entries.len() - num_files;
+        let (num_files, num_dirs) = crate::core::archive::count_files_dirs(&entries);
 
         Ok(ArchiveInfo {
             path: path.to_string_lossy().to_string(),
@@ -309,8 +310,7 @@ impl NativeBackend {
             });
         }
 
-        let num_files = entries.iter().filter(|e| !e.is_dir).count();
-        let num_dirs = entries.len() - num_files;
+        let (num_files, num_dirs) = crate::core::archive::count_files_dirs(&entries);
         let fmt_str = crate::core::detector::detect_format(path)
             .display_name()
             .to_string();
@@ -426,7 +426,7 @@ impl NativeBackend {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let reader = BufReader::with_capacity(1024 * 1024, file);
+        let reader = BufReader::with_capacity(IO_BUF_SIZE, file);
         let mut zip =
             zip::ZipArchive::new(reader).map_err(|e| ArkxError::Corrupted(e.to_string()))?;
 
@@ -460,12 +460,12 @@ impl NativeBackend {
         };
 
         if let Some(cb) = &progress {
-            cb(ProgressInfo::new("Preparing…".to_string(), 0, total_bytes));
+            cb(ProgressInfo::preparing(total_bytes));
         }
 
         let mut processed_bytes = 0u64;
         // Reused across entries to avoid one 64KB allocation per file.
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; COPY_CHUNK];
 
         for i in 0..zip.len() {
             // Encrypted entries are decrypted with the given password; a
@@ -513,7 +513,7 @@ impl NativeBackend {
                     std::fs::create_dir_all(parent).map_err(ArkxError::Io)?;
                 }
                 let mut out = BufWriter::with_capacity(
-                    1024 * 1024,
+                    IO_BUF_SIZE,
                     File::create(&out_path).map_err(ArkxError::Io)?,
                 );
                 // 64KB chunks throttled to 100ms / 512KB so the UI is not spammed
@@ -623,13 +623,13 @@ impl NativeBackend {
             }
             // Immediate 0%.
             if let Some(cb) = &progress {
-                cb(ProgressInfo::new("Preparing…".to_string(), 0, total_bytes));
+                cb(ProgressInfo::preparing(total_bytes));
             }
         }
 
         let mut processed_bytes = 0u64;
         // Reused across entries to avoid one 64KB allocation per file.
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; COPY_CHUNK];
         for entry in ar
             .entries()
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?
@@ -664,7 +664,7 @@ impl NativeBackend {
                     std::fs::create_dir_all(parent).map_err(ArkxError::Io)?;
                 }
                 let mut out = BufWriter::with_capacity(
-                    1024 * 1024,
+                    IO_BUF_SIZE,
                     File::create(&out_path).map_err(ArkxError::Io)?,
                 );
                 let mut last_emit = Instant::now();
@@ -768,10 +768,10 @@ impl NativeBackend {
             .unwrap_or("output");
         let out_path = dest.join(out_name);
         let mut out =
-            BufWriter::with_capacity(1024 * 1024, File::create(&out_path).map_err(ArkxError::Io)?);
+            BufWriter::with_capacity(IO_BUF_SIZE, File::create(&out_path).map_err(ArkxError::Io)?);
         if let Some(cb) = progress {
             cb(ProgressInfo::new(out_name.to_string(), 0, total));
-            let mut reader = BufReader::with_capacity(1024 * 1024, reader);
+            let mut reader = BufReader::with_capacity(IO_BUF_SIZE, reader);
             let mut buf = vec![0u8; 8192];
             let mut extracted: u64 = 0;
             loop {
@@ -792,7 +792,7 @@ impl NativeBackend {
             cb(crate::core::util::completed(total));
             out.flush().map_err(ArkxError::Io)?;
         } else {
-            let mut reader = BufReader::with_capacity(1024 * 1024, reader);
+            let mut reader = BufReader::with_capacity(IO_BUF_SIZE, reader);
             std::io::copy(&mut reader, &mut out).map_err(ArkxError::Io)?;
             out.flush().map_err(ArkxError::Io)?;
         }
@@ -881,7 +881,7 @@ impl NativeBackend {
         }
 
         let file = File::create(dest).map_err(ArkxError::Io)?;
-        let writer = BufWriter::with_capacity(1024 * 1024, file);
+        let writer = BufWriter::with_capacity(IO_BUF_SIZE, file);
         let mut zip = zip::ZipWriter::new(writer);
         let options: zip::write::FileOptions<()> = zip::write::FileOptions::default()
             .compression_method(match level {
@@ -981,7 +981,7 @@ impl NativeBackend {
         };
         let mut old = {
             let file = File::open(archive).map_err(ArkxError::Io)?;
-            let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+            let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
                 .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
             for i in 0..z.len() {
                 match z.by_index(i) {
@@ -1045,7 +1045,7 @@ impl NativeBackend {
         let total = old.len() as u64 + new_items.len() as u64;
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
-            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             let new_opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated)
                 .compression_level(Some(6));
@@ -1153,7 +1153,7 @@ impl NativeBackend {
         };
         let mut old = {
             let file = File::open(archive).map_err(ArkxError::Io)?;
-            let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+            let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
                 .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
             for i in 0..z.len() {
                 match z.by_index(i) {
@@ -1175,7 +1175,7 @@ impl NativeBackend {
         let total = old.len() as u64;
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
-            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             if let Some(c) = comment {
                 zip.set_comment(c);
             }
@@ -1365,8 +1365,8 @@ impl NativeBackend {
         let file = File::create(dest).map_err(ArkxError::Io)?;
         let mut writer = create_tar_writer(file, fmt, level)?;
         let mut input =
-            BufReader::with_capacity(1024 * 1024, File::open(src).map_err(ArkxError::Io)?);
-        let mut buf = vec![0u8; 65536];
+            BufReader::with_capacity(IO_BUF_SIZE, File::open(src).map_err(ArkxError::Io)?);
+        let mut buf = vec![0u8; COPY_CHUNK];
         let mut current = 0u64;
         if let Some(cb) = &progress {
             cb(ProgressInfo::new(name.clone(), 0, total));
@@ -1402,23 +1402,23 @@ fn create_tar_reader(file: File, path: &Path) -> Result<Box<dyn std::io::Read>> 
     let reader: Box<dyn std::io::Read> =
         match fmt {
             ArchiveFormat::TarGz => Box::new(flate2::read::GzDecoder::new(
-                BufReader::with_capacity(1024 * 1024, file),
+                BufReader::with_capacity(IO_BUF_SIZE, file),
             )),
             ArchiveFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(
-                BufReader::with_capacity(1024 * 1024, file),
+                BufReader::with_capacity(IO_BUF_SIZE, file),
             )),
             ArchiveFormat::TarXz => Box::new(xz2::read::XzDecoder::new(BufReader::with_capacity(
-                1024 * 1024,
+                IO_BUF_SIZE,
                 file,
             ))),
             ArchiveFormat::TarZst => Box::new(
-                zstd::stream::read::Decoder::new(BufReader::with_capacity(1024 * 1024, file))
+                zstd::stream::read::Decoder::new(BufReader::with_capacity(IO_BUF_SIZE, file))
                     .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?,
             ),
             ArchiveFormat::TarLz4 => Box::new(lz4_flex::frame::FrameDecoder::new(
-                BufReader::with_capacity(1024 * 1024, file),
+                BufReader::with_capacity(IO_BUF_SIZE, file),
             )),
-            ArchiveFormat::Tar => Box::new(BufReader::with_capacity(1024 * 1024, file)),
+            ArchiveFormat::Tar => Box::new(BufReader::with_capacity(IO_BUF_SIZE, file)),
             _ => {
                 return Err(ArkxError::UnsupportedFormat(format!(
                     "tar reader {:?}",
@@ -1433,23 +1433,23 @@ fn create_single_reader(file: File, path: &Path) -> Result<Box<dyn std::io::Read
     let fmt = crate::core::detector::detect_format(path);
     let reader: Box<dyn std::io::Read> = match fmt {
         ArchiveFormat::Gz => Box::new(flate2::read::GzDecoder::new(BufReader::with_capacity(
-            1024 * 1024,
+            IO_BUF_SIZE,
             file,
         ))),
         ArchiveFormat::Bz2 => Box::new(bzip2::read::BzDecoder::new(BufReader::with_capacity(
-            1024 * 1024,
+            IO_BUF_SIZE,
             file,
         ))),
         ArchiveFormat::Xz => Box::new(xz2::read::XzDecoder::new(BufReader::with_capacity(
-            1024 * 1024,
+            IO_BUF_SIZE,
             file,
         ))),
         ArchiveFormat::Zst => Box::new(
-            zstd::stream::read::Decoder::new(BufReader::with_capacity(1024 * 1024, file))
+            zstd::stream::read::Decoder::new(BufReader::with_capacity(IO_BUF_SIZE, file))
                 .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?,
         ),
         ArchiveFormat::Lz4 => Box::new(lz4_flex::frame::FrameDecoder::new(
-            BufReader::with_capacity(1024 * 1024, file),
+            BufReader::with_capacity(IO_BUF_SIZE, file),
         )),
         _ => {
             return Err(ArkxError::UnsupportedFormat(format!(
@@ -1537,7 +1537,7 @@ impl TarWriter {
 }
 
 fn create_tar_writer(file: File, fmt: &ArchiveFormat, level: u8) -> Result<TarWriter> {
-    let buf = BufWriter::with_capacity(1024 * 1024, file);
+    let buf = BufWriter::with_capacity(IO_BUF_SIZE, file);
     // The user -l flag applies to all codecs (previously ignored:
     // fixed levels gz6/best/xz6/zst3). 0 = fast, 9 = max ratio.
     let writer = match fmt {
@@ -1700,7 +1700,7 @@ impl NativeBackend {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let old_name_norm = crate::core::paths::normalize(old_name);
         let new_name_norm = crate::core::paths::normalize(new_name);
@@ -1747,7 +1747,7 @@ impl NativeBackend {
         let total = z.len() as u64;
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
-            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             let mut done = 0u64;
             for i in 0..z.len() {
                 let mut f = z
@@ -1776,14 +1776,7 @@ impl NativeBackend {
                 } else {
                     zip.start_file(&target, opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                    let mut buf = vec![0u8; 65536];
-                    loop {
-                        let n = f.read(&mut buf).map_err(ArkxError::Io)?;
-                        if n == 0 {
-                            break;
-                        }
-                        zip.write_all(&buf[..n]).map_err(ArkxError::Io)?;
-                    }
+                    std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
                 }
             }
             if let Some(cb) = &progress {
@@ -1817,7 +1810,7 @@ impl NativeBackend {
         entries: Option<&[String]>,
     ) -> Result<crate::core::archive::TestReport> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let mut results = Vec::new();
         let mut passed = 0usize;
@@ -1842,7 +1835,7 @@ impl NativeBackend {
                 crc_expected
             } else {
                 let mut hasher = crc32fast::Hasher::new();
-                let mut buf = vec![0u8; 65536];
+                let mut buf = vec![0u8; COPY_CHUNK];
                 loop {
                     let n = f.read(&mut buf).map_err(ArkxError::Io)?;
                     if n == 0 {
@@ -1861,8 +1854,6 @@ impl NativeBackend {
             results.push(crate::core::archive::TestResult {
                 entry: name,
                 is_dir,
-                crc32_expected: Some(format!("{:08X}", crc_expected)),
-                crc32_actual: Some(format!("{:08X}", crc_actual)),
                 passed: passed_entry,
             });
         }
@@ -1876,7 +1867,7 @@ impl NativeBackend {
 
     fn open_with_zip(&self, archive: &Path, entry: &str, temp_dir: &Path) -> Result<PathBuf> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let idx = (0..z.len())
             .find(|&i| z.by_index(i).ok().map(|f| f.name().to_string()) == Some(entry.to_string()))
@@ -1900,7 +1891,7 @@ impl NativeBackend {
             return Ok(out_path);
         }
         let mut out = File::create(&out_path).map_err(ArkxError::Io)?;
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![0u8; COPY_CHUNK];
         loop {
             let n = f.read(&mut buf).map_err(Self::zip_read_err)?;
             if n == 0 {
@@ -1920,7 +1911,7 @@ impl NativeBackend {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let archive_len = archive.metadata().map(|m| m.len()).unwrap_or(0);
         let mut tmp = archive.as_os_str().to_os_string();
@@ -1930,7 +1921,7 @@ impl NativeBackend {
         let total = z.len() as u64;
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
-            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+            let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             let mut done = 0u64;
             for i in 0..z.len() {
                 let mut f = z
@@ -1956,14 +1947,7 @@ impl NativeBackend {
                 } else {
                     zip.start_file(&name, opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                    let mut buf = vec![0u8; 65536];
-                    loop {
-                        let n = f.read(&mut buf).map_err(ArkxError::Io)?;
-                        if n == 0 {
-                            break;
-                        }
-                        zip.write_all(&buf[..n]).map_err(ArkxError::Io)?;
-                    }
+                    std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
                 }
             }
             let writer = zip
@@ -1986,7 +1970,7 @@ impl NativeBackend {
         for _ in 0..passes {
             let mut f = File::create(archive).map_err(ArkxError::Io)?;
             let mut urandom = File::open("/dev/urandom").map_err(ArkxError::Io)?;
-            let mut buf = vec![0u8; 65536];
+            let mut buf = vec![0u8; COPY_CHUNK];
             let mut written = 0u64;
             while written < archive_len {
                 let n = std::cmp::min(buf.len() as u64, archive_len - written) as usize;

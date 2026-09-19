@@ -254,7 +254,7 @@ impl BsdtarBackend {
                     .fold(0u64, |a, b| a.saturating_add(b)),
             })
             .unwrap_or(0);
-        cb(ProgressInfo::new("Preparing…".to_string(), 0, total));
+        cb(ProgressInfo::preparing(total));
 
         let mut child = cmd
             .spawn()
@@ -384,8 +384,7 @@ fn parse_tvf(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
             "cannot list archive (empty output: file may be empty or damaged)".into(),
         ));
     }
-    let num_files = entries.iter().filter(|e| !e.is_dir).count();
-    let num_dirs = entries.len() - num_files;
+    let (num_files, num_dirs) = crate::core::archive::count_files_dirs(&entries);
     Ok(ArchiveInfo {
         path: archive_path.to_string_lossy().to_string(),
         format: crate::core::detector::detect_format(archive_path)

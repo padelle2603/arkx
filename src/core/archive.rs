@@ -62,6 +62,18 @@ impl ProgressInfo {
             percent,
         }
     }
+
+    /// Initial 0% event before the real work starts.
+    pub fn preparing(total: u64) -> Self {
+        Self::new("Preparing…".to_string(), 0, total)
+    }
+}
+
+/// Split an entry list into (files, dirs) counts — the packaged-listing
+/// idiom repeated by each backend's `list`.
+pub fn count_files_dirs(entries: &[ArchiveEntry]) -> (usize, usize) {
+    let files = entries.iter().filter(|e| !e.is_dir).count();
+    (files, entries.len() - files)
 }
 
 /// Result of an integrity test.
@@ -78,8 +90,6 @@ pub struct TestReport {
 pub struct TestResult {
     pub entry: String,
     pub is_dir: bool,
-    pub crc32_expected: Option<String>,
-    pub crc32_actual: Option<String>,
     pub passed: bool,
 }
 
