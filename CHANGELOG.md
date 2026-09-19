@@ -15,6 +15,11 @@
 - **Sortable columns**: clicking a table header sorts the current view by that
   column (asc/desc toggle), directories always first, numeric order for
   size/date. The properties dialog is also wider and taller.
+- **Format conversion**: `arkx convert <src> <dest>` re-packs any readable
+  archive into a writer-backed destination (zip/7z/tar.*): extract to a
+  temporary dir, then re-create with the existing backends and progressive
+  output. Single-file stream destinations are refused up front, as is
+  overwriting the source archive itself.
 
 ## v1.5.0 — archive editing: rename, copy/paste, open-with, integrity check
 

@@ -12,8 +12,8 @@ fn main() -> anyhow::Result<()> {
         match args[1].as_str() {
             "x" | "extract" | "l" | "list" | "a" | "create" | "c" | "compress" | "u" | "add"
             | "update" | "r" | "rm" | "d" | "delete" | "remove" | "rn" | "rename" | "t"
-            | "test" | "o" | "open" | "w" | "wipe" | "mk" | "mkdir" | "--help" | "-h"
-            | "--version" | "-V" => return run_cli(args),
+            | "test" | "o" | "open" | "w" | "wipe" | "mk" | "mkdir" | "convert" | "--help"
+            | "-h" | "--version" | "-V" => return run_cli(args),
             _ => {
                 // An existing file argument goes to the GUI (handled by ui)
                 let p = std::path::Path::new(&args[1]);
@@ -92,6 +92,11 @@ Commands:
                                    window (auto-closes, then notifies).
                                     (Ark parity: Compress to zip.../tar.gz.../7zip...)
 
+  convert <src> <dest>             Re-pack one archive into another format
+               [-l <0-9>]          (zip/7z/tar.* destinations); temp extraction
+               [-p <password>]     Password for encrypted input/output
+               [--threads <N>]
+
   (no arguments)                   Launch the GUI
   arkx <archive>                   Launch the GUI and open the archive
 
@@ -111,6 +116,7 @@ Examples:
   arkx remove archive.zip docs/backup.txt        # delete an entry
   arkx compress --here --format=zip docs/        # docs.zip next to docs/
   arkx compress --dialog photos/                  # Compress to... (kdialog)
+  arkx convert old.rar new.zip                   # re-pack into another format
   arkx extract --here download.zip               # Extract here
   arkx archive.tar.gz              # open GUI
 
@@ -755,6 +761,148 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
                     humansize::BINARY
                 )
+            );
+        }
+        "convert" => {
+            if args.len() < 4 {
+                eprintln!(
+                    "Usage: arkx convert <src> <dest.zip|dest.7z|dest.tar.gz> [-l 0-9] [-p password] [--threads N]"
+                );
+                std::process::exit(1);
+            }
+            let src = PathBuf::from(&args[2]);
+            let dest = PathBuf::from(&args[3]);
+            if !src.exists() {
+                eprintln!("Source not found: {}", src.display());
+                std::process::exit(1);
+            }
+            let mut level = 6u8;
+            let mut password: Option<String> = None;
+            let mut threads: Option<usize> = None;
+            let mut i = 4;
+            while i < args.len() {
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+                if consumed > 0 {
+                    i += consumed;
+                    continue;
+                }
+                match args[i].as_str() {
+                    "-l" | "--level" => {
+                        if let Some(v) = args.get(i + 1) {
+                            level = parse_level_or_exit(v);
+                            i += 2;
+                            continue;
+                        }
+                        eprintln!("-l/--level requires a value (0-9)");
+                        std::process::exit(1);
+                    }
+                    s if s.starts_with('-') => {
+                        eprintln!("Unknown flag: {}", s);
+                        std::process::exit(1);
+                    }
+                    _ => {
+                        eprintln!("Unexpected argument: {}", args[i]);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            // Single-file streams cannot hold a full tree; refuse before the
+            // expensive extract so the user is not left waiting pointlessly.
+            if matches!(
+                crate::core::detector::detect_format(&dest),
+                crate::core::detector::ArchiveFormat::Gz
+                    | crate::core::detector::ArchiveFormat::Bz2
+                    | crate::core::detector::ArchiveFormat::Xz
+                    | crate::core::detector::ArchiveFormat::Zst
+                    | crate::core::detector::ArchiveFormat::Lz4
+            ) {
+                eprintln!(
+                    "Cannot convert to a single-file stream; use .tar.gz/.tar.bz2/.tar.xz/... instead"
+                );
+                std::process::exit(1);
+            }
+            // Refuse to clobber the very archive being converted.
+            let src_abs = std::fs::canonicalize(&src).map_err(ArkxError::Io)?;
+            let dest_abs = std::fs::canonicalize(&dest).ok().or_else(|| {
+                dest.parent()
+                    .filter(|p| !p.as_os_str().is_empty())
+                    .and_then(|p| std::fs::canonicalize(p).ok())
+                    .map(|p| p.join(dest.file_name().unwrap_or_default()))
+            });
+            if dest_abs.as_ref() == Some(&src_abs) {
+                eprintln!(
+                    "Refusing to overwrite the source archive: {}",
+                    src.display()
+                );
+                std::process::exit(1);
+            }
+            crate::core::util::set_thread_override(threads);
+
+            let info = backend.detect_and_list(&src)?;
+            println!(
+                "Converting {} ({}) -> {} (level {}, {} threads)...",
+                src.display(),
+                info.format,
+                dest.display(),
+                level,
+                crate::core::util::effective_threads()
+            );
+            // Working dir under the system temp dir; cleaned up on every
+            // path (success or error). Same pid convention as the rest of the
+            // codebase, so a leftover from a previous crash is simply re-used.
+            let tmp_dir = std::env::temp_dir().join(format!("arkx-convert-{}", std::process::id()));
+            if tmp_dir.exists() {
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+            }
+            std::fs::create_dir_all(&tmp_dir).map_err(ArkxError::Io)?;
+
+            let progress = |p: crate::core::archive::ProgressInfo| {
+                print!(
+                    "\r  {:>7} {}",
+                    crate::core::util::format_percent(p.percent, p.current, p.total),
+                    p.file
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+            };
+            let result = (|| -> anyhow::Result<(f32, u64)> {
+                backend.extract(
+                    &src,
+                    &tmp_dir,
+                    None,
+                    password.as_deref(),
+                    Some(Box::new(progress)),
+                )?;
+                let mut sources = Vec::new();
+                for entry in std::fs::read_dir(&tmp_dir).map_err(ArkxError::Io)? {
+                    sources.push(entry.map_err(ArkxError::Io)?.path());
+                }
+                if sources.is_empty() {
+                    return Err(anyhow::anyhow!(
+                        "nothing to convert: {} is empty",
+                        src.display()
+                    ));
+                }
+                backend.create(
+                    &dest,
+                    &sources,
+                    level,
+                    password.as_deref(),
+                    Some(Box::new(progress)),
+                )?;
+                Ok((
+                    std::time::Instant::now().elapsed().as_secs_f32(),
+                    std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
+                ))
+            })();
+            let _ = std::fs::remove_dir_all(&tmp_dir);
+            let (secs, size) = result?;
+            println!(
+                "\nSaved {} ({}) in {:.2}s",
+                dest.display(),
+                humansize::format_size(size, humansize::BINARY),
+                secs
             );
         }
         _ => {
