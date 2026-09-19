@@ -2229,8 +2229,10 @@ fn properties_rows(info: &ArchiveInfo, selected: &[String]) -> Vec<(String, Stri
     rows
 }
 
-/// Modal dialog with archive + (single) selected-entry properties, fed by the
-/// entry data already in memory (no job, no backend round-trip).
+/// Secondary modal window with archive + (single) selected-entry properties,
+/// fed by the entry data already in memory (no job, no backend round-trip).
+/// Sized to its content — no scrolling — unlike an AlertDialog, which caps its
+/// height and forces the rows into a scroll viewport.
 fn show_properties(ui: &Ui) {
     let st = ui.state.borrow();
     let Some(info) = st.current_info.clone() else {
@@ -2267,12 +2269,26 @@ fn show_properties(ui: &Ui) {
         row.append(&val);
         body.append(&row);
     }
-    let scroll = gtk::ScrolledWindow::new();
-    scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
-    scroll.set_max_content_height(760);
-    scroll.set_min_content_width(520);
-    scroll.set_child(Some(&body));
-    let dialog = adw::AlertDialog::new(Some("Archive properties"), None);
+
+    let window: gtk::Window = gtk::Window::builder()
+        .modal(true)
+        .title("Archive properties")
+        .default_width(560)
+        .transient_for(&ui.window)
+        .build();
+
+    let header = adw::HeaderBar::new();
+    header.set_show_end_title_buttons(true);
+    if !is_zip {
+        let ok_btn = gtk::Button::with_label("OK");
+        ok_btn.add_css_class("suggested-action");
+        let window_ok = window.clone();
+        ok_btn.connect_clicked(move |_| window_ok.close());
+        header.pack_end(&ok_btn);
+    }
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.append(&header);
+    content.append(&body);
     if is_zip {
         let cbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         let entry = gtk::Entry::new();
@@ -2285,20 +2301,18 @@ fn show_properties(ui: &Ui) {
         cbox.append(&save);
         body.append(&cbox);
         let ui_c = ui.clone();
-        let dialog_c = dialog.clone();
+        let window_c = window.clone();
         let path = PathBuf::from(&info.path);
         save.connect_clicked(move |_| {
             ui_c.worker.borrow_mut().submit(JobKind::SetComment {
                 archive: path.clone(),
                 comment: entry.text().to_string(),
             });
-            dialog_c.close();
+            window_c.close();
         });
     }
-    dialog.set_extra_child(Some(&scroll));
-    dialog.add_response("ok", "OK");
-    dialog.set_default_response(Some("ok"));
-    dialog.present(Some(&ui.window));
+    window.set_child(Some(&content));
+    window.present();
 }
 
 #[cfg(test)]

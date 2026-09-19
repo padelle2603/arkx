@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Archive properties as a full window**: the properties view is now a
+  resizable secondary window sized to its content instead of a scrollable
+  alert dialog, so every row is visible at once (no scrolling).
 - **Visually hidden cut entries**: after a *Cut* the selected entries disappear
   from the view until the pending paste is submitted; a successful paste keeps
   them out (they moved away), a failed paste restores them in place — the
