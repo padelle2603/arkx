@@ -365,3 +365,179 @@ fn zip_aes_roundtrip() {
     );
     assert!(!out_bad.join("src/hello.txt").exists());
 }
+
+#[test]
+fn nested_new_folder_zip_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("nf.zip");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
+
+    // A single dialog name may now contain nested components.
+    bm.new_folder(&archive, "a/b/c/", None).unwrap();
+
+    let info = bm.detect_and_list(&archive).unwrap();
+    assert!(info.entries.iter().any(|e| e.path == "a/b/c/"));
+
+    let out = tmp.path().join("out_nf");
+    bm.extract(&archive, &out, None, None, None).unwrap();
+    assert!(out.join("a/b/c").is_dir());
+}
+
+#[test]
+fn nested_new_folder_rejects_traversal() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("nf-unsafe.zip");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
+
+    for bad in ["a/../b", "a/..", "a//b", ".."] {
+        let err = bm
+            .new_folder(&archive, &format!("{bad}/"), None)
+            .unwrap_err();
+        assert!(
+            matches!(err, arkx::core::error::ArkxError::InvalidInput(_)),
+            "{bad}: got {err}"
+        );
+    }
+}
+
+#[test]
+fn nested_new_folder_7z_roundtrip() {
+    if seven_available() != Some(true) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("nf.7z");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
+
+    bm.new_folder(&archive, "a/b/c/", None).unwrap();
+    // 7z lists directories without the trailing slash (Attributes flag).
+    assert!(bm
+        .detect_and_list(&archive)
+        .unwrap()
+        .entries
+        .iter()
+        .any(|e| e.is_dir && e.path.trim_end_matches('/') == "a/b/c"));
+}
+
+#[test]
+fn entry_hashes_zip_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("hash.zip");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
+
+    let h = bm.entry_hashes(&archive, "src/hello.txt", None).unwrap();
+    assert_eq!(
+        h.sha256,
+        "f95e87c2239da6717a2b71cf68536cc4af7756e23d56926303e82241a2a43f3e"
+    );
+    assert_eq!(h.md5, "e5951fdef328cbcd64e3f31dbdbe1f5b");
+    assert_eq!(
+        bm.entry_hashes(&archive, "src/hello.txt", None)
+            .unwrap()
+            .sha256,
+        h.sha256
+    );
+}
+
+#[test]
+fn entry_hashes_7z_roundtrip() {
+    if seven_available() != Some(true) {
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("hash.7z");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, None, None, None).unwrap();
+
+    let h = bm.entry_hashes(&archive, "src/hello.txt", None).unwrap();
+    assert_eq!(
+        h.sha256,
+        "f95e87c2239da6717a2b71cf68536cc4af7756e23d56926303e82241a2a43f3e"
+    );
+    assert_eq!(h.md5, "e5951fdef328cbcd64e3f31dbdbe1f5b");
+}
+
+fn seven_available() -> Option<bool> {
+    Some(tool_in_path(&["7z", "7zz"]))
+}
+
+fn tool_in_path(names: &[&str]) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    for dir in std::env::split_paths(&path) {
+        for name in names {
+            if dir.join(name).is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn zip_volume_split_uses_info_zip_when_installed() {
+    if !tool_in_path(&["zip"]) {
+        eprintln!("Info-ZIP `zip` not found: skipping volume-split test");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("data.bin");
+    fs::write(&src, vec![0x5A; 128 * 1024]).unwrap();
+    let archive = tmp.path().join("vol.zip");
+
+    let bm = backend();
+    // 10k volumes on a 128k file force several parts.
+    bm.create(&archive, &[src], 6, None, Some("10k"), None)
+        .unwrap();
+
+    // Info-ZIP naming: vol.z01, vol.z02, …, vol.zip (last part).
+    let mut parts = 0;
+    for n in 1..=99 {
+        let part = tmp.path().join(format!("vol.z{n:02}"));
+        if part.is_file() {
+            parts += 1;
+        } else {
+            break;
+        }
+    }
+    assert!(parts >= 1, "expected at least one .zNN volume");
+    assert!(archive.is_file(), "expected the last part to be vol.zip");
+}
+
+#[test]
+fn rar_volume_split_uses_rar_when_installed() {
+    if !tool_in_path(&["rar"]) {
+        eprintln!("`rar` not found: skipping volume-split test");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("data.bin");
+    fs::write(&src, vec![0x5A; 128 * 1024]).unwrap();
+    let archive = tmp.path().join("vol.rar");
+
+    let bm = backend();
+    bm.create(&archive, &[src], 6, None, Some("10k"), None)
+        .unwrap();
+
+    // rar -v naming: vol.part1.rar, vol.part2.rar, … (no base file).
+    assert!(
+        tmp.path().join("vol.part1.rar").is_file(),
+        "expected vol.part1.rar"
+    );
+    assert!(!archive.exists(), "rar -v produces parts, not a base file");
+}

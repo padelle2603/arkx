@@ -69,6 +69,11 @@ pub enum JobKind {
         archive: PathBuf,
         comment: String,
     },
+    EntryHash {
+        archive: PathBuf,
+        entry: String,
+        password: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -89,4 +94,9 @@ pub enum JobResult {
     Paste,
     SecureDelete,
     Comment,
+    EntryHash {
+        entry: String,
+        sha256: String,
+        md5: String,
+    },
 }

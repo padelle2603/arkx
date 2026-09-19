@@ -61,6 +61,7 @@ impl WorkerPool {
                     JobKind::OpenWith { .. } => "open-with",
                     JobKind::SecureDelete { .. } => "secure-delete",
                     JobKind::SetComment { .. } => "comment",
+                    JobKind::EntryHash { .. } => "hash",
                 }
                 .to_string();
                 let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -251,6 +252,18 @@ impl WorkerPool {
             JobKind::SetComment { archive, comment } => {
                 backend.set_comment(&archive, &comment)?;
                 Ok(JobResult::Comment)
+            }
+            JobKind::EntryHash {
+                archive,
+                entry,
+                password,
+            } => {
+                let h = backend.entry_hashes(&archive, &entry, password.as_deref())?;
+                Ok(JobResult::EntryHash {
+                    entry,
+                    sha256: h.sha256,
+                    md5: h.md5,
+                })
             }
             JobKind::Paste {
                 archive,

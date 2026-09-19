@@ -76,6 +76,13 @@ pub fn count_files_dirs(entries: &[ArchiveEntry]) -> (usize, usize) {
     (files, entries.len() - files)
 }
 
+/// SHA-256 and MD5 digests of a single archive entry's decompressed bytes.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntryHashes {
+    pub sha256: String,
+    pub md5: String,
+}
+
 /// Result of an integrity test.
 #[derive(Debug, Clone)]
 pub struct TestReport {

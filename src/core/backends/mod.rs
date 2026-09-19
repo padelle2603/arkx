@@ -1,6 +1,7 @@
 pub mod bsdtar;
 pub mod native;
 pub mod seven_zip;
+pub mod tools;
 
 use super::archive::{ArchiveBackend, ArchiveInfo, ProgressInfo};
 use super::detector::{ArchiveFormat, BackendKind};
@@ -218,13 +219,25 @@ impl BackendManager {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let fmt = super::detector::detect_format(dest);
-        // Split volumes only make sense where 7z drives the archive; the native
-        // zip writer cannot split and the libarchive tree has no volume support.
-        if volume_size.is_some() && fmt != ArchiveFormat::SevenZip {
-            return Err(ArkxError::UnsupportedFormat(format!(
-                "split volumes are only supported for .7z destinations (got {fmt:?})\n\
-                 hint: use `arkx a dest.7z ... -v <size>`"
-            )));
+        // Multi-volume creation: 7z splits natively; .zip/.rar are delegated
+        // to Info-ZIP `zip` / `rar` (the Rust zip writer cannot split and
+        // RAR has no open writer). Anything else has no splitter at all.
+        if let Some(volume) = volume_size {
+            match fmt {
+                ArchiveFormat::Zip => {
+                    return tools::create_zip_split(dest, sources, volume, password);
+                }
+                ArchiveFormat::Rar => {
+                    return tools::create_rar_split(dest, sources, volume, password);
+                }
+                // SevenZip falls through to `seven.create` below (native -v).
+                ArchiveFormat::SevenZip => {}
+                _ => {
+                    return Err(ArkxError::UnsupportedFormat(format!(
+                        "split volumes are only supported for .7z/.zip/.rar destinations (got {fmt:?})"
+                    )));
+                }
+            }
         }
         if matches!(fmt.backend(), BackendKind::Libarchive) {
             // lzip/lzo/lrzip tar flavors: creation needs rare external
@@ -479,6 +492,32 @@ impl BackendManager {
                 "cannot open entries of {fmt:?} with an external app"
             ))),
         }
+    }
+
+    /// SHA-256 + MD5 of a single entry's decompressed bytes. Any format that
+    /// can extract a single entry works (zip/7z/rar/tar/…): the entry is
+    /// extracted to a fresh temp dir, then hashed from disk.
+    pub fn entry_hashes(
+        &self,
+        archive: &Path,
+        entry: &str,
+        password: Option<&str>,
+    ) -> Result<crate::core::archive::EntryHashes> {
+        if entry.ends_with('/') {
+            return Err(ArkxError::InvalidInput(entry.to_string()));
+        }
+        let tmp = crate::core::util::TaskTempDir::new("arkx-hash")?;
+        // Re-extract one entry (newest backend chain decides the format), like
+        // `open_with` does, then hash the extracted file.
+        let entry = entry.to_string();
+        self.extract(
+            archive,
+            &tmp,
+            Some(std::slice::from_ref(&entry)),
+            password,
+            None,
+        )?;
+        crate::core::util::hash_file(&tmp.join(crate::core::paths::normalize(&entry)))
     }
 
     /// Securely delete entries by overwriting them before removal.

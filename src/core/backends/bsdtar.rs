@@ -10,11 +10,6 @@ use crate::core::error::{ArkxError, Result};
 use crate::core::util::dir_size;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
-};
-use std::time::Duration;
 
 pub struct BsdtarBackend {
     bin: PathBuf,
@@ -28,12 +23,17 @@ impl BsdtarBackend {
     }
 
     fn is_available(&self) -> bool {
-        // `bsdtar`/`tar` resolved from PATH (or absolute fallback): probe once.
-        Command::new(&self.bin)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        // `bsdtar`/`tar` resolved from PATH (or absolute fallback): probe once
+        // per process, reusing the discovery already done by `locate_tar`.
+        use std::sync::OnceLock;
+        static AVAILABLE: OnceLock<bool> = OnceLock::new();
+        *AVAILABLE.get_or_init(|| {
+            Command::new(&self.bin)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
     }
 }
 
@@ -96,16 +96,6 @@ impl Default for BsdtarBackend {
     }
 }
 
-/// Prefix an entry name with `./` when it starts with `-`, so a hostile
-/// archive entry is never parsed as a tar switch.
-fn entry_arg(e: &str) -> String {
-    if e.starts_with('-') {
-        format!("./{e}")
-    } else {
-        e.to_string()
-    }
-}
-
 fn locate_tar() -> (PathBuf, bool) {
     use std::sync::OnceLock;
     static CACHE: OnceLock<(PathBuf, bool)> = OnceLock::new();
@@ -113,15 +103,9 @@ fn locate_tar() -> (PathBuf, bool) {
         .get_or_init(|| {
             // Inside an AppImage bsdtar ships next to us (like 7z): prefer a binary
             // beside the current executable, then PATH.
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(dir) = exe.parent() {
-                    for name in ["bsdtar", "tar"] {
-                        let p = dir.join(name);
-                        if p.is_file() {
-                            return (p, name == "bsdtar");
-                        }
-                    }
-                }
+            if let Some(p) = crate::core::backends::tools::sidecar_bin(&["bsdtar", "tar"]) {
+                let is_bsdtar = p.file_name().is_some_and(|n| n == "bsdtar");
+                return (p, is_bsdtar);
             }
             for name in ["bsdtar", "tar"] {
                 if let Ok(out) = Command::new(name).arg("--version").output() {
@@ -218,7 +202,7 @@ impl BsdtarBackend {
         cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
         if let Some(sel) = entries {
             for e in sel {
-                cmd.arg(entry_arg(e));
+                cmd.arg(crate::core::paths::entry_arg(e));
             }
         }
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -239,20 +223,7 @@ impl BsdtarBackend {
         // total from listing, done = dir_size(dest) - baseline).
         let total = self
             .list(archive)
-            .map(|i| match entries {
-                None => i.total_size,
-                Some(sel) => i
-                    .entries
-                    .iter()
-                    .filter(|e| {
-                        !e.is_dir
-                            && sel
-                                .iter()
-                                .any(|f| crate::core::paths::entry_matches(&e.path, f))
-                    })
-                    .map(|e| e.size)
-                    .fold(0u64, |a, b| a.saturating_add(b)),
-            })
+            .map(|i| crate::core::util::sum_selected(&i, entries))
             .unwrap_or(0);
         cb(ProgressInfo::preparing(total));
 
@@ -260,46 +231,18 @@ impl BsdtarBackend {
             .spawn()
             .map_err(|e| ArkxError::Backend(format!("spawn tar: {}", e)))?;
         let baseline = dir_size(dest);
-        let done = Arc::new(AtomicU64::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
-        let cb = Arc::new(std::sync::Mutex::new(cb));
-
-        let cb_poll = cb.clone();
-        let done_poll = done.clone();
-        let stop_poll = stop.clone();
-        let dest_poll = dest.to_path_buf();
-        let poll_handle = std::thread::spawn(move || {
-            let mut last = u64::MAX;
-            while !stop_poll.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(250));
-                let d = dir_size(&dest_poll).saturating_sub(baseline);
-                done_poll.store(d, Ordering::Relaxed);
-                if d != last {
-                    last = d;
-                    if let Ok(g) = cb_poll.lock() {
-                        g(ProgressInfo::new("Extracting…".to_string(), d, total));
-                    }
-                }
-            }
-        });
+        let poller = crate::core::util::spawn_extract_poller(dest, baseline, total, cb);
+        let cb = poller.cb.clone();
+        let stop = poller.stop.clone();
 
         // Drain pipes to avoid 64KB deadlock, then wait.
-        let out_handle = std::thread::spawn({
-            let mut out = child.stdout.take();
-            let mut err = child.stderr.take();
-            move || {
-                if let Some(o) = out.take() {
-                    crate::core::util::drain_reader(o);
-                }
-                if let Some(e) = err.take() {
-                    crate::core::util::drain_reader(e);
-                }
-            }
-        });
+        let out_handle = crate::core::util::spawn_drain_pipe(child.stdout.take());
+        let err_handle = crate::core::util::spawn_drain_pipe(child.stderr.take());
         let status = child.wait().map_err(ArkxError::Io)?;
-        stop.store(true, Ordering::Relaxed);
-        let _ = poll_handle.join();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = poller.handle.join();
         out_handle.join().ok();
+        err_handle.join().ok();
         if !status.success() {
             return Err(ArkxError::Backend(format!(
                 "extraction failed (code {:?})",

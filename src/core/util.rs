@@ -3,9 +3,11 @@
 //! Nothing is hardcoded for a specific machine: everything scales on CPU and RAM
 //! detected at runtime, with explicit override (`--threads` / `ARKX_THREADS`).
 
+use crate::core::archive::{ArchiveInfo, EntryHashes, ProgressInfo};
 use std::io::Read;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Global override (0 = auto). Set by `--threads`, read by backends.
 static THREAD_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
@@ -317,6 +319,115 @@ pub fn drain_reader(mut r: impl Read) {
     }
 }
 
+/// Drain an optional child pipe on a dedicated thread (avoids the 64KB pipe
+/// deadlock when the parent reads the other pipe itself).
+pub fn spawn_drain_pipe(r: Option<impl Read + Send + 'static>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        if let Some(r) = r {
+            drain_reader(r);
+        }
+    })
+}
+
+/// Sum of the sizes of the non-directory entries of `info` that match any of
+/// the filters in `sel` (`None` = all). Drives the extract progress total.
+pub fn sum_selected(info: &ArchiveInfo, sel: Option<&[String]>) -> u64 {
+    match sel {
+        None => info.total_size,
+        Some(sel) => info
+            .entries
+            .iter()
+            .filter(|e| {
+                !e.is_dir
+                    && sel
+                        .iter()
+                        .any(|f| crate::core::paths::entry_matches(&e.path, f))
+            })
+            .map(|e| e.size)
+            .fold(0u64, |a, b| a.saturating_add(b)),
+    }
+}
+
+/// Shared progress callback: `Box<dyn Fn(ProgressInfo) + Send>` behind a
+/// mutex, safe to clone into poller threads.
+pub type SharedCallback = Arc<Mutex<Box<dyn Fn(ProgressInfo) + Send>>>;
+
+/// Handle returned by [`spawn_extract_poller`]: drive the bar from `cb`, read
+/// the polled byte count from `done`, and stop the thread via `stop`.
+pub struct ExtractPoller {
+    pub cb: SharedCallback,
+    pub done: Arc<AtomicU64>,
+    pub stop: Arc<AtomicBool>,
+    pub handle: std::thread::JoinHandle<()>,
+}
+
+/// Spawn a background poller that drives the extract progress bar from the
+/// bytes written into `dest`: `done = dir_size(dest) - baseline` (the baseline
+/// sampled just before the child spawn, so an archive already in `dest`
+/// cancels out), polled every 250ms with change-throttling and capped at
+/// `total`. Shared by the 7z and bsdtar backends.
+pub fn spawn_extract_poller(
+    dest: &Path,
+    baseline: u64,
+    total: u64,
+    cb: Box<dyn Fn(ProgressInfo) + Send>,
+) -> ExtractPoller {
+    let cb: SharedCallback = Arc::new(Mutex::new(cb));
+    let done = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let (cb_poll, done_poll, stop_poll) = (cb.clone(), done.clone(), stop.clone());
+    let dest_poll = dest.to_path_buf();
+    let handle = std::thread::spawn(move || {
+        let mut last_emitted = u64::MAX;
+        while !stop_poll.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            let d = dir_size(&dest_poll).saturating_sub(baseline);
+            done_poll.store(d, Ordering::Relaxed);
+            if d != last_emitted {
+                last_emitted = d;
+                if let Ok(guard) = cb_poll.lock() {
+                    guard(ProgressInfo::new("Extracting…".to_string(), d, total));
+                }
+            }
+        }
+    });
+    ExtractPoller {
+        cb,
+        done,
+        stop,
+        handle,
+    }
+}
+
+/// SHA-256 + MD5 digests of a byte stream, computed in a single pass.
+pub fn hash_reader(mut r: impl Read) -> crate::core::error::Result<EntryHashes> {
+    use md5::Md5;
+    use sha2::{Digest, Sha256};
+    let mut sha256 = Sha256::new();
+    let mut md5 = Md5::new();
+    let mut buf = vec![0u8; 256 * 1024];
+    loop {
+        let n = r
+            .read(&mut buf)
+            .map_err(crate::core::error::ArkxError::Io)?;
+        if n == 0 {
+            break;
+        }
+        sha256.update(&buf[..n]);
+        md5.update(&buf[..n]);
+    }
+    Ok(EntryHashes {
+        sha256: format!("{:x}", sha256.finalize()),
+        md5: format!("{:x}", md5.finalize()),
+    })
+}
+
+/// SHA-256 + MD5 digests of a file on disk.
+pub fn hash_file(path: &Path) -> crate::core::error::Result<EntryHashes> {
+    let f = std::fs::File::open(path).map_err(crate::core::error::ArkxError::Io)?;
+    hash_reader(std::io::BufReader::new(f))
+}
+
 /// Read `r` streaming, splitting on `\r`/`\n`, invoking `on_line(&str)` per
 /// complete line (UTF-8-sensitive: a partial codepoint is dropped). Return
 /// `true` from `on_line` to stop early (used for cancellation).
@@ -420,6 +531,24 @@ mod tests {
         assert_eq!(truncate_middle("abcdefghijklmnop", 10), "abc...nop");
         // Multi-byte chars never split.
         assert_eq!(truncate_middle("àààààbcdefghij", 10), "ààà...hij");
+    }
+
+    #[test]
+    fn hash_reader_matches_known_vectors() {
+        // NIST/RFC vector: SHA-256("abc") and MD5("abc").
+        let h = hash_reader(&b"abc"[..]).unwrap();
+        assert_eq!(
+            h.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(h.md5, "900150983cd24fb0d6963f7d28e17f72");
+        // Streams longer than one read buffer still hash correctly.
+        let big = vec![0x5A_u8; 300_000];
+        let h2 = hash_reader(&big[..]).unwrap();
+        let mut expect = sha2::Sha256::new();
+        use sha2::Digest;
+        expect.update(&big);
+        assert_eq!(h2.sha256, format!("{:x}", expect.finalize()));
     }
 
     #[test]

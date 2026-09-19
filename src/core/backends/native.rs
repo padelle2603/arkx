@@ -466,6 +466,7 @@ impl NativeBackend {
         let mut processed_bytes = 0u64;
         // Reused across entries to avoid one 64KB allocation per file.
         let mut buf = vec![0u8; COPY_CHUNK];
+        let base = resolved_base(dest);
 
         for i in 0..zip.len() {
             // Encrypted entries are decrypted with the given password; a
@@ -492,7 +493,7 @@ impl NativeBackend {
             if processed_bytes.saturating_add(declared) > MAX_EXTRACTED_BYTES {
                 return Err(quota_error());
             }
-            let out_path = match secure_join(dest, &name) {
+            let out_path = match secure_join(dest, &base, &name) {
                 Some(p) => p,
                 None => {
                     eprintln!("[native] skipped unsafe entry: {}", name);
@@ -602,6 +603,7 @@ impl NativeBackend {
         ar.set_preserve_mtime(true);
 
         let filter = filter.map(|f| f.to_vec());
+        let base = resolved_base(dest);
 
         // Real total bytes (may be 0: no fake max(1)).
         let mut total_bytes = 0u64;
@@ -653,7 +655,7 @@ impl NativeBackend {
             // Regular files: chunked copy with throttled progress (not per-file)
             let is_file = entry.header().entry_type().is_file();
             if is_file {
-                let out_path = match secure_join(dest, &path_norm) {
+                let out_path = match secure_join(dest, &base, &path_norm) {
                     Some(p) => p,
                     None => {
                         eprintln!("[native] skipped unsafe entry: {}", path_raw);
@@ -714,7 +716,7 @@ impl NativeBackend {
                 // Directories, symlinks, others. The tar crate validates the
                 // destination path, but creates symlinks with the declared
                 // target verbatim: reject links that resolve outside `dest`.
-                let out_path = match secure_join(dest, &path_norm) {
+                let out_path = match secure_join(dest, &base, &path_norm) {
                     Some(p) => p,
                     None => {
                         eprintln!("[native] skipped unsafe entry: {}", path_raw);
@@ -941,11 +943,7 @@ impl NativeBackend {
             std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
         }
         if let Some(cb) = &progress {
-            cb(ProgressInfo::new(
-                "Completed".to_string(),
-                total.max(1),
-                total.max(1),
-            ));
+            cb(crate::core::util::completed(total));
         }
         // finish() writes the central directory but does NOT flush the BufWriter:
         // without explicit flush small zips (<1MB) stay truncated/empty.
@@ -1315,11 +1313,7 @@ impl NativeBackend {
             }
         }
         if let Some(cb) = &progress {
-            cb(ProgressInfo::new(
-                "Completed".to_string(),
-                total.max(1),
-                total.max(1),
-            ));
+            cb(crate::core::util::completed(total));
         }
         // Tar trailer (1024 zeros), then MANDATORY codec finish():
         // zstd (and in theory the others) leaves incomplete frames without finish.
@@ -1574,14 +1568,24 @@ fn create_tar_writer(file: File, fmt: &ArchiveFormat, level: u8) -> Result<TarWr
 }
 
 /// Maps user level 0-9 onto the zstd 1-22 scale.
-pub fn zstd_level(user: u8) -> i32 {
+fn zstd_level(user: u8) -> i32 {
     const TABLE: [i32; 10] = [1, 3, 5, 7, 9, 12, 15, 17, 19, 22];
     TABLE[user.clamp(0, 9) as usize]
 }
 
 /// Safe join under `dest`: normalizes and rejects `..` (zip-slip from hostile
 /// archives) and empty names. Returns `None` for entries to discard.
-fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
+/// Resolve `dest` once per extraction: `dest` may be reached through a
+/// symlink (e.g. a symlinked `~/Downloads`); all entry checks compare against
+/// this resolved form, otherwise every entry would be discarded.
+fn resolved_base(dest: &Path) -> PathBuf {
+    std::fs::canonicalize(dest).unwrap_or_else(|_| absolutize(dest))
+}
+
+/// Secure join of archive `name` into `dest`: `base` is the precomputed
+/// resolved form of `dest` (see [`resolved_base`]); `name` must be
+/// normalized to a relative path without `..`.
+fn secure_join(dest: &Path, base: &Path, name: &str) -> Option<PathBuf> {
     let norm = crate::core::paths::normalize(name);
     if norm.is_empty() {
         return None;
@@ -1592,16 +1596,12 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    // `dest` itself may be reached through a symlink (e.g. a symlinked
-    // `~/Downloads`): compare against its resolved form, otherwise every entry
-    // would be discarded and extraction would silently produce nothing.
-    let base = std::fs::canonicalize(dest).unwrap_or_else(|_| absolutize(dest));
     let full = dest.join(&norm);
     // Reject if any component along the path is a symlink that resolves
     // outside dest (zip-slip via symlinks).
     match std::fs::canonicalize(&full) {
         Ok(canonical) => {
-            if canonical.starts_with(&base) {
+            if canonical.starts_with(base) {
                 Some(full)
             } else {
                 None
@@ -1609,7 +1609,7 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
         }
         // File doesn't exist yet — check intermediate symlinks.
         Err(_) => {
-            let mut current = base.clone();
+            let mut current = base.to_path_buf();
             for component in Path::new(&norm).components() {
                 current = current.join(component);
                 // If this component exists, it must be under dest.
@@ -1618,7 +1618,7 @@ fn secure_join(dest: &Path, name: &str) -> Option<PathBuf> {
                         // Resolve symlink and verify target is under dest.
                         match std::fs::canonicalize(&current) {
                             Ok(canonical) => {
-                                if !canonical.starts_with(&base) {
+                                if !canonical.starts_with(base) {
                                     return None;
                                 }
                             }
@@ -1815,6 +1815,8 @@ impl NativeBackend {
         let mut results = Vec::new();
         let mut passed = 0usize;
         let mut failed = 0usize;
+        // Reused across entries to avoid one 64KB allocation per file.
+        let mut buf = vec![0u8; COPY_CHUNK];
         for i in 0..z.len() {
             let mut f = z
                 .by_index(i)
@@ -1835,7 +1837,6 @@ impl NativeBackend {
                 crc_expected
             } else {
                 let mut hasher = crc32fast::Hasher::new();
-                let mut buf = vec![0u8; COPY_CHUNK];
                 loop {
                     let n = f.read(&mut buf).map_err(ArkxError::Io)?;
                     if n == 0 {
@@ -1875,7 +1876,7 @@ impl NativeBackend {
         let mut f = z
             .by_index(idx)
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
-        let out_path = secure_join(temp_dir, entry).ok_or_else(|| {
+        let out_path = secure_join(temp_dir, &resolved_base(temp_dir), entry).ok_or_else(|| {
             crate::core::error::ArkxError::Backend(format!("unsafe entry path in archive: {entry}"))
         })?;
         if let Some(parent) = out_path.parent() {
@@ -1982,8 +1983,13 @@ impl NativeBackend {
         }
         {
             let mut f = File::create(archive).map_err(ArkxError::Io)?;
-            let zeros = vec![0u8; archive_len as usize];
-            f.write_all(&zeros).map_err(ArkxError::Io)?;
+            let zeros = vec![0u8; COPY_CHUNK];
+            let mut written = 0u64;
+            while written < archive_len {
+                let n = std::cmp::min(zeros.len() as u64, archive_len - written) as usize;
+                f.write_all(&zeros[..n]).map_err(ArkxError::Io)?;
+                written += n as u64;
+            }
             f.flush().map_err(ArkxError::Io)?;
         }
         std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
@@ -2136,12 +2142,19 @@ mod tests {
     #[test]
     fn secure_join_rejects_traversal() {
         let dest = Path::new("/tmp/dest");
-        assert!(secure_join(dest, "../../etc/passwd").is_none());
-        assert!(secure_join(dest, "a/../../x").is_none());
-        assert!(secure_join(dest, "").is_none());
-        assert_eq!(secure_join(dest, "a/b.txt").unwrap(), dest.join("a/b.txt"));
+        let base = resolved_base(dest);
+        assert!(secure_join(dest, &base, "../../etc/passwd").is_none());
+        assert!(secure_join(dest, &base, "a/../../x").is_none());
+        assert!(secure_join(dest, &base, "").is_none());
+        assert_eq!(
+            secure_join(dest, &base, "a/b.txt").unwrap(),
+            dest.join("a/b.txt")
+        );
         // Normalized absolute paths stay inside dest (no zip-slip).
-        assert_eq!(secure_join(dest, "/abs.txt").unwrap(), dest.join("abs.txt"));
+        assert_eq!(
+            secure_join(dest, &base, "/abs.txt").unwrap(),
+            dest.join("abs.txt")
+        );
     }
 
     #[test]
@@ -2156,7 +2169,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&outside, dest.join("link")).unwrap();
         assert!(
-            secure_join(&dest, "link/newfile.txt").is_none(),
+            secure_join(&dest, &resolved_base(&dest), "link/newfile.txt").is_none(),
             "symlinked intermediate escaping dest must be rejected"
         );
         // Symlink inside dest is allowed.
@@ -2164,7 +2177,7 @@ mod tests {
         std::os::unix::fs::symlink("sub", dest.join("inner_link")).unwrap();
         std::fs::create_dir(dest.join("sub")).unwrap();
         assert_eq!(
-            secure_join(&dest, "inner_link/file.txt").unwrap(),
+            secure_join(&dest, &resolved_base(&dest), "inner_link/file.txt").unwrap(),
             dest.join("inner_link/file.txt")
         );
     }
@@ -2400,16 +2413,17 @@ mod tests {
         let real = dir.path().join("real");
         std::fs::create_dir(&real).unwrap();
         // zip-slip and empty names are always rejected.
-        assert!(secure_join(&real, "../escape").is_none());
-        assert!(secure_join(&real, "a/../../escape").is_none());
-        assert!(secure_join(&real, "").is_none());
+        let real_base = resolved_base(&real);
+        assert!(secure_join(&real, &real_base, "../escape").is_none());
+        assert!(secure_join(&real, &real_base, "a/../../escape").is_none());
+        assert!(secure_join(&real, &real_base, "").is_none());
         #[cfg(unix)]
         {
             // A symlinked destination must still accept regular entries (bug:
             // every entry was silently discarded).
             let link = dir.path().join("link");
             std::os::unix::fs::symlink(&real, &link).unwrap();
-            assert!(secure_join(&link, "a/b.txt").is_some());
+            assert!(secure_join(&link, &resolved_base(&link), "a/b.txt").is_some());
         }
     }
 

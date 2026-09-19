@@ -1,12 +1,11 @@
 use crate::core::archive::{ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressInfo};
 use crate::core::detector::ArchiveFormat;
 use crate::core::error::{ArkxError, Result};
-use crate::core::paths;
 use crate::core::util::{dir_size, effective_threads};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
@@ -110,8 +109,8 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             cmd.arg(format!("-p{}", pw));
         }
         cmd.arg(&archive);
-        cmd.arg(entry_arg(old_name));
-        cmd.arg(entry_arg(new_name));
+        cmd.arg(crate::core::paths::entry_arg(old_name));
+        cmd.arg(crate::core::paths::entry_arg(new_name));
         let output = cmd
             .arg("-bsp0")
             .arg("-bso0")
@@ -141,7 +140,7 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         }
         if let Some(sel) = entries {
             for e in sel {
-                cmd.arg(entry_arg(e));
+                cmd.arg(crate::core::paths::entry_arg(e));
             }
         }
         cmd.arg(&archive);
@@ -199,16 +198,6 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             passed,
             failed,
         })
-    }
-}
-
-/// Prefix an entry name with `./` when it starts with `-`, so a hostile
-/// archive entry is never parsed as a 7z switch.
-fn entry_arg(e: &str) -> String {
-    if e.starts_with('-') {
-        format!("./{e}")
-    } else {
-        e.to_string()
     }
 }
 
@@ -336,15 +325,8 @@ fn which_7z() -> PathBuf {
         .get_or_init(|| {
             // Inside an AppImage the 7z binary ships next to us: prefer a `7z`
             // beside the current executable, then the system locations, then PATH.
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(dir) = exe.parent() {
-                    for name in ["7z", "7za", "7zr"] {
-                        let p = dir.join(name);
-                        if p.is_file() {
-                            return p;
-                        }
-                    }
-                }
+            if let Some(p) = crate::core::backends::tools::sidecar_bin(&["7z", "7za", "7zr"]) {
+                return p;
             }
             for p in ["/usr/bin/7z", "/usr/bin/7za", "/usr/bin/7zr"] {
                 if Path::new(p).exists() {
@@ -443,7 +425,7 @@ impl SevenZipBackend {
 
         if let Some(sel) = entries {
             for e in sel {
-                cmd.arg(entry_arg(e));
+                cmd.arg(crate::core::paths::entry_arg(e));
             }
         }
 
@@ -465,29 +447,10 @@ impl SevenZipBackend {
             cb(ProgressInfo::preparing(total));
 
             let baseline = dir_size(dest);
-            let cb_arc: SharedCallback = Arc::new(Mutex::new(cb));
-            let done = Arc::new(AtomicU64::new(0));
-            let stop = Arc::new(AtomicBool::new(false));
-
-            // Poll dest every 250ms: the only driver of the bar.
-            let cb_poll = cb_arc.clone();
-            let done_poll = done.clone();
-            let stop_poll = stop.clone();
-            let dest_poll = dest.to_path_buf();
-            let poll_handle = std::thread::spawn(move || {
-                let mut last_emitted = u64::MAX;
-                while !stop_poll.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(250));
-                    let d = dir_size(&dest_poll).saturating_sub(baseline);
-                    done_poll.store(d, Ordering::Relaxed);
-                    if d != last_emitted {
-                        last_emitted = d;
-                        if let Ok(guard) = cb_poll.lock() {
-                            guard(ProgressInfo::new("Extracting…".to_string(), d, total));
-                        }
-                    }
-                }
-            });
+            let poller = crate::core::util::spawn_extract_poller(dest, baseline, total, cb);
+            let cb_arc = poller.cb.clone();
+            let done = poller.done.clone();
+            let stop = poller.stop.clone();
 
             // Drain stderr on a separate thread to avoid pipe deadlock (64KB).
             let (stderr_arc, stderr_handle) = drain_stderr(child.stderr.take());
@@ -515,7 +478,7 @@ impl SevenZipBackend {
                 });
             }
             stop.store(true, Ordering::Relaxed);
-            let _ = poll_handle.join();
+            let _ = poller.handle.join();
             let status = child.wait().map_err(ArkxError::Io)?;
             let _ = stderr_handle.join();
             let code = status.code().unwrap_or(-1);
@@ -606,15 +569,7 @@ impl SevenZipBackend {
             Ok(i) => i,
             Err(_) => return 0,
         };
-        match filter {
-            None => info.total_size,
-            Some(sel) => info
-                .entries
-                .iter()
-                .filter(|e| !e.is_dir && sel.iter().any(|f| paths::entry_matches(&e.path, f)))
-                .map(|e| e.size)
-                .fold(0u64, |a, b| a.saturating_add(b)),
-        }
+        crate::core::util::sum_selected(&info, filter)
     }
 
     fn create_inner(
@@ -699,14 +654,7 @@ impl SevenZipBackend {
         cb(ProgressInfo::preparing(total));
 
         // Drain stderr on a separate thread to avoid pipe deadlock (64KB).
-        let stderr_handle = std::thread::spawn({
-            let mut stderr = child.stderr.take();
-            move || {
-                if let Some(err) = stderr.take() {
-                    crate::core::util::drain_reader(err);
-                }
-            }
-        });
+        let stderr_handle = crate::core::util::spawn_drain_pipe(child.stderr.take());
 
         let cb_shared: SharedCallback = std::sync::Arc::new(Mutex::new(cb));
         let tracker: std::sync::Arc<std::sync::Mutex<CreateProgress>> =
@@ -785,11 +733,7 @@ impl SevenZipBackend {
         }
         // Final 100% (the only allowed jump: last value → 100).
         if let Ok(g) = cb_shared.lock() {
-            g(ProgressInfo::new(
-                "Completed".to_string(),
-                total.max(1),
-                total.max(1),
-            ));
+            g(crate::core::util::completed(total));
         }
         Ok(())
     }
@@ -872,7 +816,7 @@ impl SevenZipBackend {
         let _staging = if let Some(parent) = common_parent {
             for (s, name) in sources {
                 input_paths.push(s.clone());
-                cmd.arg(entry_arg(name));
+                cmd.arg(crate::core::paths::entry_arg(name));
             }
             cmd.current_dir(&parent);
             None
@@ -883,7 +827,7 @@ impl SevenZipBackend {
                 let _ = std::fs::create_dir_all(dest.parent().unwrap_or(dir.path()));
                 copy_out(s, &dest)?;
                 input_paths.push(dest.clone());
-                cmd.arg(entry_arg(name));
+                cmd.arg(crate::core::paths::entry_arg(name));
             }
             cmd.current_dir(dir.path());
             Some(dir)
@@ -913,14 +857,7 @@ impl SevenZipBackend {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| ArkxError::Backend(e.to_string()))?;
 
-        let stderr_handle = std::thread::spawn({
-            let mut stderr = child.stderr.take();
-            move || {
-                if let Some(err) = stderr.take() {
-                    crate::core::util::drain_reader(err);
-                }
-            }
-        });
+        let stderr_handle = crate::core::util::spawn_drain_pipe(child.stderr.take());
 
         let cb_shared: SharedCallback = Arc::new(Mutex::new(cb));
         let tracker: Arc<Mutex<CreateProgress>> = Arc::new(Mutex::new(CreateProgress::new(
@@ -961,11 +898,7 @@ impl SevenZipBackend {
         }
         // Final 100% (the only allowed jump: last value → 100).
         if let Ok(g) = cb_shared.lock() {
-            g(ProgressInfo::new(
-                "Completed".to_string(),
-                total.max(1),
-                total.max(1),
-            ));
+            g(crate::core::util::completed(total));
         }
         Ok(())
     }
@@ -998,7 +931,7 @@ impl SevenZipBackend {
         }
         cmd.arg(&archive);
         for name in entries {
-            cmd.arg(entry_arg(name));
+            cmd.arg(crate::core::paths::entry_arg(name));
         }
 
         if let Some(cb) = &progress {

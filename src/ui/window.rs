@@ -12,9 +12,9 @@ use crate::core::error::ArkxError;
 use crate::core::paths;
 use crate::core::util::truncate_middle;
 use crate::ui::browser::{
-    apply_responsive_visibility, create_empty_state, create_table_header, filter_list,
-    get_all_descendants, get_children, navigate_up, populate_current_view, set_responsive,
-    update_breadcrumb, AppState,
+    apply_responsive_visibility, base_name, create_empty_state, create_table_header, filter_list,
+    get_all_descendants, get_children, navigate_up, populate_current_view, rename_path,
+    set_responsive, update_breadcrumb, AppState,
 };
 use crate::ui::dialogs;
 use crate::ui::progress_window::ProgressWindow;
@@ -66,6 +66,11 @@ struct Ui {
     /// Set when an archive is opened; the next successful List runs the
     /// background integrity check once.
     auto_test: Rc<RefCell<bool>>,
+    /// Single selected file awaiting its background SHA-256/MD5 computation
+    /// (properties window), and the live labels to fill in.
+    entry_hash_target: Rc<RefCell<Option<String>>>,
+    entry_hash_sha: Rc<RefCell<Option<gtk::Label>>>,
+    entry_hash_md5: Rc<RefCell<Option<gtk::Label>>>,
 }
 
 // Builds the main UI
@@ -138,6 +143,7 @@ pub fn build_ui(app: &adw::Application) {
         sort_col: crate::ui::browser::SortCol::Name,
         sort_asc: true,
         cut_hidden: Vec::new(),
+        editing_path: None,
     }));
 
     let worker = Rc::new(RefCell::new(WorkerPool::new()));
@@ -433,6 +439,9 @@ pub fn build_ui(app: &adw::Application) {
         open: open_btn.clone(),
         window: window.clone(),
         auto_test: Rc::new(RefCell::new(false)),
+        entry_hash_target: Rc::new(RefCell::new(None)),
+        entry_hash_sha: Rc::new(RefCell::new(None)),
+        entry_hash_md5: Rc::new(RefCell::new(None)),
     };
 
     // === DRAG & DROP ===
@@ -755,6 +764,10 @@ pub fn build_ui(app: &adw::Application) {
     let ui_nav = ui.clone();
     let open_menu_row = open_menu.clone();
     list_box.connect_row_activated(move |_lb, row| {
+        // While an inline rename is active ignore double clicks on the row.
+        if ui_nav.state.borrow().editing_path.is_some() {
+            return;
+        }
         // A row activation repopulates the list; never leave a (possibly
         // closed) context popover parented to it while its children are rebuilt.
         dismiss_context_menu(&open_menu_row);
@@ -1062,11 +1075,20 @@ pub fn build_ui(app: &adw::Application) {
         });
     });
 
+    // Global key controller, owned here so the inline rename can drop it from
+    // the window while editing and re-add it afterwards.
+    let shortcut_controller = gtk::ShortcutController::new();
+
     // --- Rename ---
     let ui_rn = ui.clone();
     let open_menu_rn = open_menu.clone();
+    let rn_window = window.clone();
+    let rn_shortcuts = shortcut_controller.clone();
     action_rename.connect_activate(move |_, _| {
         if dismiss_and_check_idle(&ui_rn, &open_menu_rn) {
+            return;
+        }
+        if ui_rn.state.borrow().editing_path.is_some() {
             return;
         }
         let st = ui_rn.state.borrow();
@@ -1075,6 +1097,7 @@ pub fn build_ui(app: &adw::Application) {
             None => return,
         };
         let selected = st.selected_entries.clone();
+        let info = st.current_info.clone();
         drop(st);
         if selected.len() != 1 {
             ui_rn
@@ -1083,69 +1106,135 @@ pub fn build_ui(app: &adw::Application) {
             return;
         }
         let old_name = selected[0].clone();
-        let trimmed = old_name.trim_end_matches('/');
-        let name = trimmed.rsplit('/').next().unwrap_or(trimmed);
-        let name = name.rsplit('\\').next().unwrap_or(name);
-        let dialog = adw::AlertDialog::new(
-            Some("Rename entry"),
-            Some("Enter the new name for the selected entry"),
-        );
+        let Some(bx) = find_row_box(&ui_rn.list, &old_name) else {
+            return;
+        };
+        // Row children: [icon, name label, size, date, method, arrows].
+        let (Some(icon), Some(name_widget)) = (
+            bx.first_child(),
+            bx.first_child().and_then(|w| w.next_sibling()),
+        ) else {
+            return;
+        };
+        let name_label = match name_widget.downcast::<gtk::Label>() {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+
+        // Swap the row's name label for an inline editor.
+        let base = base_name(&old_name);
         let entry = gtk::Entry::new();
-        entry.set_text(name);
+        entry.set_text(&base);
+        entry.set_hexpand(true);
+        entry.set_hexpand_set(true);
+        entry.set_width_chars(base.chars().count() as i32);
         entry.select_region(0, i32::MAX);
-        entry.set_margin_top(12);
-        entry.set_margin_bottom(12);
-        entry.set_margin_start(12);
-        entry.set_margin_end(12);
-        dialog.set_extra_child(Some(&entry));
-        dialog.add_response("cancel", "Cancel");
-        dialog.add_response("rename", "Rename");
-        dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
-        dialog.set_default_response(Some("rename"));
-        dialog.set_close_response("cancel");
-        dialog.set_response_enabled("rename", !entry.text().is_empty());
-        let entry_c = entry.clone();
-        let dialog_c = dialog.clone();
-        entry.connect_changed(move |_| {
-            dialog_c.set_response_enabled("rename", !entry_c.text().is_empty());
-        });
-        let ui_rn_c = ui_rn.clone();
-        let archive_c = archive.clone();
-        dialog.connect_response(None, move |_, resp| {
-            if resp == "rename" {
-                let new_base = entry.text().to_string();
-                if new_base.is_empty() {
+        rn_window.remove_controller(&rn_shortcuts);
+        bx.remove(&name_label);
+        bx.insert_child_after(&entry, Some(&icon));
+        {
+            let mut st = ui_rn.state.borrow_mut();
+            st.editing_path = Some(old_name.clone());
+        }
+
+        // Shared teardown (cancel, or right after a successful submit):
+        // restore the label, clear the edit state, re-arm the shortcuts.
+        let end: Rc<dyn Fn()> = {
+            let ui_c = ui_rn.clone();
+            let window_c = rn_window.clone();
+            let shortcuts_c = rn_shortcuts.clone();
+            let bx_c = bx.clone();
+            let icon_c = icon.clone();
+            let label_c = name_label.clone();
+            let entry_c = entry.clone();
+            Rc::new(move || {
+                if ui_c.state.borrow().editing_path.is_none() {
                     return;
                 }
-                // A plain base name renames in place (keep the enclosing
-                // folder); an explicit path ("a/b") moves the entry.
-                let trimmed = old_name.trim_end_matches('/');
-                let new_name = if new_base.contains('/') || new_base.contains('\\') {
-                    new_base
-                } else {
-                    match trimmed.rfind('/') {
-                        Some(i) => format!("{}/{}", &trimmed[..=i], new_base),
-                        None => new_base,
+                {
+                    let mut st = ui_c.state.borrow_mut();
+                    st.editing_path = None;
+                }
+                bx_c.remove(&entry_c);
+                bx_c.insert_child_after(&label_c, Some(&icon_c));
+                window_c.add_controller(shortcuts_c.clone());
+            })
+        };
+
+        // Enter commits (empty = cancel, duplicate name = warn and keep the
+        // edit active).
+        {
+            let ui_c = ui_rn.clone();
+            let archive_c = archive.clone();
+            let old_c = old_name.clone();
+            let info_c = info.clone();
+            let entry_c = entry.clone();
+            let end_c = end.clone();
+            entry.connect_activate(move |_| {
+                let new_base = entry_c.text().trim().to_string();
+                if new_base.is_empty() {
+                    end_c();
+                    return;
+                }
+                let new_name = rename_path(&old_c, &new_base);
+                if new_name == old_c {
+                    end_c();
+                    return;
+                }
+                if let Some(i) = &info_c {
+                    if i.entries.iter().any(|e| e.path == new_name) {
+                        end_c();
+                        let dialog = adw::AlertDialog::new(
+                            Some("Rename"),
+                            Some("An entry with this name already exists."),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.set_default_response(Some("ok"));
+                        dialog.present(Some(&ui_c.window));
+                        return;
                     }
-                };
-                // Folders keep their trailing slash so `normalize` matches.
-                let new_name = if old_name.ends_with('/') {
-                    crate::core::paths::with_trailing_slash(&new_name)
-                } else {
-                    new_name
-                };
-                ui_rn_c
-                    .status_left
+                }
+                ui_c.status_left
                     .set_text(&format!("Renaming '{}'…", new_name));
-                ui_rn_c.worker.borrow_mut().submit(JobKind::Rename {
+                end_c();
+                ui_c.worker.borrow_mut().submit(JobKind::Rename {
                     archive: archive_c.clone(),
-                    old_name: old_name.clone(),
+                    old_name: old_c.clone(),
                     new_name,
                     password: None,
                 });
-            }
-        });
-        dialog.present(Some(&ui_rn.window));
+            });
+        }
+
+        // Escape cancels.
+        {
+            let end_c = end.clone();
+            let key_ctrl = gtk::EventControllerKey::new();
+            key_ctrl.connect_key_pressed(move |_ctrl, keyval, _code, _mods| {
+                if keyval == gdk::Key::Escape {
+                    end_c();
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+            entry.add_controller(key_ctrl);
+        }
+
+        // Clicking elsewhere cancels too (no-op if a commit already did it).
+        {
+            let ui_c = ui_rn.clone();
+            let end_c = end.clone();
+            let focus = gtk::EventControllerFocus::new();
+            focus.connect_leave(move |_| {
+                if ui_c.state.borrow().editing_path.is_some() {
+                    end_c();
+                }
+            });
+            entry.add_controller(focus);
+        }
+
+        entry.grab_focus();
     });
 
     // --- Copy entry ---
@@ -1315,13 +1404,15 @@ pub fn build_ui(app: &adw::Application) {
         dialog.connect_response(None, move |_, resp| {
             if resp == "create" {
                 let name = entry.text().trim().to_string();
-                // Single component only: no traversal or nesting from a
-                // trusted-input dialog; the CLI `mkdir` handles real paths.
+                // Nested paths ("a/b/c") are allowed; traversal ("..") and
+                // absolute or Windows-style components are not. The backend
+                // normalizes/validates the resulting path before writing.
                 let valid = !name.is_empty()
                     && name != "."
                     && name != ".."
-                    && !name.contains('/')
-                    && !name.contains('\\');
+                    && !name.contains('\\')
+                    && !name.starts_with('/')
+                    && !name.split('/').any(|c| c == "..");
                 if !valid {
                     ui_nf_c.status_left.set_text("Invalid folder name");
                     return;
@@ -1351,7 +1442,6 @@ pub fn build_ui(app: &adw::Application) {
     });
 
     // Shortcuts
-    let shortcut_controller = gtk::ShortcutController::new();
     let ui_open_key = ui.clone();
     let action_open = gio::SimpleAction::new("open", None);
     action_open.connect_activate(move |_, _| {
@@ -1375,12 +1465,20 @@ pub fn build_ui(app: &adw::Application) {
             glib::Propagation::Stop
         })),
     ));
-    // Rename with F2
+    // Rename with F2 or Alt+F2
     let action_rename_sc = action_rename.clone();
     shortcut_controller.add_shortcut(gtk::Shortcut::new(
         Some(gtk::ShortcutTrigger::parse_string("F2").unwrap()),
         Some(gtk::CallbackAction::new(move |_, _| {
             action_rename_sc.activate(None);
+            glib::Propagation::Stop
+        })),
+    ));
+    let action_rename_sc2 = action_rename.clone();
+    shortcut_controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string("<Alt>F2").unwrap()),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            action_rename_sc2.activate(None);
             glib::Propagation::Stop
         })),
     ));
@@ -1618,6 +1716,22 @@ pub fn build_ui(app: &adw::Application) {
                             *ui_poll.is_busy.borrow_mut() = false;
                             set_idle_sensitivity(&ui_poll);
                         }
+                        Ok(JobResult::EntryHash { entry, sha256, md5 }) => {
+                            // Fill the properties-dialog hash rows when this is
+                            // still the entry they were requested for.
+                            *ui_poll.pending_password.borrow_mut() = false;
+                            let target = ui_poll.entry_hash_target.borrow();
+                            if target.as_deref() == Some(entry) {
+                                if let Some(l) = ui_poll.entry_hash_sha.borrow().as_ref() {
+                                    l.set_text(sha256);
+                                }
+                                if let Some(l) = ui_poll.entry_hash_md5.borrow().as_ref() {
+                                    l.set_text(md5);
+                                }
+                            }
+                            *ui_poll.is_busy.borrow_mut() = false;
+                            set_idle_sensitivity(&ui_poll);
+                        }
                         _ => {
                             // For List, close any leftover window. Clone first so the
                             // borrow is released before `borrow_mut()` below (a live
@@ -1784,11 +1898,27 @@ pub fn build_ui(app: &adw::Application) {
                             status_left.set_text("Secure-deleted entries ✓");
                             defer_rebuild(ui_poll.clone());
                         }
+                        // Hash outcome was already applied above (label fill).
+                        Ok(JobResult::EntryHash { .. }) => {}
                         Err(err) => {
                             // Outcome shown in the progress window when one exists;
                             // password errors reopen the unlock prompt (retry).
                             let msg = err.to_string();
                             status_left.set_text(&format!("Error: {}", truncate_middle(&msg, 80)));
+                            // A background hash failure (properties dialog) is a
+                            // quiet outcome: blank the rows, keep the label
+                            // update out of the password/error machinery below.
+                            if ui_poll.entry_hash_target.borrow().is_some() {
+                                if let Some(l) = ui_poll.entry_hash_sha.borrow().as_ref() {
+                                    l.set_text("—");
+                                }
+                                if let Some(l) = ui_poll.entry_hash_md5.borrow().as_ref() {
+                                    l.set_text("—");
+                                }
+                                *ui_poll.is_busy.borrow_mut() = false;
+                                set_idle_sensitivity(&ui_poll);
+                                continue;
+                            }
                             let pwd_err = matches!(err, ArkxError::WrongPassword);
                             if pwd_err {
                                 // Drop any transient progress window silently.
@@ -2130,6 +2260,24 @@ fn needs_password(info: &ArchiveInfo, entries: Option<&[String]>) -> bool {
 /// Key/value rows for the archive-properties dialog: archive summary plus,
 /// when exactly one entry is selected, that entry's details. Data comes
 /// straight from memory (`ArchiveInfo`) — no backend call.
+/// Row box of the list row whose tooltip equals `path` (rows are tooltipped
+/// with their full archive-internal path, see `create_file_row`).
+fn find_row_box(list: &gtk::ListBox, path: &str) -> Option<gtk::Box> {
+    let mut child = list.first_child();
+    while let Some(widget) = child {
+        let next = widget.next_sibling();
+        if let Ok(row) = widget.clone().downcast::<gtk::ListBoxRow>() {
+            if row.tooltip_text().as_deref() == Some(path) {
+                if let Some(box_) = row.child().and_then(|c| c.downcast::<gtk::Box>().ok()) {
+                    return Some(box_);
+                }
+            }
+        }
+        child = next;
+    }
+    None
+}
+
 fn properties_rows(info: &ArchiveInfo, selected: &[String]) -> Vec<(String, String)> {
     let file = PathBuf::from(&info.path)
         .file_name()
@@ -2253,6 +2401,34 @@ fn show_properties(ui: &Ui) {
         body.append(&row);
     }
 
+    // SHA-256 + MD5 of a single selected file, computed in a background job
+    // (extract single entry to a temp dir, then hash from disk).
+    let mut hash_labels: Option<(gtk::Label, gtk::Label)> = None;
+    if selected.len() == 1 {
+        if let Some(e) = info.entries.iter().find(|e| e.path == selected[0]) {
+            if !e.is_dir {
+                let sha_l = gtk::Label::new(Some("computing…"));
+                let md5_l = gtk::Label::new(Some("computing…"));
+                for (l, key_text) in [(&sha_l, "SHA-256"), (&md5_l, "MD5")] {
+                    l.set_xalign(0.0);
+                    l.set_hexpand(true);
+                    l.set_ellipsize(pango::EllipsizeMode::Middle);
+                    l.set_selectable(true);
+                    l.add_css_class("monospace");
+                    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+                    let key = gtk::Label::new(Some(key_text));
+                    key.set_xalign(0.0);
+                    key.set_width_request(110);
+                    key.add_css_class("heading");
+                    row.append(&key);
+                    row.append(l);
+                    body.append(&row);
+                }
+                hash_labels = Some((sha_l, md5_l));
+            }
+        }
+    }
+
     let window: gtk::Window = gtk::Window::builder()
         .modal(true)
         .title("Archive properties")
@@ -2296,6 +2472,20 @@ fn show_properties(ui: &Ui) {
     }
     window.set_child(Some(&content));
     window.present();
+    // Kick off the background hash once the dialog is on screen.
+    if let (Some((sha_l, md5_l)), Some(entry)) = (hash_labels, selected.first().cloned()) {
+        if !info.entries.iter().any(|e| e.path == entry && e.is_dir) {
+            *ui.entry_hash_target.borrow_mut() = Some(entry.clone());
+            *ui.entry_hash_sha.borrow_mut() = Some(sha_l);
+            *ui.entry_hash_md5.borrow_mut() = Some(md5_l);
+            let pw = ui.password_cache.borrow().clone();
+            ui.worker.borrow_mut().submit(JobKind::EntryHash {
+                archive: PathBuf::from(&info.path),
+                entry,
+                password: pw,
+            });
+        }
+    }
 }
 
 #[cfg(test)]

@@ -336,36 +336,10 @@ fn detect_by_extension(path: &Path) -> ArchiveFormat {
         .file_name()
         .map(|s| s.to_string_lossy().to_lowercase())
         .unwrap_or_default();
-    // Important order: tar.* first
-    if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-        return ArchiveFormat::TarGz;
-    }
-    if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") || name.ends_with(".tbz") {
-        return ArchiveFormat::TarBz2;
-    }
-    if name.ends_with(".tar.xz") || name.ends_with(".txz") {
-        return ArchiveFormat::TarXz;
-    }
-    if name.ends_with(".tar.zst") || name.ends_with(".tzst") {
-        return ArchiveFormat::TarZst;
-    }
-    if name.ends_with(".tar.lz4") || name.ends_with(".tlz4") {
-        return ArchiveFormat::TarLz4;
-    }
-    if name.ends_with(".tar.z") || name.ends_with(".taz") {
-        return ArchiveFormat::TarZ;
-    }
-    if name.ends_with(".tar.lzma") || name.ends_with(".tlz") {
-        return ArchiveFormat::TarLzma;
-    }
-    if name.ends_with(".tar.lz") {
-        return ArchiveFormat::TarLzip;
-    }
-    if name.ends_with(".tzo") || name.ends_with(".tar.lzo") || name.ends_with(".tar.lzop") {
-        return ArchiveFormat::TarLzo;
-    }
-    if name.ends_with(".tar.lrz") || name.ends_with(".tlrz") {
-        return ArchiveFormat::TarLrzip;
+    // Composite `tar.*` suffixes first (single source of truth:
+    // `detect_tar_composite`, which the MIME/header paths also use).
+    if let Some(tar_fmt) = detect_tar_composite(path) {
+        return tar_fmt;
     }
     if name.ends_with(".7z") {
         return ArchiveFormat::SevenZip;
@@ -379,10 +353,10 @@ fn detect_by_extension(path: &Path) -> ArchiveFormat {
     if name.ends_with(".tar") {
         return ArchiveFormat::Tar;
     }
-    if name.ends_with(".gz") || name.ends_with(".tgz") {
+    if name.ends_with(".gz") {
         return ArchiveFormat::Gz;
     }
-    if name.ends_with(".bz2") || name.ends_with(".tbz") {
+    if name.ends_with(".bz2") {
         return ArchiveFormat::Bz2;
     }
     if name.ends_with(".xz") {

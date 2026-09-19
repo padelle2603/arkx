@@ -92,6 +92,9 @@ pub(crate) struct AppState {
     /// Full archive-internal paths of entries hidden from the view because a
     /// cut is pending paste (visual only; they are still in the archive).
     pub(crate) cut_hidden: Vec<String>,
+    /// Path of the entry currently being renamed inline in the row list, or
+    /// None when no inline edit is active.
+    pub(crate) editing_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -266,6 +269,38 @@ pub(crate) fn navigate_up(current_path: &str) -> String {
         format!("{}/", &p[..pos])
     } else {
         String::new()
+    }
+}
+
+/// Last path component of an entry ("a/b/c/file.txt" → "file.txt"; dirs drop
+/// the trailing slash). Used to prefill the inline rename field.
+pub(crate) fn base_name(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    let after_slash = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    after_slash
+        .rsplit('\\')
+        .next()
+        .unwrap_or(after_slash)
+        .to_string()
+}
+
+/// New full path when an entry is renamed to a possibly nested base name. A
+/// plain base name renames in place (keeps the enclosing folder); an explicit
+/// path ("a/b") moves the entry. Folders keep their trailing slash.
+pub(crate) fn rename_path(old_name: &str, new_base: &str) -> String {
+    let trimmed = old_name.trim_end_matches('/');
+    let new_name = if new_base.contains('/') || new_base.contains('\\') {
+        new_base.to_string()
+    } else {
+        match trimmed.rfind('/') {
+            Some(i) => format!("{}/{}", &trimmed[..i], new_base),
+            None => new_base.to_string(),
+        }
+    };
+    if old_name.ends_with('/') {
+        paths::with_trailing_slash(&new_name)
+    } else {
+        new_name
     }
 }
 
@@ -872,5 +907,25 @@ mod tests {
         assert!(expanded.contains(&"sub1/file1.txt".to_string()));
         assert!(expanded.contains(&"sub1/sub2/file2.txt".to_string()));
         assert!(!expanded.contains(&"root.txt".to_string()));
+    }
+
+    #[test]
+    fn test_base_name() {
+        assert_eq!(base_name("file.txt"), "file.txt");
+        assert_eq!(base_name("a/b/c.txt"), "c.txt");
+        assert_eq!(base_name("a/b/c\\d.txt"), "d.txt");
+        assert_eq!(base_name("a/b/"), "b");
+    }
+
+    #[test]
+    fn test_rename_path() {
+        // Plain base renames in place.
+        assert_eq!(rename_path("a/b.txt", "c.txt"), "a/c.txt");
+        assert_eq!(rename_path("b.txt", "c.txt"), "c.txt");
+        // Explicit nested path moves the entry.
+        assert_eq!(rename_path("a/b.txt", "x/y.txt"), "x/y.txt");
+        // Folders keep their trailing slash.
+        assert_eq!(rename_path("a/b/", "c"), "a/c/");
+        assert_eq!(rename_path("a/b/", "x/y"), "x/y/");
     }
 }

@@ -69,7 +69,8 @@ Commands:
   a, create <dest> <file...>       Create archive (format from extension)
                [-l <0-9>]          Compression level (default 6)
                [-p <password>]     Password (AES256 for 7z/zip)
-               [-v <size>]         Split into volumes (7z only): e.g. 50m, 1g
+               [-v <size>]         Split into volumes (.7z/.zip/.rar): e.g. 50m, 1g
+                                   .zip needs Info-ZIP `zip`, .rar needs `rar` installed
 
   u, add <archive> <file...>       Add files to an existing archive (zip/7z/tar)
                [--to <dir>]        Entry paths relative to <dir> (default: archive root)
@@ -1015,23 +1016,44 @@ fn parse_volume_or_exit(v: &str) -> String {
     t
 }
 
-/// Total bytes produced by `arkx a`: for multi-volume archives the volumes
-/// live next to the archive as `<dest>.001`... (7z naming), so the base file
-/// may not exist; sum whatever was written.
+/// Total bytes produced by `arkx a`. Multi-volume parts live beside the
+/// archive; naming differs per tool: 7z `<dest>.001…`, Info-ZIP zip
+/// `<dest>.z01…` + `<dest>.zip` (last part), rar `<stem>.partN.rar`.
 fn created_size(dest: &std::path::Path, volume: Option<&str>) -> u64 {
+    use crate::core::detector::ArchiveFormat as Fmt;
     if volume.is_none() {
         return std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
     }
-    let mut total = 0u64;
-    let base = dest.to_string_lossy().into_owned();
-    for n in 1..=999 {
-        let part = std::path::PathBuf::from(format!("{base}.{n:03}"));
-        match std::fs::metadata(&part) {
-            Ok(m) => total += m.len(),
-            Err(_) => break,
+    let total_parts = |pattern: &dyn Fn(u32) -> std::path::PathBuf| {
+        let mut total = 0u64;
+        for n in 1..=999 {
+            match std::fs::metadata(pattern(n)) {
+                Ok(m) => total += m.len(),
+                Err(_) => break,
+            }
         }
+        total
+    };
+    let base = dest.to_string_lossy().into_owned();
+    match crate::core::detector::detect_format(dest) {
+        Fmt::Zip => {
+            let mut total = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            total += total_parts(&|n| std::path::PathBuf::from(format!("{base}.z{n:02}")));
+            total
+        }
+        Fmt::Rar => {
+            let stem = dest
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| base.clone());
+            let ext = dest
+                .extension()
+                .map(|e| e.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "rar".to_string());
+            total_parts(&|n| std::path::PathBuf::from(format!("{stem}.part{n}.{ext}")))
+        }
+        _ => total_parts(&|n| std::path::PathBuf::from(format!("{base}.{n:03}"))),
     }
-    total
 }
 
 /// If `p` is missing but a `<p>.001` sibling exists, point at that first

@@ -36,6 +36,16 @@ pub fn entry_matches(entry: &str, sel: &str) -> bool {
     ep == f || ep == format!("{}/", dir) || ep.starts_with(&format!("{}/", dir))
 }
 
+/// Prefix an entry name with `./` when it starts with `-`, so a hostile
+/// archive entry is never parsed as a CLI switch of the external tool.
+pub fn entry_arg(e: &str) -> String {
+    if e.starts_with('-') {
+        format!("./{e}")
+    } else {
+        e.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

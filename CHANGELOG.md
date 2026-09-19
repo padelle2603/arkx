@@ -1,5 +1,25 @@
 # Changelog
 
+## v1.6.1 — checksums, inline rename and multi-volume creation
+
+- **Feature**: SHA-256 and MD5 checksums (with copy-to-clipboard) in the archive
+  properties window; the hash runs off the UI thread and does not block browsing.
+- **Feature**: inline entry rename with F2/Alt+F2 (instead of the dialog) and
+  explicit confirmation when the new name collides with an existing entry.
+- **Feature**: *New Folder* accepts nested paths and does not require a folder
+  to be selected first.
+- **Feature**: multi-volume creation for `.zip` (Info-ZIP `zip -s`) and `.rar`
+  (`rar -v`), alongside the existing native 7z split; the reported size matches
+  the split naming of each format.
+- **Fixed**: secure delete's zeroing pass is now streamed in chunks instead of
+  buffering the whole archive in RAM (OOM on large archives).
+- **Perf**: shared extract progress poller, hoisted per-archive path
+  normalization in secure extract, reused read/write buffers, and cached
+  backend probe (`7z` sidecar / bsdtar availability).
+- **Refactor**: duplicated extract/sum/drain-pipe/entry-argument helpers
+  consolidated across native, 7z and bsdtar backends; tar.* format detection
+  now has a single source of truth.
+
 ## v1.6.0 — editing suite: comments, AES-256, convert, multi-volume split
 
 - **Context menu at full height**: the right-click menu is no longer capped at
