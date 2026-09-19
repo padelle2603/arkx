@@ -134,6 +134,7 @@ pub fn build_ui(app: &adw::Application) {
         filter_text: String::new(),
         sort_col: crate::ui::browser::SortCol::Name,
         sort_asc: true,
+        cut_hidden: Vec::new(),
     }));
 
     let worker = Rc::new(RefCell::new(WorkerPool::new()));
@@ -302,16 +303,17 @@ pub fn build_ui(app: &adw::Application) {
                 (st.sort_col, st.sort_asc)
             };
             label_c.set_text(&format!("{} {}", col.title(), if asc { "▾" } else { "▴" }));
-            let (info, path, filter) = {
+            let (info, path, filter, hidden) = {
                 let st = st_c.borrow();
                 (
                     st.current_info.clone(),
                     st.current_path.clone(),
                     st.filter_text.clone(),
+                    st.cut_hidden.clone(),
                 )
             };
             if let Some(info) = info {
-                populate_current_view(&list_c, &info, &path, &filter, col, asc);
+                populate_current_view(&list_c, &info, &path, &filter, col, asc, &hidden);
             }
         });
     }
@@ -709,11 +711,11 @@ pub fn build_ui(app: &adw::Application) {
                 ui_back.status_left.clone(),
                 ui_back.status_right.clone(),
             );
-            let (sc, sa) = {
+            let (sc, sa, hidden) = {
                 let st = ui_back.state.borrow();
-                (st.sort_col, st.sort_asc)
+                (st.sort_col, st.sort_asc, st.cut_hidden.clone())
             };
-            populate_current_view(&ui_back.list, &info, &cur, &filter, sc, sa);
+            populate_current_view(&ui_back.list, &info, &cur, &filter, sc, sa, &hidden);
             ui_back.back.set_sensitive(!cur.is_empty());
             ui_back.status_left.set_text(&format!(
                 "Folder: /{}",
@@ -778,11 +780,11 @@ pub fn build_ui(app: &adw::Application) {
                     ui_nav.status_left.clone(),
                     ui_nav.status_right.clone(),
                 );
-                let (sc, sa) = {
+                let (sc, sa, hidden) = {
                     let st = ui_nav.state.borrow();
-                    (st.sort_col, st.sort_asc)
+                    (st.sort_col, st.sort_asc, st.cut_hidden.clone())
                 };
-                populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c, sc, sa);
+                populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c, sc, sa, &hidden);
                 ui_nav.back.set_sensitive(!new_path.is_empty());
                 ui_nav.status_left.set_text(&format!(
                     "Folder: /{}",
@@ -817,11 +819,19 @@ pub fn build_ui(app: &adw::Application) {
                             ui_nav.status_left.clone(),
                             ui_nav.status_right.clone(),
                         );
-                        let (sc, sa) = {
+                        let (sc, sa, hidden) = {
                             let st = ui_nav.state.borrow();
-                            (st.sort_col, st.sort_asc)
+                            (st.sort_col, st.sort_asc, st.cut_hidden.clone())
                         };
-                        populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c, sc, sa);
+                        populate_current_view(
+                            &ui_nav.list,
+                            &info_c,
+                            &new_path,
+                            &filter_c,
+                            sc,
+                            sa,
+                            &hidden,
+                        );
                         ui_nav.back.set_sensitive(true);
                         ui_nav
                             .status_left
@@ -1167,7 +1177,9 @@ pub fn build_ui(app: &adw::Application) {
         let count = selected.len();
         if count > 0 {
             if let Some(arc) = archive {
-                *ui_ct.cut_clipboard.borrow_mut() = Some((arc, selected));
+                *ui_ct.cut_clipboard.borrow_mut() = Some((arc, selected.clone()));
+                ui_ct.state.borrow_mut().cut_hidden = selected;
+                repopulate_local(&ui_ct);
                 ui_ct
                     .status_left
                     .set_text(&format!("Cut {} entry(ies)", count));
@@ -1633,6 +1645,7 @@ pub fn build_ui(app: &adw::Application) {
                             let mut st = ui_poll.state.borrow_mut();
                             st.current_info = Some(info.clone());
                             st.selected_entries.clear();
+                            st.cut_hidden.clear();
                             let filter = st.filter_text.clone();
                             let current_path = st.current_path.clone();
                             drop(st);
@@ -1659,6 +1672,7 @@ pub fn build_ui(app: &adw::Application) {
                                 &filter,
                                 sc,
                                 sa,
+                                &[],
                             );
                             ui_poll.empty.set_visible(info.entries.is_empty());
                             status_left.set_text("");
@@ -1765,6 +1779,7 @@ pub fn build_ui(app: &adw::Application) {
                         }
                         Ok(JobResult::Paste) => {
                             status_left.set_text("Pasted entries ✓");
+                            ui_poll.state.borrow_mut().cut_hidden.clear();
                             let ui_idle = ui_poll.clone();
                             glib::timeout_add_local_once(
                                 std::time::Duration::from_millis(0),
@@ -1891,6 +1906,12 @@ pub fn build_ui(app: &adw::Application) {
                                     });
                                 }
                             }
+                            // A failed paste (or any error while a cut is pending)
+                            // restores the previously hidden entries in place.
+                            if !ui_poll.state.borrow().cut_hidden.is_empty() {
+                                ui_poll.state.borrow_mut().cut_hidden.clear();
+                                repopulate_local(&ui_poll);
+                            }
                         }
                     }
                 }
@@ -1969,6 +1990,23 @@ fn create_title_widget() -> gtk::Box {
 
 /// Re-list the current folder in place after an archive-modifying job,
 /// keeping the current path (open_archive would jump back to the root).
+fn repopulate_local(ui: &Ui) {
+    let (info, path, filter, sort_col, sort_asc, hidden) = {
+        let st = ui.state.borrow();
+        (
+            st.current_info.clone(),
+            st.current_path.clone(),
+            st.filter_text.clone(),
+            st.sort_col,
+            st.sort_asc,
+            st.cut_hidden.clone(),
+        )
+    };
+    if let Some(info) = info {
+        populate_current_view(&ui.list, &info, &path, &filter, sort_col, sort_asc, &hidden);
+    }
+}
+
 fn rebuild_list(ui: Ui) {
     let st = ui.state.borrow();
     let current_path = st.current_path.clone();
@@ -2014,6 +2052,7 @@ fn open_archive(path: PathBuf, ui: Ui) {
         let mut st = ui.state.borrow_mut();
         st.current_info = None;
         st.selected_entries.clear();
+        st.cut_hidden.clear();
     }
     ui.list.remove_all();
     ui.empty.set_visible(false);

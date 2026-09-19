@@ -89,6 +89,9 @@ pub(crate) struct AppState {
     pub(crate) filter_text: String,
     pub(crate) sort_col: SortCol,
     pub(crate) sort_asc: bool,
+    /// Full archive-internal paths of entries hidden from the view because a
+    /// cut is pending paste (visual only; they are still in the archive).
+    pub(crate) cut_hidden: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -313,10 +316,15 @@ pub(crate) fn update_breadcrumb(
     let sr_c = status_right.clone();
     let info_c = info.clone();
     root_btn.connect_clicked(move |_| {
-        let (f, sc, sa) = {
+        let (f, sc, sa, hidden) = {
             let mut st = state_c.borrow_mut();
             st.current_path = String::new();
-            (st.filter_text.clone(), st.sort_col, st.sort_asc)
+            (
+                st.filter_text.clone(),
+                st.sort_col,
+                st.sort_asc,
+                st.cut_hidden.clone(),
+            )
         };
         update_breadcrumb(
             &bc_c,
@@ -327,7 +335,7 @@ pub(crate) fn update_breadcrumb(
             sl_c.clone(),
             sr_c.clone(),
         );
-        populate_current_view(&list_c, &info_c, "", &f, sc, sa);
+        populate_current_view(&list_c, &info_c, "", &f, sc, sa, &hidden);
         sl_c.set_text("Root");
     });
     breadcrumb_box.append(&root_btn);
@@ -357,10 +365,15 @@ pub(crate) fn update_breadcrumb(
         let sr_cc = status_right.clone();
         let info_cc = info.clone();
         btn.connect_clicked(move |_| {
-            let (f, sc, sa) = {
+            let (f, sc, sa, hidden) = {
                 let mut st = state_cc.borrow_mut();
                 st.current_path = target.clone();
-                (st.filter_text.clone(), st.sort_col, st.sort_asc)
+                (
+                    st.filter_text.clone(),
+                    st.sort_col,
+                    st.sort_asc,
+                    st.cut_hidden.clone(),
+                )
             };
             update_breadcrumb(
                 &bc_cc,
@@ -371,7 +384,7 @@ pub(crate) fn update_breadcrumb(
                 sl_cc.clone(),
                 sr_cc.clone(),
             );
-            populate_current_view(&list_cc, &info_cc, &target, &f, sc, sa);
+            populate_current_view(&list_cc, &info_cc, &target, &f, sc, sa, &hidden);
             sl_cc.set_text(&format!("Folder: /{}", target));
         });
         breadcrumb_box.append(&btn);
@@ -469,6 +482,7 @@ pub(crate) fn populate_current_view(
     filter: &str,
     sort_col: SortCol,
     sort_asc: bool,
+    hidden: &[String],
 ) {
     list_box.remove_all();
 
@@ -478,6 +492,9 @@ pub(crate) fn populate_current_view(
     let mut visible = 0;
 
     for entry in children {
+        if hidden.contains(&entry.path) {
+            continue;
+        }
         if !filter_lower.is_empty()
             && !entry.path.to_lowercase().contains(&filter_lower)
             && !entry.file_name().to_lowercase().contains(&filter_lower)

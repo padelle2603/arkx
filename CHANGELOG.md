@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Visually hidden cut entries**: after a *Cut* the selected entries disappear
+  from the view until the pending paste is submitted; a successful paste keeps
+  them out (they moved away), a failed paste restores them in place — the
+  working copy/paste logic is untouched.
 - **Editable archive comment (zip)**: comments are now read (`zip.comment()`,
   `Comment =` in 7z/RAR) and written on `.zip` via a native rewrite shared with
   remove/rename. The *Archive properties* dialog shows an editable field and a
