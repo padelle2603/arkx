@@ -148,22 +148,6 @@ impl ArchiveBackend for NativeBackend {
         }
     }
 
-    fn properties(
-        &self,
-        archive: &Path,
-        entry: Option<&str>,
-        _password: Option<&str>,
-    ) -> Result<crate::core::archive::ArchiveProperties> {
-        let fmt = crate::core::detector::detect_format(archive);
-        match fmt {
-            ArchiveFormat::Zip => self.properties_zip(archive, entry),
-            _ => Err(ArkxError::UnsupportedFormat(format!(
-                "properties {:?}",
-                fmt
-            ))),
-        }
-    }
-
     fn secure_delete(
         &self,
         archive: &Path,
@@ -1926,87 +1910,6 @@ impl NativeBackend {
         }
         out.flush().map_err(ArkxError::Io)?;
         Ok(out_path)
-    }
-
-    fn properties_zip(
-        &self,
-        archive: &Path,
-        entry: Option<&str>,
-    ) -> Result<crate::core::archive::ArchiveProperties> {
-        let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(1024 * 1024, file))
-            .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
-        let mut total_size = 0u64;
-        let mut total_packed = 0u64;
-        let mut num_files = 0usize;
-        let mut num_dirs = 0usize;
-        let mut has_encrypted = false;
-        let mut entry_props = (None, None, None, None, None, false);
-        for i in 0..z.len() {
-            let f = z
-                .by_index(i)
-                .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
-            let name = f.name().to_string();
-            let is_dir = f.is_dir();
-            let size = f.size();
-            let packed = f.compressed_size();
-            total_size += size;
-            total_packed += packed;
-            if is_dir {
-                num_dirs += 1;
-            } else {
-                num_files += 1;
-            }
-            if f.encrypted() {
-                has_encrypted = true;
-            }
-            if let Some(entry_name) = entry {
-                if crate::core::paths::entry_matches(&name, entry_name) {
-                    entry_props = (
-                        Some(name),
-                        Some(size),
-                        Some(packed),
-                        Some(format!("{:08X}", f.crc32())),
-                        Some(format!("{:?}", f.compression())),
-                        f.encrypted(),
-                    );
-                }
-            }
-        }
-        if let Some(_entry_name) = entry {
-            let (name, size, packed, crc, method, encrypted) = entry_props;
-            Ok(crate::core::archive::ArchiveProperties {
-                path: archive.to_string_lossy().to_string(),
-                format: "ZIP".into(),
-                total_size,
-                total_packed,
-                num_files,
-                num_dirs,
-                has_encrypted,
-                entry_name: name,
-                entry_size: size,
-                entry_packed_size: packed,
-                entry_crc32: crc,
-                entry_method: method,
-                entry_encrypted: encrypted,
-            })
-        } else {
-            Ok(crate::core::archive::ArchiveProperties {
-                path: archive.to_string_lossy().to_string(),
-                format: "ZIP".into(),
-                total_size,
-                total_packed,
-                num_files,
-                num_dirs,
-                has_encrypted,
-                entry_name: None,
-                entry_size: None,
-                entry_packed_size: None,
-                entry_crc32: None,
-                entry_method: None,
-                entry_encrypted: false,
-            })
-        }
     }
 
     fn secure_delete_zip(

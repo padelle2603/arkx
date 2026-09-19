@@ -81,6 +81,7 @@ pub enum JobResult {
     List(crate::core::archive::ArchiveInfo),
     Extract,
     Add,
+    NewFolder,
     Remove,
     Rename,
     Test(crate::core::archive::TestReport),

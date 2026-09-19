@@ -83,26 +83,8 @@ pub struct TestResult {
     pub passed: bool,
 }
 
-/// Detailed properties for an archive or entry.
-#[derive(Debug, Clone)]
-pub struct ArchiveProperties {
-    pub path: String,
-    pub format: String,
-    pub total_size: u64,
-    pub total_packed: u64,
-    pub num_files: usize,
-    pub num_dirs: usize,
-    pub has_encrypted: bool,
-    pub entry_name: Option<String>,
-    pub entry_size: Option<u64>,
-    pub entry_packed_size: Option<u64>,
-    pub entry_crc32: Option<String>,
-    pub entry_method: Option<String>,
-    pub entry_encrypted: bool,
-}
-
 /// Backends share this shape: list / extract / create / add / remove /
-/// rename / test / open_with / properties / secure_delete.
+/// rename / test / open_with / secure_delete.
 pub trait ArchiveBackend: Send + Sync {
     fn list(&self, path: &Path) -> Result<ArchiveInfo>;
     fn extract(
@@ -175,16 +157,6 @@ pub trait ArchiveBackend: Send + Sync {
     ) -> Result<PathBuf> {
         Err(super::error::ArkxError::UnsupportedFormat(
             "opening entries of this format with an external app is not supported".into(),
-        ))
-    }
-    fn properties(
-        &self,
-        _archive: &Path,
-        _entry: Option<&str>,
-        _password: Option<&str>,
-    ) -> Result<ArchiveProperties> {
-        Err(super::error::ArkxError::UnsupportedFormat(
-            "getting properties of this format is not supported".into(),
         ))
     }
     fn secure_delete(

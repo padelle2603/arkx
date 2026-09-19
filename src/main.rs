@@ -208,8 +208,15 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
         }
         "x" | "extract" => {
-            let (archives, dest_arg, here, dialog, progress, password, threads) =
-                parse_extract_args(&args)?;
+            let ExtractArgs {
+                archives,
+                dest_arg,
+                here,
+                dialog,
+                progress,
+                password,
+                threads,
+            } = parse_extract_args(&args)?;
             crate::core::util::set_thread_override(threads);
             if archives.is_empty() {
                 eprintln!("Usage: arkx x <archive> [dest] [--here] [--dialog] [-p password]");
@@ -929,15 +936,17 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
     Ok(())
 }
 
-type ExtractArgs = (
-    Vec<PathBuf>,
-    Option<PathBuf>,
-    bool,
-    bool,
-    bool,
-    Option<String>,
-    Option<usize>,
-);
+/// CLI args for `arkx x`: a struct instead of a 7-tuple so fields are not
+/// position-dependent (the positional dest heuristic already tripped once).
+struct ExtractArgs {
+    archives: Vec<PathBuf>,
+    dest_arg: Option<PathBuf>,
+    here: bool,
+    dialog: bool,
+    progress: bool,
+    password: Option<String>,
+    threads: Option<usize>,
+}
 
 /// Handle the two flags shared by every command (`-p/--password`, `--threads`),
 /// accepting both `--flag value` and `--flag=value` forms. Returns the number of
@@ -1100,9 +1109,15 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
         }
         i += 1;
     }
-    Ok((
-        archives, dest_arg, here, dialog, progress, password, threads,
-    ))
+    Ok(ExtractArgs {
+        archives,
+        dest_arg,
+        here,
+        dialog,
+        progress,
+        password,
+        threads,
+    })
 }
 
 /// `arkx compress` — Ark parity for Dolphin ServiceMenus.

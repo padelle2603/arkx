@@ -1587,7 +1587,10 @@ pub fn build_ui(app: &adw::Application) {
                     // The outcome stays on screen: the user dismisses it with
                     // Close, Esc or the window X. No auto-close timers.
                     match &result {
-                        Ok(JobResult::Extract) | Ok(JobResult::Add) | Ok(JobResult::Remove) => {
+                        Ok(JobResult::Extract)
+                        | Ok(JobResult::Add)
+                        | Ok(JobResult::Remove)
+                        | Ok(JobResult::NewFolder) => {
                             *ui_poll.pending_password.borrow_mut() = false;
                             // Clone the handle first: the else branch below uses
                             // `borrow_mut()` while this `Ref` would still be live.
@@ -1728,6 +1731,10 @@ pub fn build_ui(app: &adw::Application) {
                             // the relist job mid-poll would re-enter the event
                             // dispatch and could tear down the window.
                             status_left.set_text("Added files to archive ✓");
+                            defer_rebuild(ui_poll.clone());
+                        }
+                        Ok(JobResult::NewFolder) => {
+                            status_left.set_text("Folder created ✓");
                             defer_rebuild(ui_poll.clone());
                         }
                         Ok(JobResult::Comment) => {

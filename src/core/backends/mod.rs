@@ -484,22 +484,6 @@ impl BackendManager {
         }
     }
 
-    /// Get archive/entry properties.
-    pub fn properties(
-        &self,
-        archive: &Path,
-        entry: Option<&str>,
-        password: Option<&str>,
-    ) -> Result<crate::core::archive::ArchiveProperties> {
-        let fmt = super::detector::detect_format(archive);
-        match fmt {
-            ArchiveFormat::Zip => self.native.properties(archive, entry, password),
-            _ => Err(ArkxError::UnsupportedFormat(format!(
-                "cannot get properties of {fmt:?}"
-            ))),
-        }
-    }
-
     /// Securely delete entries by overwriting them before removal.
     pub fn secure_delete(
         &self,

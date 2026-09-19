@@ -193,7 +193,7 @@ impl WorkerPool {
                 password,
             } => {
                 backend.new_folder(&archive, &name, password.as_deref())?;
-                Ok(JobResult::Add)
+                Ok(JobResult::NewFolder)
             }
             JobKind::Rename {
                 archive,
