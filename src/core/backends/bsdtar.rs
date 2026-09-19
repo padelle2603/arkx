@@ -307,11 +307,7 @@ impl BsdtarBackend {
             )));
         }
         if let Ok(g) = cb.lock() {
-            if total > 0 {
-                g(ProgressInfo::new("Completed".to_string(), total, total));
-            } else {
-                g(ProgressInfo::new("Completed".to_string(), 100, 100));
-            }
+            g(crate::core::util::completed(total));
         }
         Ok(())
     }

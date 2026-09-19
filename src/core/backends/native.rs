@@ -22,15 +22,6 @@ fn quota_error() -> ArkxError {
     ))
 }
 
-/// Final "Completed" progress: unknown total (0 bytes) reports a clean 100/100.
-fn completed(total: u64) -> ProgressInfo {
-    if total > 0 {
-        ProgressInfo::new("Completed".to_string(), total, total)
-    } else {
-        ProgressInfo::new("Completed".to_string(), 100, 100)
-    }
-}
-
 pub struct NativeBackend {
     cancel: Arc<AtomicBool>,
 }
@@ -605,7 +596,7 @@ impl NativeBackend {
             }
         }
         if let Some(cb) = &progress {
-            cb(completed(total_bytes));
+            cb(crate::core::util::completed(total_bytes));
         }
         Ok(())
     }
@@ -772,7 +763,7 @@ impl NativeBackend {
         }
         // Final 100% (even when total is 0).
         if let Some(cb) = &progress {
-            cb(completed(total_bytes));
+            cb(crate::core::util::completed(total_bytes));
         }
         Ok(())
     }
@@ -814,7 +805,7 @@ impl NativeBackend {
                     ));
                 }
             }
-            cb(completed(total));
+            cb(crate::core::util::completed(total));
             out.flush().map_err(ArkxError::Io)?;
         } else {
             let mut reader = BufReader::with_capacity(1024 * 1024, reader);
@@ -1416,7 +1407,7 @@ impl NativeBackend {
         }
         writer.finish()?;
         if let Some(cb) = &progress {
-            cb(completed(total));
+            cb(crate::core::util::completed(total));
         }
         Ok(())
     }

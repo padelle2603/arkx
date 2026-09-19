@@ -479,10 +479,11 @@ pub(crate) fn populate_current_view(
     let filter_lower = filter.to_lowercase();
     let mut children = get_children(info, current_path);
     sort_children(&mut children, sort_col, sort_asc);
+    let hidden_set: std::collections::HashSet<&str> = hidden.iter().map(String::as_str).collect();
     let mut visible = 0;
 
     for entry in children {
-        if hidden.contains(&entry.path) {
+        if hidden_set.contains(entry.path.as_str()) {
             continue;
         }
         if !filter_lower.is_empty()

@@ -216,6 +216,36 @@ fn entry_arg(e: &str) -> String {
     }
 }
 
+/// Collect a child's stderr on a background thread (a full 64KB pipe would
+/// otherwise deadlock the parent while we read stdout). Returns the collector
+/// and its thread handle so the caller can `join` before inspecting the data.
+fn drain_stderr(
+    stderr: Option<std::process::ChildStderr>,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let arc = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let arc_clone = arc.clone();
+    let handle = std::thread::spawn(move || {
+        if let Some(mut reader) = stderr {
+            let mut buf = vec![0u8; 8192];
+            let mut collected = Vec::new();
+            loop {
+                match std::io::Read::read(&mut reader, &mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => collected.extend_from_slice(&buf[..n]),
+                    Err(_) => break,
+                }
+            }
+            if let Ok(mut guard) = arc_clone.lock() {
+                *guard = collected;
+            }
+        }
+    });
+    (arc, handle)
+}
+
 /// True if raw 7z output indicates a password problem. Case-insensitive and
 /// tolerant of wording variants across 7z releases/locales.
 fn is_password_error(msg: &str) -> bool {
@@ -463,27 +493,8 @@ impl SevenZipBackend {
                 }
             });
 
-            // Drain stderr on a separate thread to avoid pipe deadlock (64KB)
-            let stderr = child.stderr.take();
-            let stderr_arc = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let stderr_clone = stderr_arc.clone();
-            let stderr_handle = std::thread::spawn(move || {
-                if let Some(err) = stderr {
-                    let mut reader = err;
-                    let mut buf = vec![0u8; 8192];
-                    let mut collected = Vec::new();
-                    loop {
-                        match std::io::Read::read(&mut reader, &mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => collected.extend_from_slice(&buf[..n]),
-                            Err(_) => break,
-                        }
-                    }
-                    if let Ok(mut guard) = stderr_clone.lock() {
-                        *guard = collected;
-                    }
-                }
-            });
+            // Drain stderr on a separate thread to avoid pipe deadlock (64KB).
+            let (stderr_arc, stderr_handle) = drain_stderr(child.stderr.take());
 
             if let Some(stdout) = child.stdout.take() {
                 // 7z with -bsp1 writes both filenames and percentages to stdout with '\r'.
@@ -546,31 +557,12 @@ impl SevenZipBackend {
                 }
                 // Final 100% (the only allowed jump: last value → 100).
                 if let Ok(guard) = cb_arc.lock() {
-                    guard(ProgressInfo::new("Completed".to_string(), 100, 100));
+                    guard(crate::core::util::completed(100));
                 }
             }
         } else {
-            // Without progress, still drain output to avoid deadlock then wait
-            let stderr = child.stderr.take();
-            let stderr_data = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-            let stderr_clone = stderr_data.clone();
-            let stderr_handle = std::thread::spawn(move || {
-                if let Some(err) = stderr {
-                    let mut reader = err;
-                    let mut buf = vec![0u8; 8192];
-                    let mut collected = Vec::new();
-                    loop {
-                        match std::io::Read::read(&mut reader, &mut buf) {
-                            Ok(0) => break,
-                            Ok(n) => collected.extend_from_slice(&buf[..n]),
-                            Err(_) => break,
-                        }
-                    }
-                    if let Ok(mut guard) = stderr_clone.lock() {
-                        *guard = collected;
-                    }
-                }
-            });
+            // Without progress, still drain output to avoid deadlock then wait.
+            let (stderr_data, stderr_handle) = drain_stderr(child.stderr.take());
             // drain stdout if present
             if let Some(out) = child.stdout.take() {
                 crate::core::util::drain_reader(out);
@@ -1022,7 +1014,7 @@ impl SevenZipBackend {
             .output()
             .map_err(|e| ArkxError::Backend(e.to_string()))?;
         if let Some(cb) = &progress {
-            cb(ProgressInfo::new("Completed".to_string(), 1, 1));
+            cb(crate::core::util::completed(1));
         }
         if !output.status.success() {
             let msg = String::from_utf8_lossy(&output.stderr);

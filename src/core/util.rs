@@ -370,6 +370,16 @@ pub fn open_with_dir() -> Result<std::path::PathBuf, crate::core::error::ArkxErr
     Ok(dir)
 }
 
+/// Final "Completed" progress marker. Unknown total (0 bytes) reports a clean
+/// 100/100 instead of 0/0, so the bar always ends on a full state.
+pub fn completed(total: u64) -> crate::core::archive::ProgressInfo {
+    if total > 0 {
+        crate::core::archive::ProgressInfo::new("Completed".to_string(), total, total)
+    } else {
+        crate::core::archive::ProgressInfo::new("Completed".to_string(), 100, 100)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

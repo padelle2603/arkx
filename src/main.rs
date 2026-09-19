@@ -130,6 +130,19 @@ CPU: uses every available thread ({} on this machine) with -mmt=on, streaming, z
     );
 }
 
+/// Single-line "percent file" progress callback for long-running CLI ops.
+fn cli_progress() -> Option<Box<dyn Fn(crate::core::archive::ProgressInfo) + Send>> {
+    Some(Box::new(|p| {
+        print!(
+            "\r{:>7} {}",
+            crate::core::util::format_percent(p.percent, p.current, p.total),
+            p.file
+        );
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+    }))
+}
+
 fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
     // Usage: arkx x archive.7z [dest]  | arkx l archive.zip
     // Uses all threads and the optimized backend
@@ -394,20 +407,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 crate::core::util::effective_threads()
             );
             let start = std::time::Instant::now();
-            backend.add(
-                &archive,
-                &sources,
-                password.as_deref(),
-                Some(Box::new(|p| {
-                    print!(
-                        "\r{:>7} {}",
-                        crate::core::util::format_percent(p.percent, p.current, p.total),
-                        p.file
-                    );
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                })),
-            )?;
+            backend.add(&archive, &sources, password.as_deref(), cli_progress())?;
             let size = std::fs::metadata(&archive).map(|m| m.len()).unwrap_or(0);
             println!(
                 "\nAdded in {:.2}s ({})",
@@ -769,15 +769,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 level,
                 password.as_deref(),
                 volume.as_deref(),
-                Some(Box::new(|p| {
-                    print!(
-                        "\r{:>7} {}",
-                        crate::core::util::format_percent(p.percent, p.current, p.total),
-                        p.file
-                    );
-                    use std::io::Write;
-                    let _ = std::io::stdout().flush();
-                })),
+                cli_progress(),
             )?;
             println!(
                 "\nCreated in {:.2}s ({})",
@@ -1254,15 +1246,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
         level,
         password.as_deref(),
         None,
-        Some(Box::new(|p| {
-            print!(
-                "\r{:>7} {}",
-                crate::core::util::format_percent(p.percent, p.current, p.total),
-                p.file
-            );
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-        })),
+        cli_progress(),
     )?;
     let size = std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0);
     println!(

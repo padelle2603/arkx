@@ -1613,11 +1613,7 @@ pub fn build_ui(app: &adw::Application) {
                                 });
                             }
                             *ui_poll.is_busy.borrow_mut() = false;
-                            ui_poll.extract_all.set_sensitive(true);
-                            ui_poll.props.set_sensitive(true);
-                            if !ui_poll.state.borrow().selected_entries.is_empty() {
-                                ui_poll.extract_sel.set_sensitive(true);
-                            }
+                            set_idle_sensitivity(&ui_poll);
                         }
                         _ => {
                             // For List, close any leftover window. Clone first so the
@@ -1629,15 +1625,7 @@ pub fn build_ui(app: &adw::Application) {
                             }
                             *ui_poll.progress_window.borrow_mut() = None;
                             *ui_poll.is_busy.borrow_mut() = false;
-                            ui_poll
-                                .extract_all
-                                .set_sensitive(ui_poll.state.borrow().current_info.is_some());
-                            ui_poll
-                                .props
-                                .set_sensitive(ui_poll.state.borrow().current_info.is_some());
-                            ui_poll
-                                .extract_sel
-                                .set_sensitive(!ui_poll.state.borrow().selected_entries.is_empty());
+                            set_idle_sensitivity(&ui_poll);
                         }
                     }
                     match result {
@@ -1740,56 +1728,26 @@ pub fn build_ui(app: &adw::Application) {
                             // the relist job mid-poll would re-enter the event
                             // dispatch and could tear down the window.
                             status_left.set_text("Added files to archive ✓");
-                            let ui_idle = ui_poll.clone();
-                            glib::timeout_add_local_once(
-                                std::time::Duration::from_millis(0),
-                                move || {
-                                    rebuild_list(ui_idle.clone());
-                                },
-                            );
+                            defer_rebuild(ui_poll.clone());
                         }
                         Ok(JobResult::Comment) => {
                             status_left.set_text("Comment saved ✓");
-                            let ui_idle = ui_poll.clone();
-                            glib::timeout_add_local_once(
-                                std::time::Duration::from_millis(0),
-                                move || {
-                                    rebuild_list(ui_idle.clone());
-                                },
-                            );
+                            defer_rebuild(ui_poll.clone());
                         }
                         Ok(JobResult::Remove) => {
                             // Relist to show the remaining entries in place
                             // (deferred, see Add).
                             status_left.set_text("Removed entries from archive ✓");
-                            let ui_idle = ui_poll.clone();
-                            glib::timeout_add_local_once(
-                                std::time::Duration::from_millis(0),
-                                move || {
-                                    rebuild_list(ui_idle.clone());
-                                },
-                            );
+                            defer_rebuild(ui_poll.clone());
                         }
                         Ok(JobResult::Rename) => {
                             status_left.set_text("Renamed entry ✓");
-                            let ui_idle = ui_poll.clone();
-                            glib::timeout_add_local_once(
-                                std::time::Duration::from_millis(0),
-                                move || {
-                                    rebuild_list(ui_idle.clone());
-                                },
-                            );
+                            defer_rebuild(ui_poll.clone());
                         }
                         Ok(JobResult::Paste) => {
                             status_left.set_text("Pasted entries ✓");
                             ui_poll.state.borrow_mut().cut_hidden.clear();
-                            let ui_idle = ui_poll.clone();
-                            glib::timeout_add_local_once(
-                                std::time::Duration::from_millis(0),
-                                move || {
-                                    rebuild_list(ui_idle.clone());
-                                },
-                            );
+                            defer_rebuild(ui_poll.clone());
                         }
                         Ok(JobResult::Test(report)) => {
                             // Silently reported when clean; a dialog only when
@@ -1817,13 +1775,7 @@ pub fn build_ui(app: &adw::Application) {
                         }
                         Ok(JobResult::SecureDelete) => {
                             status_left.set_text("Secure-deleted entries ✓");
-                            let ui_idle = ui_poll.clone();
-                            glib::timeout_add_local_once(
-                                std::time::Duration::from_millis(0),
-                                move || {
-                                    rebuild_list(ui_idle.clone());
-                                },
-                            );
+                            defer_rebuild(ui_poll.clone());
                         }
                         Err(err) => {
                             // Outcome shown in the progress window when one exists;
@@ -1839,12 +1791,7 @@ pub fn build_ui(app: &adw::Application) {
                                     *ui_poll.progress_window.borrow_mut() = None;
                                 }
                                 *ui_poll.is_busy.borrow_mut() = false;
-                                ui_poll
-                                    .extract_all
-                                    .set_sensitive(ui_poll.state.borrow().current_info.is_some());
-                                ui_poll.extract_sel.set_sensitive(
-                                    !ui_poll.state.borrow().selected_entries.is_empty(),
-                                );
+                                set_idle_sensitivity(&ui_poll);
                                 let retry = ui_poll.pending_extract.borrow().clone();
                                 if let Some((archive, dest, entries)) = retry {
                                     *ui_poll.pending_password.borrow_mut() = true;
@@ -1938,15 +1885,7 @@ pub fn build_ui(app: &adw::Application) {
                         });
                     }
                     *ui_poll.is_busy.borrow_mut() = false;
-                    ui_poll
-                        .extract_all
-                        .set_sensitive(ui_poll.state.borrow().current_info.is_some());
-                    ui_poll
-                        .props
-                        .set_sensitive(ui_poll.state.borrow().current_info.is_some());
-                    ui_poll
-                        .extract_sel
-                        .set_sensitive(!ui_poll.state.borrow().selected_entries.is_empty());
+                    set_idle_sensitivity(&ui_poll);
                     status_left.set_text(&format!("Error: {}", msg));
                 }
             }
@@ -2016,6 +1955,24 @@ fn repopulate_local(ui: &Ui) {
     if let Some(info) = info {
         populate_current_view(&ui.list, &info, &path, &filter, sort_col, sort_asc, &hidden);
     }
+}
+
+/// Relist on the next main-loop iteration: submitting the relist job mid-poll
+/// would re-enter event dispatch and could tear down the window.
+fn defer_rebuild(ui: Ui) {
+    glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
+        rebuild_list(ui.clone());
+    });
+}
+
+/// Restore the toolbar sensitivity from the current state (busy → done).
+fn set_idle_sensitivity(ui: &Ui) {
+    ui.extract_all
+        .set_sensitive(ui.state.borrow().current_info.is_some());
+    ui.props
+        .set_sensitive(ui.state.borrow().current_info.is_some());
+    ui.extract_sel
+        .set_sensitive(!ui.state.borrow().selected_entries.is_empty());
 }
 
 fn rebuild_list(ui: Ui) {
