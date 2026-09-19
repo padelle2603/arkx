@@ -2243,6 +2243,10 @@ fn show_properties(ui: &Ui) {
     let rows = properties_rows(&info, &selected);
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    body.set_margin_start(16);
+    body.set_margin_end(16);
+    body.set_margin_top(12);
+    body.set_margin_bottom(12);
     let is_zip = info.format == "ZIP";
     for (k, v) in rows {
         // zip comments are edited via the writable field below, not this row.
