@@ -381,19 +381,46 @@ impl NativeBackend {
         })
     }
 
+    /// Map a zip open/header error; a missing/incorrect password becomes the
+    /// typed `WrongPassword` the UI turns into an unlock prompt.
+    fn zip_err(e: zip::result::ZipError) -> ArkxError {
+        match e {
+            zip::result::ZipError::InvalidPassword
+            | zip::result::ZipError::UnsupportedArchive(zip::result::ZipError::PASSWORD_REQUIRED) => {
+                ArkxError::WrongPassword
+            }
+            other => ArkxError::Corrupted(other.to_string()),
+        }
+    }
+
+    /// Map a read error (the crate re-wraps `ZipError` in `io::Error`): a
+    /// wrong AES/traditional password only fails mid-stream, so recover it
+    /// from the chain instead of reporting a generic decode failure.
+    fn zip_read_err(e: std::io::Error) -> ArkxError {
+        let wrong_pw = e
+            .get_ref()
+            .and_then(|s| s.downcast_ref::<zip::result::ZipError>())
+            .is_some_and(|z| matches!(z, zip::result::ZipError::InvalidPassword));
+        if wrong_pw {
+            ArkxError::WrongPassword
+        } else {
+            ArkxError::Io(e)
+        }
+    }
+
     fn extract_inner(
         &self,
         archive: &Path,
         dest: &Path,
         entries: Option<&[String]>,
-        _password: Option<&str>,
+        password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let fmt = crate::core::detector::detect_format(archive);
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
 
         match fmt {
-            ArchiveFormat::Zip => self.extract_zip(archive, dest, entries, progress),
+            ArchiveFormat::Zip => self.extract_zip(archive, dest, entries, password, progress),
             ArchiveFormat::Tar
             | ArchiveFormat::TarGz
             | ArchiveFormat::TarBz2
@@ -414,6 +441,7 @@ impl NativeBackend {
         archive: &Path,
         dest: &Path,
         filter: Option<&[String]>,
+        password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
@@ -459,9 +487,15 @@ impl NativeBackend {
         let mut buf = vec![0u8; 65536];
 
         for i in 0..zip.len() {
-            let mut f = zip
-                .by_index(i)
-                .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
+            // Encrypted entries are decrypted with the given password; a
+            // missing password surfaces as WrongPassword so the caller can
+            // prompt, never as an opaque decode failure.
+            let mut f = match password {
+                Some(pw) => zip
+                    .by_index_decrypt(i, pw.as_bytes())
+                    .map_err(Self::zip_err)?,
+                None => zip.by_index(i).map_err(Self::zip_err)?,
+            };
             let name = f.name().to_string();
             if let Some(ref sel) = filter {
                 if !sel
@@ -505,7 +539,18 @@ impl NativeBackend {
                 let mut last_emit = Instant::now();
                 let mut last_bytes = processed_bytes;
                 loop {
-                    let n = f.read(&mut buf).map_err(ArkxError::Io)?;
+                    let n = match f.read(&mut buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            let err = Self::zip_read_err(e);
+                            // A wrong password only fails mid-stream: don't
+                            // leave half-decrypted garbage on disk.
+                            if matches!(err, ArkxError::WrongPassword) {
+                                let _ = std::fs::remove_file(&out_path);
+                            }
+                            return Err(err);
+                        }
+                    };
                     if n == 0 {
                         break;
                     }
@@ -778,12 +823,12 @@ impl NativeBackend {
         dest: &Path,
         sources: &[PathBuf],
         level: u8,
-        _password: Option<&str>,
+        password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let fmt = crate::core::detector::detect_format(dest);
         match fmt {
-            ArchiveFormat::Zip => self.create_zip(dest, sources, level, progress),
+            ArchiveFormat::Zip => self.create_zip(dest, sources, level, password, progress),
             ArchiveFormat::Tar
             | ArchiveFormat::TarGz
             | ArchiveFormat::TarBz2
@@ -804,6 +849,7 @@ impl NativeBackend {
         dest: &Path,
         sources: &[PathBuf],
         level: u8,
+        password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         // Collect BEFORE creating dest: if dest falls inside the sources
@@ -863,6 +909,11 @@ impl NativeBackend {
                 _ => zip::CompressionMethod::Deflated,
             })
             .compression_level(Some(level as i64));
+        // AES-256 per entry when a password was requested (aes-crypto feature).
+        let options = match password {
+            Some(pw) => options.with_aes_encryption(zip::AesMode::Aes256, pw),
+            None => options,
+        };
 
         let base = sources
             .first()
@@ -1866,7 +1917,7 @@ impl NativeBackend {
         let mut out = File::create(&out_path).map_err(ArkxError::Io)?;
         let mut buf = vec![0u8; 65536];
         loop {
-            let n = f.read(&mut buf).map_err(ArkxError::Io)?;
+            let n = f.read(&mut buf).map_err(Self::zip_read_err)?;
             if n == 0 {
                 break;
             }
@@ -2101,6 +2152,24 @@ mod tests {
         backend().extract(&dest, &out, None, None, None).unwrap();
         assert_eq!(std::fs::read(out.join("folder/file.txt")).unwrap(), b"hi");
         assert!(out.join("folder/empty_sub").is_dir());
+    }
+
+    #[test]
+    fn zip_aes_wrong_password_surfaces_typed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("secret.txt");
+        std::fs::write(&src, b"classified").unwrap();
+        let archive = dir.path().join("sec.zip");
+        backend()
+            .create(&archive, std::slice::from_ref(&src), 6, Some("pw"), None)
+            .unwrap();
+
+        let out = dir.path().join("out");
+        let err = backend()
+            .extract(&archive, &out, None, Some("wrong"), None)
+            .unwrap_err();
+        assert!(matches!(err, ArkxError::WrongPassword), "got: {err}");
+        assert!(!out.join("secret.txt").exists());
     }
 
     #[test]

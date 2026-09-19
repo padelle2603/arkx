@@ -328,3 +328,40 @@ fn set_comment_unsupported_format_fails() {
     let err = bm.set_comment(&archive, "c").unwrap_err();
     assert!(err.to_string().contains("read-only"));
 }
+
+#[test]
+fn zip_aes_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("sec.zip");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, Some("secret"), None)
+        .unwrap();
+
+    let info = bm.detect_and_list(&archive).unwrap();
+    assert!(
+        info.entries.iter().any(|e| e.encrypted),
+        "created zip is not encrypted"
+    );
+
+    let out = tmp.path().join("out_sec");
+    bm.extract(&archive, &out, None, Some("secret"), None)
+        .unwrap();
+    assert_eq!(
+        fs::read(out.join("src/hello.txt")).unwrap(),
+        b"Hello, arkx!"
+    );
+
+    // Wrong password: typed error, nothing written on disk (the 7z fallback
+    // is skipped once the native backend already rejected the credentials).
+    let out_bad = tmp.path().join("out_bad");
+    let err = bm
+        .extract(&archive, &out_bad, None, Some("wrong"), None)
+        .unwrap_err();
+    assert!(
+        matches!(err, arkx::core::error::ArkxError::WrongPassword),
+        "got: {err}"
+    );
+    assert!(!out_bad.join("src/hello.txt").exists());
+}

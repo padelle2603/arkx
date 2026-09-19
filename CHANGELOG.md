@@ -7,6 +7,11 @@
   remove/rename. The *Archive properties* dialog shows an editable field and a
   *Save* button for zip archives; 7z/RAR report "read-only; use zip", formats
   without comment support report a clear error.
+- **Native AES-256 zip (create/extract)**: a password on `arkx a` and on
+  extraction now runs through the native backend for zip (AES-256, `aes-crypto`
+  feature). Encrypted entries decrypt per entry and a wrong password surfaces
+  the typed `WrongPassword`; the 7z re-run is skipped once the native backend
+  already rejected the credentials (it left partial garbage behind).
 
 ## v1.5.0 — archive editing: rename, copy/paste, open-with, integrity check
 

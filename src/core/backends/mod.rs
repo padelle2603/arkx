@@ -150,6 +150,13 @@ impl BackendManager {
             Ok(()) => Ok(()),
             Err(e) => {
                 if matches!(fmt.backend(), BackendKind::Native) {
+                    // When the native backend already had a password and
+                    // rejected it, don't re-route to 7z: it would re-run the
+                    // extraction with the same wrong credentials (and can leave
+                    // partial garbage behind). The typed error drives the prompt.
+                    if matches!(&e, ArkxError::WrongPassword) && password.is_some() {
+                        return Err(e);
+                    }
                     eprintln!("[core] native extract failed, falling back to 7z: {}", e);
                     match self.seven.extract(archive, dest, entries, password, None) {
                         Ok(()) => Ok(()),
@@ -269,30 +276,35 @@ impl BackendManager {
                 }
             }
         }
-        if self.native.supports(&fmt) && password.is_none() {
-            // Large zips → multithreaded 7z (-mmt) with fallback to native:
-            // above threshold (adaptive on RAM) parallel beats zero-fork.
-            if matches!(fmt, ArchiveFormat::Zip)
-                && self.seven.is_available()
-                && total >= crate::core::util::zip_seven_threshold_bytes()
-            {
-                eprintln!(
-                    "[core] big zip ({} threads): using 7z",
-                    crate::core::util::effective_threads()
-                );
-                match self.seven.create(dest, sources, level, password, progress) {
-                    Ok(()) => return Ok(()),
-                    Err(e) => {
-                        eprintln!("[core] 7z create failed, falling back to native: {}", e);
-                        return self.native.create(dest, sources, level, None, None);
+        if self.native.supports(&fmt) {
+            if matches!(fmt, ArchiveFormat::Zip) && password.is_some() {
+                // Encrypted zip → native AES-256 (7z -p has no CLI-safe
+                // password plumbing through this path for creation either).
+                return self.native.create(dest, sources, level, password, progress);
+            }
+            if password.is_none() {
+                // Large zips → multithreaded 7z (-mmt) with fallback to native:
+                // above threshold (adaptive on RAM) parallel beats zero-fork.
+                if matches!(fmt, ArchiveFormat::Zip)
+                    && self.seven.is_available()
+                    && total >= crate::core::util::zip_seven_threshold_bytes()
+                {
+                    eprintln!(
+                        "[core] big zip ({} threads): using 7z",
+                        crate::core::util::effective_threads()
+                    );
+                    match self.seven.create(dest, sources, level, None, progress) {
+                        Ok(()) => return Ok(()),
+                        Err(e) => {
+                            eprintln!("[core] 7z create failed, falling back to native: {}", e);
+                            return self.native.create(dest, sources, level, None, None);
+                        }
                     }
                 }
+                return self.native.create(dest, sources, level, password, progress);
             }
-            // Native has no password support yet.
-            self.native.create(dest, sources, level, password, progress)
-        } else {
-            self.seven.create(dest, sources, level, password, progress)
         }
+        self.seven.create(dest, sources, level, password, progress)
     }
 
     /// Set the archive comment. Only zip has a writer backend (7z CLI cannot
