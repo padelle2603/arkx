@@ -110,8 +110,8 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             cmd.arg(format!("-p{}", pw));
         }
         cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
-        cmd.arg(old_name);
-        cmd.arg(new_name);
+        cmd.arg(entry_arg(old_name));
+        cmd.arg(entry_arg(new_name));
         let output = cmd
             .arg("-bsp0")
             .arg("-bso0")
@@ -141,7 +141,7 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         }
         if let Some(sel) = entries {
             for e in sel {
-                cmd.arg(e);
+                cmd.arg(entry_arg(e));
             }
         }
         cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
@@ -203,6 +203,16 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             passed,
             failed,
         })
+    }
+}
+
+/// Prefix an entry name with `./` when it starts with `-`, so a hostile
+/// archive entry is never parsed as a 7z switch.
+fn entry_arg(e: &str) -> String {
+    if e.starts_with('-') {
+        format!("./{e}")
+    } else {
+        e.to_string()
     }
 }
 
@@ -407,7 +417,7 @@ impl SevenZipBackend {
 
         if let Some(sel) = entries {
             for e in sel {
-                cmd.arg(e);
+                cmd.arg(entry_arg(e));
             }
         }
 
@@ -874,7 +884,7 @@ impl SevenZipBackend {
         let _staging = if let Some(parent) = common_parent {
             for (s, name) in sources {
                 input_paths.push(s.clone());
-                cmd.arg(name);
+                cmd.arg(entry_arg(name));
             }
             cmd.current_dir(&parent);
             None
@@ -885,7 +895,7 @@ impl SevenZipBackend {
                 let _ = std::fs::create_dir_all(dest.parent().unwrap_or(dir.path()));
                 copy_out(s, &dest)?;
                 input_paths.push(dest.clone());
-                cmd.arg(name);
+                cmd.arg(entry_arg(name));
             }
             cmd.current_dir(dir.path());
             Some(dir)
@@ -1000,7 +1010,7 @@ impl SevenZipBackend {
         }
         cmd.arg(archive.as_os_str().to_str().unwrap_or(""));
         for name in entries {
-            cmd.arg(name);
+            cmd.arg(entry_arg(name));
         }
 
         if let Some(cb) = &progress {

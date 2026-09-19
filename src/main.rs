@@ -554,11 +554,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
             let mut password: Option<String> = None;
+            let mut threads: Option<usize> = None;
             let mut entries: Vec<String> = Vec::new();
             let mut i = 3;
             while i < args.len() {
                 let consumed =
-                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut None);
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
                 if consumed > 0 {
                     i += consumed;
                     continue;
@@ -577,6 +578,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     i += 1;
                 }
             }
+            crate::core::util::set_thread_override(threads);
             println!("Testing {}...", archive.display());
             let start = std::time::Instant::now();
             let report = backend.test(
@@ -624,11 +626,18 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     i += 1;
                 }
             }
-            let temp_dir = std::env::temp_dir().join("arkx-open");
-            std::fs::create_dir_all(&temp_dir).map_err(ArkxError::Io)?;
+            let temp_dir = crate::core::util::open_with_dir()?;
             let path = backend.open_with(&archive, &entry, password.as_deref(), &temp_dir)?;
             println!("Extracted to: {}", path.display());
-            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+            let mut child = match std::process::Command::new("xdg-open").arg(&path).spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to launch {}: {}", path.display(), e);
+                    std::process::exit(1);
+                }
+            };
+            let _ = child.wait();
+            std::fs::remove_dir_all(&temp_dir).ok();
         }
         "w" | "wipe" => {
             if args.len() < 4 {
@@ -642,11 +651,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
             let mut password: Option<String> = None;
             let mut passes = 3usize;
+            let mut threads: Option<usize> = None;
             let mut entries: Vec<String> = Vec::new();
             let mut i = 3;
             while i < args.len() {
                 let consumed =
-                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut None);
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
                 if consumed > 0 {
                     i += consumed;
                     continue;
@@ -656,12 +666,8 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                         passes = v.parse().unwrap_or(3);
                     }
                     i += 2;
-                } else if args[i].starts_with("--passes=") {
-                    passes = args[i]
-                        .strip_prefix("--passes=")
-                        .unwrap()
-                        .parse()
-                        .unwrap_or(3);
+                } else if let Some(v) = args[i].strip_prefix("--passes=") {
+                    passes = v.parse().unwrap_or(3);
                     i += 1;
                 } else {
                     entries.push(
@@ -672,6 +678,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     i += 1;
                 }
             }
+            crate::core::util::set_thread_override(threads);
             if entries.is_empty() {
                 eprintln!("No entries specified");
                 std::process::exit(1);

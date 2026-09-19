@@ -1909,8 +1909,12 @@ impl NativeBackend {
         let mut f = z
             .by_index(idx)
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
-        let out_path = temp_dir.join(crate::core::paths::normalize(entry));
-        std::fs::create_dir_all(out_path.parent().unwrap_or(temp_dir)).map_err(ArkxError::Io)?;
+        let out_path = secure_join(temp_dir, entry).ok_or_else(|| {
+            crate::core::error::ArkxError::Backend(format!("unsafe entry path in archive: {entry}"))
+        })?;
+        if let Some(parent) = out_path.parent() {
+            std::fs::create_dir_all(parent).map_err(ArkxError::Io)?;
+        }
         if f.is_dir() {
             std::fs::create_dir_all(&out_path).map_err(ArkxError::Io)?;
             return Ok(out_path);

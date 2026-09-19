@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 
@@ -33,18 +33,20 @@ pub enum WorkerEvent {
 pub struct WorkerPool {
     tx: Sender<Job>,
     rx: Receiver<WorkerEvent>,
-    cancel_flag: Arc<AtomicBool>,
+    /// Live cancel flags, one per running job: cancelling must not reset the
+    /// flag of a sibling job when this one finishes.
+    cancel_flags: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
 }
 
 impl WorkerPool {
     pub fn new() -> Self {
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (evt_tx, evt_rx) = mpsc::channel::<WorkerEvent>();
-        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let cancel_flags = Arc::new(Mutex::new(Vec::<Arc<AtomicBool>>::new()));
 
         // Dispatcher thread — per-job threads so a pipe deadlock (7z) never
         // blocks dispatch. Progress stays byte-based (see backends).
-        let cancel_clone = cancel_flag.clone();
+        let flags = cancel_flags.clone();
         thread::spawn(move || {
             while let Ok(job) = job_rx.recv() {
                 let kind_str = match &job.kind {
@@ -61,14 +63,19 @@ impl WorkerPool {
                     JobKind::SetComment { .. } => "comment",
                 }
                 .to_string();
+                let cancel_flag = Arc::new(AtomicBool::new(false));
+                flags
+                    .lock()
+                    .expect("pool cancel flags")
+                    .push(cancel_flag.clone());
                 let _ = evt_tx.send(WorkerEvent::Started { kind: kind_str });
                 let evt_tx_clone = evt_tx.clone();
                 let evt_tx_inner = evt_tx.clone();
-                let cancel_flag_inner = cancel_clone.clone();
+                let job_flags = flags.clone();
                 // Run the job on its own thread so dispatch never blocks.
                 thread::spawn(move || {
                     let backend = BackendManager::new();
-                    let cancel_for_job = cancel_flag_inner.clone();
+                    let cancel_for_job = cancel_flag.clone();
                     let result = Self::execute_job(
                         &backend,
                         job,
@@ -78,20 +85,18 @@ impl WorkerPool {
                             }
                             let _ = evt_tx_clone.send(WorkerEvent::Progress { info });
                         },
-                        cancel_flag_inner.clone(),
+                        cancel_flag.clone(),
                     );
 
                     match result {
                         Ok(res) => {
-                            cancel_flag_inner.store(false, Ordering::Relaxed);
                             let _ = evt_tx_inner.send(WorkerEvent::Finished { result: Ok(res) });
                         }
                         Err(e) => {
-                            // Snapshot the cancel state BEFORE clearing it, so the
-                            // next job after a cancel is not mistaken for one.
+                            // Object-level races are gone (own flag): the job is
+                            // cancelled only when THIS flag is set.
                             let was_cancelled = matches!(e, ArkxError::Cancelled)
-                                || cancel_flag_inner.load(Ordering::Relaxed);
-                            cancel_flag_inner.store(false, Ordering::Relaxed);
+                                || cancel_flag.load(Ordering::Relaxed);
                             if was_cancelled {
                                 let _ = evt_tx_inner.send(WorkerEvent::Error {
                                     err: ArkxError::Cancelled,
@@ -101,6 +106,10 @@ impl WorkerPool {
                             }
                         }
                     }
+                    job_flags
+                        .lock()
+                        .expect("pool cancel flags")
+                        .retain(|f| !Arc::ptr_eq(f, &cancel_flag));
                 });
             }
         });
@@ -108,7 +117,7 @@ impl WorkerPool {
         Self {
             tx: job_tx,
             rx: evt_rx,
-            cancel_flag,
+            cancel_flags,
         }
     }
 
@@ -214,8 +223,7 @@ impl WorkerPool {
                 entry,
                 password,
             } => {
-                let temp_dir = std::env::temp_dir().join("arkx-open");
-                std::fs::create_dir_all(&temp_dir).map_err(ArkxError::Io)?;
+                let temp_dir = crate::core::util::open_with_dir()?;
                 let path = backend.open_with(&archive, &entry, password.as_deref(), &temp_dir)?;
                 // Launch the system default handler for the extracted entry.
                 let spawned = std::process::Command::new("xdg-open")
@@ -319,7 +327,9 @@ impl WorkerPool {
     }
 
     pub fn cancel_all(&self) {
-        self.cancel_flag.store(true, Ordering::Relaxed);
+        for f in self.cancel_flags.lock().expect("pool cancel flags").iter() {
+            f.store(true, Ordering::Relaxed);
+        }
     }
 }
 
@@ -331,6 +341,6 @@ impl Default for WorkerPool {
 
 impl Drop for WorkerPool {
     fn drop(&mut self) {
-        self.cancel_flag.store(true, Ordering::Relaxed);
+        self.cancel_all();
     }
 }

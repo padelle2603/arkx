@@ -466,7 +466,17 @@ impl BackendManager {
         match fmt {
             ArchiveFormat::Zip => self.native.open_with(archive, entry, password, temp_dir),
             ArchiveFormat::SevenZip | ArchiveFormat::Tar => {
-                self.seven.open_with(archive, entry, password, temp_dir)
+                // Reuse the format's own extraction for a single entry (works
+                // for 7z and tar too, where no dedicated open-with path exists).
+                let entry = entry.to_string();
+                self.extract(
+                    archive,
+                    temp_dir,
+                    Some(std::slice::from_ref(&entry)),
+                    password,
+                    None,
+                )?;
+                Ok(temp_dir.join(crate::core::paths::normalize(entry.as_str())))
             }
             _ => Err(ArkxError::UnsupportedFormat(format!(
                 "cannot open entries of {fmt:?} with an external app"
@@ -504,9 +514,10 @@ impl BackendManager {
             ArchiveFormat::Zip => self
                 .native
                 .secure_delete(archive, entries, passes, password, progress),
-            ArchiveFormat::SevenZip | ArchiveFormat::Tar => self
-                .seven
-                .secure_delete(archive, entries, passes, password, progress),
+            ArchiveFormat::SevenZip | ArchiveFormat::Tar => Err(ArkxError::UnsupportedFormat(
+                "secure wipe is only available for zip; use Remove to delete entries from 7z/tar archives"
+                    .into(),
+            )),
             _ => Err(ArkxError::UnsupportedFormat(format!(
                 "cannot secure-delete from {fmt:?}"
             ))),

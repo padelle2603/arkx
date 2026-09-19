@@ -96,6 +96,16 @@ impl Default for BsdtarBackend {
     }
 }
 
+/// Prefix an entry name with `./` when it starts with `-`, so a hostile
+/// archive entry is never parsed as a tar switch.
+fn entry_arg(e: &str) -> String {
+    if e.starts_with('-') {
+        format!("./{e}")
+    } else {
+        e.to_string()
+    }
+}
+
 fn locate_tar() -> (PathBuf, bool) {
     use std::sync::OnceLock;
     static CACHE: OnceLock<(PathBuf, bool)> = OnceLock::new();
@@ -208,7 +218,7 @@ impl BsdtarBackend {
         cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
         if let Some(sel) = entries {
             for e in sel {
-                cmd.arg(e);
+                cmd.arg(entry_arg(e));
             }
         }
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());

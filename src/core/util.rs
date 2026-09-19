@@ -352,6 +352,24 @@ pub fn read_lines_until(mut reader: impl Read, mut on_line: impl FnMut(&str) -> 
     }
 }
 
+/// Unique per-invocation temp dir for "open with", auto-removed after a delay
+/// so the launched app has time to read the extracted entry. The unique name
+/// also stops concurrent CLI/GUI opens from colliding in one shared dir.
+pub fn open_with_dir() -> Result<std::path::PathBuf, crate::core::error::ArkxError> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("arkx-open-{}-{}", std::process::id(), nanos));
+    std::fs::create_dir_all(&dir).map_err(crate::core::error::ArkxError::Io)?;
+    let cleanup = dir.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+        std::fs::remove_dir_all(&cleanup).ok();
+    });
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
