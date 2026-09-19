@@ -35,6 +35,8 @@ pub struct ArchiveInfo {
     pub num_files: usize,
     pub num_dirs: usize,
     pub has_encrypted: bool,
+    /// Archive-level comment, when the format stores one (zip/7z/rar).
+    pub comment: Option<String>,
 }
 
 /// Byte-based progress event: `percent` is always `current/total*100`.

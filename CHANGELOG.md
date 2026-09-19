@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Editable archive comment (zip)**: comments are now read (`zip.comment()`,
+  `Comment =` in 7z/RAR) and written on `.zip` via a native rewrite shared with
+  remove/rename. The *Archive properties* dialog shows an editable field and a
+  *Save* button for zip archives; 7z/RAR report "read-only; use zip", formats
+  without comment support report a clear error.
+
 ## v1.5.0 — archive editing: rename, copy/paste, open-with, integrity check
 
 - **Rename entries**: entries can be renamed in place on `.zip` (native rewrite)

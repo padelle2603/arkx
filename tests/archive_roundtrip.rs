@@ -298,3 +298,33 @@ fn remove_unsupported_format_fails() {
         .unwrap_err();
     assert!(err.to_string().contains("cannot remove from"));
 }
+
+#[test]
+fn set_comment_zip_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_, sources) = create_src_dir(tmp.path());
+    let archive = tmp.path().join("cmt.zip");
+
+    let bm = backend();
+    bm.create(&archive, &sources, 6, None, None).unwrap();
+    assert_eq!(
+        bm.detect_and_list(&archive).unwrap().comment.as_deref(),
+        None
+    );
+
+    bm.set_comment(&archive, "hello comment").unwrap();
+    assert_eq!(
+        bm.detect_and_list(&archive).unwrap().comment.as_deref(),
+        Some("hello comment")
+    );
+}
+
+#[test]
+fn set_comment_unsupported_format_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("x.7z");
+    fs::write(&archive, b"x").unwrap();
+    let bm = backend();
+    let err = bm.set_comment(&archive, "c").unwrap_err();
+    assert!(err.to_string().contains("read-only"));
+}

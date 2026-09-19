@@ -1312,6 +1312,7 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
     // ...
 
     let mut in_entries_section = false;
+    let mut comment: Option<String> = None;
     for line in output.lines() {
         let line = line.trim();
         if !in_entries_section {
@@ -1330,6 +1331,13 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
                     encrypted: false,
                 });
                 continue;
+            }
+            // Archive-level comment lives in the header block.
+            if line.starts_with("Comment = ") {
+                let v = line.trim_start_matches("Comment = ").trim().to_string();
+                if !v.is_empty() {
+                    comment = Some(v);
+                }
             }
             // Ignore global header before the first ----------
             continue;
@@ -1442,6 +1450,7 @@ fn parse_7z_slt(output: &str, archive_path: &Path) -> Result<ArchiveInfo> {
         num_files,
         num_dirs,
         has_encrypted,
+        comment,
     })
 }
 

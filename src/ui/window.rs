@@ -1670,6 +1670,16 @@ pub fn build_ui(app: &adw::Application) {
                                 },
                             );
                         }
+                        Ok(JobResult::Comment) => {
+                            status_left.set_text("Comment saved ✓");
+                            let ui_idle = ui_poll.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(0),
+                                move || {
+                                    rebuild_list(ui_idle.clone());
+                                },
+                            );
+                        }
                         Ok(JobResult::Remove) => {
                             // Relist to show the remaining entries in place
                             // (deferred, see Add).
@@ -2072,6 +2082,9 @@ fn properties_rows(info: &ArchiveInfo, selected: &[String]) -> Vec<(String, Stri
             "no".to_string()
         },
     ));
+    if let Some(c) = &info.comment {
+        rows.push(("Comment".to_string(), c.clone()));
+    }
     if selected.len() == 1 {
         if let Some(e) = info.entries.iter().find(|e| e.path == selected[0]) {
             rows.push(("—".to_string(), String::new()));
@@ -2128,7 +2141,12 @@ fn show_properties(ui: &Ui) {
     let rows = properties_rows(&info, &selected);
 
     let body = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let is_zip = info.format == "ZIP";
     for (k, v) in rows {
+        // zip comments are edited via the writable field below, not this row.
+        if is_zip && k == "Comment" {
+            continue;
+        }
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         let key = gtk::Label::new(Some(if k.is_empty() { "—" } else { &k }));
         key.set_xalign(0.0);
@@ -2155,6 +2173,28 @@ fn show_properties(ui: &Ui) {
     scroll.set_min_content_width(380);
     scroll.set_child(Some(&body));
     let dialog = adw::AlertDialog::new(Some("Archive properties"), None);
+    if is_zip {
+        let cbox = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+        let entry = gtk::Entry::new();
+        entry.set_text(info.comment.as_deref().unwrap_or(""));
+        entry.set_hexpand(true);
+        entry.set_placeholder_text(Some("Archive comment…"));
+        let save = gtk::Button::with_label("Save");
+        save.add_css_class("suggested-action");
+        cbox.append(&entry);
+        cbox.append(&save);
+        body.append(&cbox);
+        let ui_c = ui.clone();
+        let dialog_c = dialog.clone();
+        let path = PathBuf::from(&info.path);
+        save.connect_clicked(move |_| {
+            ui_c.worker.borrow_mut().submit(JobKind::SetComment {
+                archive: path.clone(),
+                comment: entry.text().to_string(),
+            });
+            dialog_c.close();
+        });
+    }
     dialog.set_extra_child(Some(&scroll));
     dialog.add_response("ok", "OK");
     dialog.set_default_response(Some("ok"));
@@ -2191,6 +2231,7 @@ mod tests {
             num_files: 2,
             num_dirs: 1,
             has_encrypted,
+            comment: None,
         }
     }
 

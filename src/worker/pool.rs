@@ -58,6 +58,7 @@ impl WorkerPool {
                     JobKind::Paste { .. } => "paste",
                     JobKind::OpenWith { .. } => "open-with",
                     JobKind::SecureDelete { .. } => "secure-delete",
+                    JobKind::SetComment { .. } => "comment",
                 }
                 .to_string();
                 let _ = evt_tx.send(WorkerEvent::Started { kind: kind_str });
@@ -238,6 +239,10 @@ impl WorkerPool {
                     Some(Box::new(wrapped)),
                 )?;
                 Ok(JobResult::SecureDelete)
+            }
+            JobKind::SetComment { archive, comment } => {
+                backend.set_comment(&archive, &comment)?;
+                Ok(JobResult::Comment)
             }
             JobKind::Paste {
                 archive,

@@ -65,6 +65,10 @@ pub enum JobKind {
         passes: usize,
         password: Option<String>,
     },
+    SetComment {
+        archive: PathBuf,
+        comment: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -83,4 +87,5 @@ pub enum JobResult {
     OpenWith(std::path::PathBuf),
     Paste,
     SecureDelete,
+    Comment,
 }

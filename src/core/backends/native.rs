@@ -277,6 +277,14 @@ impl NativeBackend {
             num_files,
             num_dirs,
             has_encrypted,
+            comment: {
+                let c = String::from_utf8_lossy(zip.comment()).trim().to_string();
+                if c.is_empty() {
+                    None
+                } else {
+                    Some(c)
+                }
+            },
         })
     }
 
@@ -335,6 +343,7 @@ impl NativeBackend {
             num_files,
             num_dirs,
             has_encrypted: false,
+            comment: None,
         })
     }
 
@@ -368,6 +377,7 @@ impl NativeBackend {
             num_files: 1,
             num_dirs: 0,
             has_encrypted: false,
+            comment: None,
         })
     }
 
@@ -1079,10 +1089,34 @@ impl NativeBackend {
         entries: &[String],
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        let skip = |name: &str| {
+            entries
+                .iter()
+                .any(|s| crate::core::paths::entry_matches(name, s))
+        };
+        self.rewrite_zip(archive, None, &skip, progress)
+    }
+
+    /// Set the archive comment (zip). Re-writes the whole archive, same
+    /// copy loop as remove/rename: the crate offers no in-place comment edit.
+    pub(crate) fn set_comment_zip(&self, archive: &Path, comment: &str) -> Result<()> {
+        let keep = |_: &str| false;
+        self.rewrite_zip(archive, Some(comment), &keep, None)
+    }
+
+    /// Shared zip re-write: copies every non-skipped entry into a temp file
+    /// and atomically replaces the archive. `comment` is applied when given.
+    fn rewrite_zip(
+        &self,
+        archive: &Path,
+        comment: Option<&str>,
+        skip: &dyn Fn(&str) -> bool,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
         // Encrypted entries cannot be recompressed without the password.
         let refuse_encrypted = || -> Result<()> {
             Err(ArkxError::Backend(
-                "removing from an encrypted archive is not supported".into(),
+                "rewriting an encrypted archive is not supported".into(),
             ))
         };
         let mut old = {
@@ -1110,16 +1144,16 @@ impl NativeBackend {
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(1024 * 1024, file));
+            if let Some(c) = comment {
+                zip.set_comment(c);
+            }
             let mut done = 0u64;
             for i in 0..old.len() {
                 let mut f = old
                     .by_index(i)
                     .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
                 let name = f.name().to_string();
-                if entries
-                    .iter()
-                    .any(|s| crate::core::paths::entry_matches(&name, s))
-                {
+                if skip(&name) {
                     continue;
                 }
                 done += 1;

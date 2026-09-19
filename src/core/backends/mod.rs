@@ -295,6 +295,21 @@ impl BackendManager {
         }
     }
 
+    /// Set the archive comment. Only zip has a writer backend (7z CLI cannot
+    /// set one); formats without comment support return a clear message.
+    pub fn set_comment(&self, archive: &Path, comment: &str) -> Result<()> {
+        let fmt = super::detector::detect_format(archive);
+        match fmt {
+            ArchiveFormat::Zip => self.native.set_comment_zip(archive, comment),
+            ArchiveFormat::SevenZip | ArchiveFormat::Rar => Err(ArkxError::UnsupportedFormat(
+                "writing comments is not supported for 7z/rar (read-only; use zip)".into(),
+            )),
+            _ => Err(ArkxError::UnsupportedFormat(format!(
+                "{fmt:?} has no comment field"
+            ))),
+        }
+    }
+
     /// Add files to an existing archive. Routing:
     /// Zip→native rewrite; 7z and plain tar→`7z a` (update mode); everything else
     /// is extract-only. Stream-compressed tar flavors (tar.gz/.xz/…) cannot be
