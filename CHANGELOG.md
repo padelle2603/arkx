@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Context menu at full height**: the right-click menu is no longer capped at
+  340px, so every option is visible without scrolling (it sizes to its
+  content; GTK only scrolls it if it would overflow the screen).
 - **Archive properties as a full window**: the properties view is now a
   resizable secondary window sized to its content instead of a scrollable
   alert dialog, so every row is visible at once (no scrolling).

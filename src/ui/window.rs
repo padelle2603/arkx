@@ -109,8 +109,9 @@ pub fn build_ui(app: &adw::Application) {
         .narrow .header-btn label { font-size: 12px; }
         .narrow .file-row { padding: 6px 8px; }
         .narrow .app-frame { margin: 6px; border-radius: 8px; }
-        /* Context menu: bounded height so it scrolls instead of overflowing. */
-        popover.context-menu { max-height: 340px; min-width: 220px; }
+        /* Context menu: sizes to its content; GTK scrolls only if it would
+           overflow the screen. */
+        popover.context-menu { min-width: 220px; }
         popover.context-menu scrolledwindow { border: none; }
     "#;
     let provider = gtk::CssProvider::new();
