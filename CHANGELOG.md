@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.6.0 — editing suite: comments, AES-256, convert, multi-volume split
 
 - **Context menu at full height**: the right-click menu is no longer capped at
   340px, so every option is visible without scrolling (it sizes to its
@@ -35,6 +35,19 @@
   accept it (clear refusal elsewhere). The CLI also auto-opens a multi-volume
   archive when pointed at the base name (`out.7z` → `out.7z.001`), and the
   created size reports the sum of all volume files.
+- **Hardened archive editing**: "open with" and secure-delete resolve zip
+  entries through a secure join (path-traversal paths are skipped and
+  reported); 7z/tar entry names starting with `-` are prefixed so they cannot
+  be parsed as command-line options; cancelling one operation no longer aborts
+  the other pending jobs (per-job cancel flags).
+- **Robustness fixes**: archive paths that are not valid UTF-8 are passed to 7z
+  verbatim instead of being mangled; cancelling the password prompt resets the
+  pending state so the next attempt starts clean; the CLI `test`/`wipe`
+  commands honour the `--threads` override; non-panicking GUI guards replace
+  `unwrap`s on polled results.
+- **No leaked temp dirs**: convert, paste and new-folder staging dirs are now
+  cleaned by a RAII guard on every path (success or error) instead of only on
+  the happy path.
 
 ## v1.5.0 — archive editing: rename, copy/paste, open-with, integrity check
 
