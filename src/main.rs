@@ -869,14 +869,11 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 level,
                 crate::core::util::effective_threads()
             );
-            // Working dir under the system temp dir; cleaned up on every
-            // path (success or error). Same pid convention as the rest of the
-            // codebase, so a leftover from a previous crash is simply re-used.
-            let tmp_dir = std::env::temp_dir().join(format!("arkx-convert-{}", std::process::id()));
-            if tmp_dir.exists() {
-                let _ = std::fs::remove_dir_all(&tmp_dir);
-            }
-            std::fs::create_dir_all(&tmp_dir).map_err(ArkxError::Io)?;
+            // Working dir under the system temp dir; removed on drop
+            // (success or error) by the RAII guard. Same pid convention as the
+            // rest of the codebase, so a leftover from a previous crash is
+            // simply re-used.
+            let tmp_dir = crate::core::util::TaskTempDir::new("arkx-convert")?;
 
             let progress = |p: crate::core::archive::ProgressInfo| {
                 print!(
@@ -896,7 +893,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     Some(Box::new(progress)),
                 )?;
                 let mut sources = Vec::new();
-                for entry in std::fs::read_dir(&tmp_dir).map_err(ArkxError::Io)? {
+                for entry in std::fs::read_dir(&*tmp_dir).map_err(ArkxError::Io)? {
                     sources.push(entry.map_err(ArkxError::Io)?.path());
                 }
                 if sources.is_empty() {
@@ -918,7 +915,6 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     std::fs::metadata(&dest).map(|m| m.len()).unwrap_or(0),
                 ))
             })();
-            let _ = std::fs::remove_dir_all(&tmp_dir);
             let (secs, size) = result?;
             println!(
                 "\nSaved {} ({}) in {:.2}s",

@@ -269,9 +269,7 @@ impl WorkerPool {
                 {
                     return Ok(JobResult::Paste);
                 }
-                let temp_dir =
-                    std::env::temp_dir().join(format!("arkx-paste-{}", std::process::id()));
-                std::fs::create_dir_all(&temp_dir).map_err(ArkxError::Io)?;
+                let temp_dir = crate::core::util::TaskTempDir::new("arkx-paste")?;
                 let result = (|| -> std::result::Result<(), ArkxError> {
                     backend.extract(
                         &source_archive,
@@ -310,7 +308,6 @@ impl WorkerPool {
                     }
                     Ok(())
                 })();
-                std::fs::remove_dir_all(&temp_dir).ok();
                 result?;
                 Ok(JobResult::Paste)
             }

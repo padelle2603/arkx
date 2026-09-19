@@ -379,16 +379,13 @@ impl BackendManager {
         {
             return Err(ArkxError::InvalidInput(name.to_string()));
         }
-        let nano = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let tmp =
-            std::env::temp_dir().join(format!("arkx-newdir-{}-{:09}", std::process::id(), nano));
-        std::fs::create_dir_all(&tmp).map_err(ArkxError::Io)?;
-        let result = self.add(archive, &[(tmp.clone(), name.to_string())], password, None);
-        let _ = std::fs::remove_dir_all(&tmp);
-        result
+        let tmp = crate::core::util::TaskTempDir::new("arkx-newdir")?;
+        self.add(
+            archive,
+            &[(tmp.to_path_buf(), name.to_string())],
+            password,
+            None,
+        )
     }
 
     /// Remove entries from an existing archive. Same routing as `add`.

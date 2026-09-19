@@ -370,6 +370,36 @@ pub fn open_with_dir() -> Result<std::path::PathBuf, crate::core::error::ArkxErr
     Ok(dir)
 }
 
+/// Named staging dir under the system temp dir, removed on drop (best-effort)
+/// so early `?` returns cannot leak it. A leftover from a previous crash with
+/// the same pid is wiped on creation. Used by convert, paste and new-folder.
+#[derive(Debug)]
+pub struct TaskTempDir(std::path::PathBuf);
+
+impl TaskTempDir {
+    pub fn new(prefix: &str) -> Result<Self, crate::core::error::ArkxError> {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).ok();
+        }
+        std::fs::create_dir_all(&dir).map_err(crate::core::error::ArkxError::Io)?;
+        Ok(Self(dir))
+    }
+}
+
+impl std::ops::Deref for TaskTempDir {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.0
+    }
+}
+
+impl Drop for TaskTempDir {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
 /// Final "Completed" progress marker. Unknown total (0 bytes) reports a clean
 /// 100/100 instead of 0/0, so the bar always ends on a full state.
 pub fn completed(total: u64) -> crate::core::archive::ProgressInfo {
