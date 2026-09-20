@@ -243,7 +243,9 @@ fn input_sizes_walk(
     base: Option<&std::path::Path>,
     map: &mut std::collections::HashMap<String, u64>,
 ) {
-    let meta = match std::fs::metadata(p) {
+    // `symlink_metadata` (no-follow): a symlink that points back to a parent
+    // dir must not be walked, or the size estimation recurses forever.
+    let meta = match std::fs::symlink_metadata(p) {
         Ok(m) => m,
         Err(_) => return,
     };
@@ -334,17 +336,21 @@ pub fn spawn_drain_pipe(r: Option<impl Read + Send + 'static>) -> std::thread::J
 pub fn sum_selected(info: &ArchiveInfo, sel: Option<&[String]>) -> u64 {
     match sel {
         None => info.total_size,
-        Some(sel) => info
-            .entries
-            .iter()
-            .filter(|e| {
-                !e.is_dir
-                    && sel
-                        .iter()
-                        .any(|f| crate::core::paths::entry_matches(&e.path, f))
-            })
-            .map(|e| e.size)
-            .fold(0u64, |a, b| a.saturating_add(b)),
+        Some(sel) => {
+            // Normalize the selectors once so the per-entry match below never
+            // re-normalizes (no allocations in the hot loop).
+            let sels = crate::core::paths::normalize_sel(sel);
+            info.entries
+                .iter()
+                .filter(|e| {
+                    !e.is_dir
+                        && sels
+                            .iter()
+                            .any(|s| crate::core::paths::entry_matches_norm(&e.path, s))
+                })
+                .map(|e| e.size)
+                .fold(0u64, |a, b| a.saturating_add(b))
+        }
     }
 }
 
@@ -560,6 +566,28 @@ mod tests {
         std::fs::write(sub.join("b"), vec![1u8; 20]).unwrap();
         assert_eq!(dir_size(dir.path()), 30);
         assert_eq!(dir_size(&dir.path().join("a")), 10);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_sizes_skips_symlink_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a"), vec![1u8; 7]).unwrap();
+        // Symlink that points back to `root` itself: walking it must skip,
+        // not recurse forever.
+        std::os::unix::fs::symlink(&root, root.join("loop")).unwrap();
+        let mut map = std::collections::HashMap::new();
+        input_sizes_walk(&root, Some(dir.path()), &mut map);
+        assert_eq!(
+            map.len(),
+            2,
+            "only `root/a` (abs+rel); loop skipped: {:?}",
+            map
+        );
+        assert_eq!(map.get("root/a"), Some(&7)); // rel key (strip base)
+        assert_eq!(map.get(root.join("a").to_str().unwrap()), Some(&7)); // abs key
     }
 
     #[test]

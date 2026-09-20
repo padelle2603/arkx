@@ -18,6 +18,9 @@ pub(crate) enum PasswordAction {
         archive: PathBuf,
         dest: PathBuf,
         entries: Option<Vec<String>>,
+        /// Known byte total for the progress bar (from the listing), so the
+        /// backend skips its own pre-listing pass.
+        total: Option<u64>,
     },
 }
 
@@ -123,11 +126,13 @@ pub(crate) fn prompt_password(
                     archive,
                     dest,
                     entries,
+                    total,
                 } => worker.borrow_mut().submit(JobKind::Extract {
                     archive: archive.clone(),
                     dest: dest.clone(),
                     entries: entries.clone(),
                     password: Some(pwd),
+                    total_bytes: *total,
                 }),
             }
         },

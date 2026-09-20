@@ -31,8 +31,9 @@ pub fn queue_open_path(path: PathBuf) {
     }
 }
 
-/// Parameters of a retriable extraction (archive, dest, entries).
-type PendingExtract = (PathBuf, PathBuf, Option<Vec<String>>);
+/// Parameters of a retriable extraction
+/// (archive, dest, entries, known byte total for the progress bar).
+type PendingExtract = (PathBuf, PathBuf, Option<Vec<String>>, Option<u64>);
 
 /// Clipboard item for copy/cut/paste: source archive + selected entries.
 type ClipboardItem = (PathBuf, Vec<String>);
@@ -71,6 +72,35 @@ struct Ui {
     entry_hash_target: Rc<RefCell<Option<String>>>,
     entry_hash_sha: Rc<RefCell<Option<gtk::Label>>>,
     entry_hash_md5: Rc<RefCell<Option<gtk::Label>>>,
+}
+
+/// Prompt-gated edit submit for the open archive. Reuses the session password
+/// cache when present; when the archive is encrypted but no password is cached
+/// it asks the user first (cache remembered), then submits. Otherwise submits
+/// with the cached password or `None` directly.
+fn submit_edit_with_password(
+    ui: &Ui,
+    archive: &Path,
+    encrypted: bool,
+    submit: impl Fn(Option<String>) + 'static,
+) {
+    let cached = ui.password_cache.borrow().clone();
+    if cached.is_some() || !encrypted {
+        submit(cached);
+        return;
+    }
+    let ui_c = ui.clone();
+    let archive_c = archive.to_owned();
+    dialogs::ask_password(
+        &ui.window,
+        &archive_c,
+        "Type the password to modify this archive.",
+        move |pwd| {
+            *ui_c.password_cache.borrow_mut() = Some(pwd.clone());
+            submit(Some(pwd));
+        },
+        || {},
+    );
 }
 
 // Builds the main UI
@@ -493,10 +523,20 @@ pub fn build_ui(app: &adw::Application) {
         }
         ui.status_left
             .set_text(&format!("Adding {} item(s)…", sources.len()));
-        ui.worker.borrow_mut().submit(JobKind::Add {
-            archive,
-            sources,
-            password: None,
+        let encrypted = ui
+            .state
+            .borrow()
+            .current_info
+            .as_ref()
+            .is_some_and(|i| i.has_encrypted);
+        let ui_add = ui.clone();
+        let archive_job = archive.clone();
+        submit_edit_with_password(&ui, &archive, encrypted, move |password| {
+            ui_add.worker.borrow_mut().submit(JobKind::Add {
+                archive: archive_job.clone(),
+                sources: sources.clone(),
+                password,
+            });
         });
         true
     }
@@ -1060,6 +1100,7 @@ pub fn build_ui(app: &adw::Application) {
             ui_rm.status_left.set_text("No selection");
             return;
         }
+        let encrypted = info_opt.as_ref().is_some_and(|i| i.has_encrypted);
         let entries = if let Some(info) = info_opt {
             get_all_descendants(&info, &selected)
         } else {
@@ -1068,10 +1109,14 @@ pub fn build_ui(app: &adw::Application) {
         ui_rm
             .status_left
             .set_text(&format!("Removing {} entry(ies)…", entries.len()));
-        ui_rm.worker.borrow_mut().submit(JobKind::Remove {
-            archive,
-            entries,
-            password: None,
+        let ui_rm_sub = ui_rm.clone();
+        let archive_job = archive.clone();
+        submit_edit_with_password(&ui_rm, &archive, encrypted, move |password| {
+            ui_rm_sub.worker.borrow_mut().submit(JobKind::Remove {
+                archive: archive_job.clone(),
+                entries: entries.clone(),
+                password,
+            });
         });
     });
 
@@ -1197,11 +1242,19 @@ pub fn build_ui(app: &adw::Application) {
                 ui_c.status_left
                     .set_text(&format!("Renaming '{}'…", new_name));
                 end_c();
-                ui_c.worker.borrow_mut().submit(JobKind::Rename {
-                    archive: archive_c.clone(),
-                    old_name: old_c.clone(),
-                    new_name,
-                    password: None,
+                let encrypted = info_c.as_ref().is_some_and(|i| i.has_encrypted);
+                let ui_rn_sub = ui_c.clone();
+                let archive_for_prompt = archive_c.clone();
+                let archive_job = archive_c.clone();
+                let old_job = old_c.clone();
+                let new_job = new_name.clone();
+                submit_edit_with_password(&ui_c, &archive_for_prompt, encrypted, move |password| {
+                    ui_rn_sub.worker.borrow_mut().submit(JobKind::Rename {
+                        archive: archive_job.clone(),
+                        old_name: old_job.clone(),
+                        new_name: new_job.clone(),
+                        password,
+                    });
                 });
             });
         }
@@ -1303,6 +1356,7 @@ pub fn build_ui(app: &adw::Application) {
         let st = ui_ps.state.borrow();
         let dest_archive = st.current_archive.clone();
         let dest_dir = st.current_path.clone();
+        let encrypted = st.current_info.as_ref().is_some_and(|i| i.has_encrypted);
         drop(st);
         let Some(dest_archive) = dest_archive else {
             return;
@@ -1318,13 +1372,19 @@ pub fn build_ui(app: &adw::Application) {
             return;
         }
         let count = entries.len();
-        ui_ps.worker.borrow_mut().submit(JobKind::Paste {
-            archive: dest_archive,
-            dest: dest_dir,
-            source_archive: src_archive,
-            entries,
-            cut,
-            password: None,
+        let ui_ps_sub = ui_ps.clone();
+        let archive_job = dest_archive.clone();
+        let src_job = src_archive.clone();
+        let dest_job = dest_dir.clone();
+        submit_edit_with_password(&ui_ps, &dest_archive, encrypted, move |password| {
+            ui_ps_sub.worker.borrow_mut().submit(JobKind::Paste {
+                archive: archive_job.clone(),
+                dest: dest_job.clone(),
+                source_archive: src_job.clone(),
+                entries: entries.clone(),
+                cut,
+                password,
+            });
         });
         // Consume the clipboard: a paste is a one-shot operation.
         *ui_ps.cut_clipboard.borrow_mut() = None;
@@ -1347,6 +1407,7 @@ pub fn build_ui(app: &adw::Application) {
             None => return,
         };
         let selected = st.selected_entries.clone();
+        let encrypted = st.current_info.as_ref().is_some_and(|i| i.has_encrypted);
         drop(st);
         if selected.len() != 1 {
             ui_ow
@@ -1358,10 +1419,15 @@ pub fn build_ui(app: &adw::Application) {
         ui_ow
             .status_left
             .set_text(&format!("Opening '{}' with external app…", entry));
-        ui_ow.worker.borrow_mut().submit(JobKind::OpenWith {
-            archive,
-            entry,
-            password: None,
+        let ui_ow_sub = ui_ow.clone();
+        let archive_job = archive.clone();
+        let entry_job = entry.clone();
+        submit_edit_with_password(&ui_ow, &archive, encrypted, move |password| {
+            ui_ow_sub.worker.borrow_mut().submit(JobKind::OpenWith {
+                archive: archive_job.clone(),
+                entry: entry_job.clone(),
+                password,
+            });
         });
     });
 
@@ -1378,6 +1444,7 @@ pub fn build_ui(app: &adw::Application) {
             None => return,
         };
         let cur = st.current_path.clone();
+        let encrypted = st.current_info.as_ref().is_some_and(|i| i.has_encrypted);
         drop(st);
         let dialog =
             adw::AlertDialog::new(Some("New folder"), Some("Enter the name of the new folder"));
@@ -1421,11 +1488,22 @@ pub fn build_ui(app: &adw::Application) {
                 ui_nf_c
                     .status_left
                     .set_text(&format!("Creating folder '{}'…", name));
-                ui_nf_c.worker.borrow_mut().submit(JobKind::NewFolder {
-                    archive: archive_c.clone(),
-                    name: full,
-                    password: None,
-                });
+                let ui_nf_sub = ui_nf_c.clone();
+                let archive_for_prompt = archive_c.clone();
+                let archive_job = archive_c.clone();
+                let full_job = full.clone();
+                submit_edit_with_password(
+                    &ui_nf_c,
+                    &archive_for_prompt,
+                    encrypted,
+                    move |password| {
+                        ui_nf_sub.worker.borrow_mut().submit(JobKind::NewFolder {
+                            archive: archive_job.clone(),
+                            name: full_job.clone(),
+                            password,
+                        });
+                    },
+                );
             }
         });
         dialog.present(Some(&ui_nf.window));
@@ -1930,7 +2008,7 @@ pub fn build_ui(app: &adw::Application) {
                                 *ui_poll.is_busy.borrow_mut() = false;
                                 set_idle_sensitivity(&ui_poll);
                                 let retry = ui_poll.pending_extract.borrow().clone();
-                                if let Some((archive, dest, entries)) = retry {
+                                if let Some((archive, dest, entries, total)) = retry {
                                     *ui_poll.pending_password.borrow_mut() = true;
                                     dialogs::prompt_password(
                                         &ui_poll.window,
@@ -1938,6 +2016,7 @@ pub fn build_ui(app: &adw::Application) {
                                             archive,
                                             dest,
                                             entries,
+                                            total,
                                         },
                                         ui_poll.worker.clone(),
                                         ui_poll.password_cache.clone(),
@@ -2185,9 +2264,18 @@ fn start_extract(
     } else {
         Some(entries)
     };
+    // Reuse the listing the GUI already owns for the progress-bar total: the
+    // tar/7z/bsdtar backends skip their own pre-listing pass (no re-scan).
+    let total = ui
+        .state
+        .borrow()
+        .current_info
+        .as_ref()
+        .map(|i| crate::core::util::sum_selected(i, entries_opt.as_deref()));
     // Remember the exact operation even when no pre-prompt ran: a wrong
     // password mid-extraction must still be able to retry with these values.
-    *ui.pending_extract.borrow_mut() = Some((archive.clone(), dest.clone(), entries_opt.clone()));
+    *ui.pending_extract.borrow_mut() =
+        Some((archive.clone(), dest.clone(), entries_opt.clone(), total));
     // Reuse the password remembered for this archive; prompt only if there is
     // none yet (password-first flow: the progress bar appears only once the
     // password is accepted).
@@ -2209,6 +2297,7 @@ fn start_extract(
                 archive,
                 dest,
                 entries: entries_opt,
+                total,
             },
             worker,
             ui.password_cache.clone(),
@@ -2234,6 +2323,7 @@ fn start_extract(
         dest,
         entries: entries_opt,
         password: effective,
+        total_bytes: total,
     });
 }
 

@@ -1,7 +1,13 @@
 use crate::core::archive::{ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressInfo};
 use crate::core::detector::ArchiveFormat;
 use crate::core::error::{ArkxError, Result};
-use crate::core::util::{dir_size, effective_threads};
+use crate::core::util::dir_size;
+
+/// Thread cap for the 7z `-mmt` switch: use the machine's cores but never
+/// oversubscribe more than 32 (a 7z default that balances large archives).
+fn sz_threads() -> usize {
+    crate::core::util::effective_threads().min(32)
+}
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
@@ -58,7 +64,19 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
-        self.extract_inner(archive, dest, entries, password, progress)
+        self.extract_inner(archive, dest, entries, password, None, progress)
+    }
+
+    fn extract_with_total(
+        &self,
+        archive: &Path,
+        dest: &Path,
+        entries: Option<&[String]>,
+        password: Option<&str>,
+        total: Option<u64>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        self.extract_inner(archive, dest, entries, password, total, progress)
     }
 
     fn create(
@@ -102,7 +120,7 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let archive = super::native::absolutize(archive);
-        let threads = crate::core::util::effective_threads().min(32);
+        let threads = sz_threads();
         let mut cmd = Command::new(&self.bin);
         cmd.arg("rn").arg("-y").arg(format!("-mmt={}", threads));
         if let Some(pw) = password {
@@ -402,11 +420,32 @@ impl SevenZipBackend {
         dest: &Path,
         entries: Option<&[String]>,
         password: Option<&str>,
+        known_total: Option<u64>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
+        if self.cancelled() {
+            return Err(ArkxError::Cancelled);
+        }
 
-        let threads = effective_threads().min(32);
+        // Byte-based total for the bar (0 = encrypted headers → pulsing UI,
+        // never a fake %). The listing pass is skipped when the caller already
+        // knows the total (GUI), otherwise `7z l -slt` sums it. Computed BEFORE
+        // spawn so a declared zip bomb is refused while the child is not yet
+        // pumping bytes under `dest`.
+        let pre_total = if progress.is_some() {
+            match known_total {
+                Some(t) => t,
+                None => self.extract_total(archive, entries),
+            }
+        } else {
+            0
+        };
+        if pre_total > super::native::MAX_EXTRACTED_BYTES {
+            return Err(super::native::quota_error());
+        }
+
+        let threads = sz_threads();
         let mut cmd = Command::new(&self.bin);
         cmd.arg("x")
             .arg(format!("-mmt={}", threads))
@@ -442,12 +481,11 @@ impl SevenZipBackend {
         // (filtered for subsets), done = dir_size(dest) minus the baseline
         // sampled before spawn (an archive already in dest cancels out).
         if let Some(cb) = progress {
-            let total = self.extract_total(archive, entries);
             // Immediate 0% (total 0 = encrypted headers → pulsing UI, never a fake %).
-            cb(ProgressInfo::preparing(total));
+            cb(ProgressInfo::preparing(pre_total));
 
             let baseline = dir_size(dest);
-            let poller = crate::core::util::spawn_extract_poller(dest, baseline, total, cb);
+            let poller = crate::core::util::spawn_extract_poller(dest, baseline, pre_total, cb);
             let cb_arc = poller.cb.clone();
             let done = poller.done.clone();
             let stop = poller.stop.clone();
@@ -461,6 +499,11 @@ impl SevenZipBackend {
                 let mut last_emit = Instant::now();
                 let mut last_label = String::new();
                 crate::core::util::read_lines_until(stdout, |line| {
+                    if self.cancelled() {
+                        // Abort the child so `wait` below returns promptly and
+                        // the killed process frees the disk/CPU immediately.
+                        let _ = child.kill();
+                    }
                     let label = label_from_7z_line(line);
                     if label.is_empty() {
                         return false;
@@ -471,7 +514,7 @@ impl SevenZipBackend {
                         last_label = label.clone();
                         let d = done.load(Ordering::Relaxed);
                         if let Ok(guard) = cb_arc.lock() {
-                            guard(ProgressInfo::new(label, d, total));
+                            guard(ProgressInfo::new(label, d, pre_total));
                         }
                     }
                     false
@@ -480,6 +523,9 @@ impl SevenZipBackend {
             stop.store(true, Ordering::Relaxed);
             let _ = poller.handle.join();
             let status = child.wait().map_err(ArkxError::Io)?;
+            if self.cancelled() {
+                return Err(ArkxError::Cancelled);
+            }
             let _ = stderr_handle.join();
             let code = status.code().unwrap_or(-1);
             // 7z exit codes: 0=OK, 1=Warning (e.g. Headers Error on solid RAR),
@@ -526,7 +572,13 @@ impl SevenZipBackend {
             if let Some(out) = child.stdout.take() {
                 crate::core::util::drain_reader(out);
             }
+            if self.cancelled() {
+                let _ = child.kill();
+            }
             let status = child.wait().map_err(ArkxError::Io)?;
+            if self.cancelled() {
+                return Err(ArkxError::Cancelled);
+            }
             let _ = stderr_handle.join();
             let code = status.code().unwrap_or(-1);
             if !status.success() && code != 1 {
@@ -584,7 +636,7 @@ impl SevenZipBackend {
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(ArkxError::Io)?;
         }
-        let threads = effective_threads().min(32);
+        let threads = sz_threads();
         let fmt = crate::core::detector::detect_format(dest);
         let mut cmd = Command::new(&self.bin);
         cmd.arg("a").arg(format!("-mmt={}", threads)).arg("-y");
@@ -761,7 +813,7 @@ impl SevenZipBackend {
         // resolved relatively, so absolutize it upfront.
         let archive = super::native::absolutize(archive);
         let fmt = crate::core::detector::detect_format(&archive);
-        let threads = effective_threads().min(32);
+        let threads = sz_threads();
 
         // Fast path: no staging at all when every entry is at the archive root and
         // the sources share one common parent (cwd = parent, bare names).
@@ -922,7 +974,7 @@ impl SevenZipBackend {
             return Err(ArkxError::Backend("no entries to remove".into()));
         }
         let archive = super::native::absolutize(archive);
-        let threads = effective_threads().min(32);
+        let threads = sz_threads();
 
         let mut cmd = Command::new(&self.bin);
         cmd.arg("d").arg("-y").arg(format!("-mmt={}", threads));
@@ -988,9 +1040,15 @@ impl Drop for Staging {
 /// new root). Broken symlinks/special files are skipped silently, mirroring
 /// the create path's tolerance.
 fn copy_out(src: &Path, dest: &Path) -> Result<()> {
-    if src.is_file() {
+    // `symlink_metadata` (no-follow): a symlink inside the source is skipped
+    // entirely so a link that loops back to the source can't recurse forever.
+    let meta = match std::fs::symlink_metadata(src) {
+        Ok(m) => m,
+        Err(_) => return Ok(()),
+    };
+    if meta.is_file() {
         std::fs::copy(src, dest).map_err(ArkxError::Io)?;
-    } else if src.is_dir() {
+    } else if meta.is_dir() {
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
         for entry in std::fs::read_dir(src).map_err(ArkxError::Io)? {
             let entry = entry.map_err(ArkxError::Io)?;
@@ -1407,6 +1465,21 @@ mod tests {
     };
     use crate::core::error::ArkxError;
     use std::collections::HashMap;
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_out_skips_symlink_loops() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let dst = dir.path().join("dst");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a"), b"hello").unwrap();
+        // Symlink pointing back to `src`: must be skipped, not recursed.
+        std::os::unix::fs::symlink(&src, src.join("loop")).unwrap();
+        super::copy_out(&src, &dst).unwrap();
+        assert!(dst.join("a").exists(), "real file copied");
+        assert!(!dst.join("loop").exists(), "symlink loop skipped");
+    }
 
     #[test]
     fn missing_volume_error_is_detected_but_not_other_corrupted() {

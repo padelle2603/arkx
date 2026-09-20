@@ -10,16 +10,37 @@ use crate::core::error::{ArkxError, Result};
 use crate::core::util::dir_size;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 pub struct BsdtarBackend {
     bin: PathBuf,
     is_bsdtar: bool,
+    cancel: Arc<AtomicBool>,
 }
 
 impl BsdtarBackend {
     pub fn new() -> Self {
         let (bin, is_bsdtar) = locate_tar();
-        Self { bin, is_bsdtar }
+        Self {
+            bin,
+            is_bsdtar,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
+        let (bin, is_bsdtar) = locate_tar();
+        Self {
+            bin,
+            is_bsdtar,
+            cancel,
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
     }
 
     fn is_available(&self) -> bool {
@@ -72,7 +93,19 @@ impl ArchiveBackend for BsdtarBackend {
         _password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
-        self.extract_inner(archive, dest, entries, progress)
+        self.extract_inner(archive, dest, entries, None, progress)
+    }
+
+    fn extract_with_total(
+        &self,
+        archive: &Path,
+        dest: &Path,
+        entries: Option<&[String]>,
+        _password: Option<&str>,
+        total: Option<u64>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        self.extract_inner(archive, dest, entries, total, progress)
     }
 
     fn create(
@@ -188,6 +221,7 @@ impl BsdtarBackend {
         archive: &Path,
         dest: &Path,
         entries: Option<&[String]>,
+        known_total: Option<u64>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         if !self.is_available() {
@@ -197,9 +231,15 @@ impl BsdtarBackend {
             ));
         }
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
+        if self.cancelled() {
+            return Err(ArkxError::Cancelled);
+        }
         let fmt = crate::core::detector::detect_format(archive);
         let mut cmd = self.base_cmd(&fmt);
         cmd.arg("-xf").arg(archive).arg("-C").arg(dest);
+        // Never restore archive ownership: extracting as root would otherwise
+        // let an archive claim any uid/gid (privilege escalation).
+        cmd.arg("--no-same-owner");
         if let Some(sel) = entries {
             for e in sel {
                 cmd.arg(crate::core::paths::entry_arg(e));
@@ -220,25 +260,47 @@ impl BsdtarBackend {
         let cb = progress.unwrap();
 
         // Byte-based progress via dest polling (same idea as the 7z backend:
-        // total from listing, done = dir_size(dest) - baseline).
-        let total = self
-            .list(archive)
-            .map(|i| crate::core::util::sum_selected(&i, entries))
-            .unwrap_or(0);
-        cb(ProgressInfo::preparing(total));
+        // total from listing, done = dir_size(dest) - baseline). Skip the
+        // `tar -tvf` pre-listing when the caller already knows the total.
+        // Computed BEFORE spawn so a declared zip bomb is refused before the
+        // decompressor child starts pumping bytes under `dest`.
+        let pre_total = match known_total {
+            Some(t) => t,
+            None => self
+                .list(archive)
+                .map(|i| crate::core::util::sum_selected(&i, entries))
+                .unwrap_or(0),
+        };
+        if pre_total > super::native::MAX_EXTRACTED_BYTES {
+            return Err(super::native::quota_error());
+        }
+        cb(ProgressInfo::preparing(pre_total));
 
         let mut child = cmd
             .spawn()
             .map_err(|e| ArkxError::Backend(format!("spawn tar: {}", e)))?;
         let baseline = dir_size(dest);
-        let poller = crate::core::util::spawn_extract_poller(dest, baseline, total, cb);
+        let poller = crate::core::util::spawn_extract_poller(dest, baseline, pre_total, cb);
         let cb = poller.cb.clone();
         let stop = poller.stop.clone();
 
-        // Drain pipes to avoid 64KB deadlock, then wait.
+        // Drain pipes to avoid 64KB deadlock, then wait (polling every 100ms so
+        // a cancel kills the child promptly instead of waiting out the archive).
         let out_handle = crate::core::util::spawn_drain_pipe(child.stdout.take());
         let err_handle = crate::core::util::spawn_drain_pipe(child.stderr.take());
-        let status = child.wait().map_err(ArkxError::Io)?;
+        let status = loop {
+            if self.cancelled() {
+                let _ = child.kill();
+            }
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                Err(e) => return Err(ArkxError::Io(e)),
+            }
+        };
+        if self.cancelled() {
+            return Err(ArkxError::Cancelled);
+        }
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = poller.handle.join();
         out_handle.join().ok();
@@ -250,7 +312,7 @@ impl BsdtarBackend {
             )));
         }
         if let Ok(g) = cb.lock() {
-            g(crate::core::util::completed(total));
+            g(crate::core::util::completed(pre_total));
         }
         Ok(())
     }

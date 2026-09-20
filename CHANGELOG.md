@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.6.2 — cancel-aware extraction, password-aware edits and faster matching
+
+- **Fixed**: a cancel request now genuinely stops extraction — the cancel flag is
+  shared with the backend manager and the running extract children (7z, bsdtar)
+  are killed instead of only discarding progress events.
+- **Fixed**: the size walk and AppleDouble-free staging copy no longer recurse
+  forever when a symlink points back at the source.
+- **Fixed**: edit operations (add, remove, rename, paste, open-with, new folder)
+  now correctly reuse the session password, or prompt for it up front when the
+  open archive is encrypted.
+- **Fixed**: the shared 16GiB zip-bomb quota is enforced on the 7z and bsdtar
+  backends; bsdtar extraction no longer restores archive ownership
+  (`--no-same-owner`), matching the native backend.
+- **Perf**: the listing total is reused for extraction, so 7z/bsdtar skip their
+  pre-extract listing pass; selection matching is normalized once and the hot
+  loops are allocation-free; single-file extraction progress is throttled.
+- **Refactor**: the 7z thread cap is unified in a single helper and
+  `BackendKind::Libarchive` is renamed to `Bsdtar` to match the actual component.
+
 ## v1.6.1 — checksums, inline rename and multi-volume creation
 
 - **Feature**: SHA-256 and MD5 checksums (with copy-to-clipboard) in the archive

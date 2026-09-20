@@ -75,7 +75,10 @@ impl WorkerPool {
                 let job_flags = flags.clone();
                 // Run the job on its own thread so dispatch never blocks.
                 thread::spawn(move || {
-                    let backend = BackendManager::new();
+                    // Share the job's cancel flag with the backend so `Cancel`
+                    // genuinely aborts extract/create child processes, not just
+                    // the progress events.
+                    let backend = BackendManager::with_cancel(cancel_flag.clone());
                     let cancel_for_job = cancel_flag.clone();
                     let result = Self::execute_job(
                         &backend,
@@ -152,12 +155,14 @@ impl WorkerPool {
                 dest,
                 entries,
                 password,
+                total_bytes,
             } => {
-                backend.extract(
+                backend.extract_with_total(
                     &archive,
                     &dest,
                     entries.as_deref(),
                     password.as_deref(),
+                    total_bytes,
                     Some(Box::new(wrapped)),
                 )?;
                 Ok(JobResult::Extract)

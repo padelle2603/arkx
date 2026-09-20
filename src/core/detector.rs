@@ -94,18 +94,20 @@ impl ArchiveFormat {
             | Self::Compress => BackendKind::Native,
             // 7z does not open these tar.* (nor list tar.Z/tar.lzma): libarchive.
             Self::TarZ | Self::TarLzma | Self::TarLzip | Self::TarLzo | Self::TarLrzip => {
-                BackendKind::Libarchive
+                BackendKind::Bsdtar
             }
             _ => BackendKind::SevenZip,
         }
     }
 }
 
+/// Which backend must decode a format. Ranging over `bsdtar` (libarchive) for
+/// the tar.* variants 7z cannot open.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BackendKind {
     Native,
     SevenZip,
-    Libarchive,
+    Bsdtar,
 }
 
 /// Detect format from magic bytes + extension (extension as fallback for tar.*)
@@ -645,7 +647,7 @@ mod tests {
             ArchiveFormat::TarLzo,
             ArchiveFormat::TarLrzip,
         ] {
-            assert_eq!(fmt.backend(), BackendKind::Libarchive);
+            assert_eq!(fmt.backend(), BackendKind::Bsdtar);
         }
         // Rest via 7z
         for fmt in [

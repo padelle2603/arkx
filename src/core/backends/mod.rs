@@ -30,7 +30,7 @@ impl BackendManager {
         Self {
             native: native::NativeBackend::with_cancel(cancel.clone()),
             seven: seven_zip::SevenZipBackend::with_cancel(cancel.clone()),
-            bsdtar: bsdtar::BsdtarBackend::new(),
+            bsdtar: bsdtar::BsdtarBackend::with_cancel(cancel.clone()),
             cancel,
         }
     }
@@ -45,7 +45,7 @@ impl BackendManager {
         match fmt.backend() {
             BackendKind::Native => &self.native,
             BackendKind::SevenZip => &self.seven,
-            BackendKind::Libarchive => &self.bsdtar,
+            BackendKind::Bsdtar => &self.bsdtar,
         }
     }
 
@@ -119,6 +119,18 @@ impl BackendManager {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        self.extract_with_total(archive, dest, entries, password, None, progress)
+    }
+
+    pub fn extract_with_total(
+        &self,
+        archive: &Path,
+        dest: &Path,
+        entries: Option<&[String]>,
+        password: Option<&str>,
+        total: Option<u64>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
         let fmt = super::detector::detect_format(archive);
         // Large zips → multithreaded 7z even if the table says native:
         // zero-fork only pays off below threshold (adaptive on RAM).
@@ -129,7 +141,7 @@ impl BackendManager {
         if big_zip {
             match self
                 .seven
-                .extract(archive, dest, entries, password, progress)
+                .extract_with_total(archive, dest, entries, password, total, progress)
             {
                 Ok(()) => return Ok(()),
                 Err(e) => {
@@ -137,7 +149,9 @@ impl BackendManager {
                         "[core] 7z extract failed for big zip, falling back to native: {}",
                         e
                     );
-                    return self.native.extract(archive, dest, entries, password, None);
+                    return self
+                        .native
+                        .extract_with_total(archive, dest, entries, password, None, None);
                 }
             }
         }
@@ -146,7 +160,7 @@ impl BackendManager {
         // re-run without progress.
         match self
             .primary(&fmt)
-            .extract(archive, dest, entries, password, progress)
+            .extract_with_total(archive, dest, entries, password, total, progress)
         {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -159,7 +173,10 @@ impl BackendManager {
                         return Err(e);
                     }
                     eprintln!("[core] native extract failed, falling back to 7z: {}", e);
-                    match self.seven.extract(archive, dest, entries, password, None) {
+                    match self
+                        .seven
+                        .extract_with_total(archive, dest, entries, password, total, None)
+                    {
                         Ok(()) => Ok(()),
                         Err(second) => {
                             if matches!(&second, ArkxError::WrongPassword)
@@ -175,7 +192,8 @@ impl BackendManager {
                                 "[core] 7z extract failed, falling back to bsdtar: {}",
                                 second
                             );
-                            self.bsdtar.extract(archive, dest, entries, None, None)
+                            self.bsdtar
+                                .extract_with_total(archive, dest, entries, None, None, None)
                         }
                     }
                 } else if matches!(fmt.backend(), BackendKind::SevenZip) {
@@ -189,10 +207,14 @@ impl BackendManager {
                         return Err(e);
                     }
                     eprintln!("[core] 7z extract failed, falling back to bsdtar: {}", e);
-                    self.bsdtar.extract(archive, dest, entries, None, None)
+                    self.bsdtar
+                        .extract_with_total(archive, dest, entries, None, None, None)
                 } else {
                     eprintln!("[core] bsdtar extract failed, falling back to 7z: {}", e);
-                    match self.seven.extract(archive, dest, entries, password, None) {
+                    match self
+                        .seven
+                        .extract_with_total(archive, dest, entries, password, None, None)
+                    {
                         Ok(()) => Ok(()),
                         // Prefer a password/multi-volume diagnosis over the
                         // generic libarchive error so the UI can prompt.
@@ -239,7 +261,7 @@ impl BackendManager {
                 }
             }
         }
-        if matches!(fmt.backend(), BackendKind::Libarchive) {
+        if matches!(fmt.backend(), BackendKind::Bsdtar) {
             // lzip/lzo/lrzip tar flavors: creation needs rare external
             // encoders; keep them extract-only with a clear message.
             return Err(ArkxError::UnsupportedFormat(format!(

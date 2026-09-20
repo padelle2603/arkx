@@ -13,6 +13,9 @@ pub enum JobKind {
         dest: PathBuf,
         entries: Option<Vec<String>>,
         password: Option<String>,
+        /// Known byte total for the progress bar (GUI-derived from the loaded
+        /// listing). Lets tar/7z/bsdtar skip their own pre-listing pass.
+        total_bytes: Option<u64>,
     },
     Add {
         archive: PathBuf,

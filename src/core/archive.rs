@@ -112,6 +112,24 @@ pub trait ArchiveBackend: Send + Sync {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()>;
+
+    /// `extract` with a caller-provided byte total for the progress bar.
+    /// Gui/precomputes it from the already-loaded `ArchiveInfo`; passing it
+    /// lets tar/7z/bsdtar skip their own pre-listing pass (no double scan).
+    /// Default falls back to `extract` (recomputes the total internally).
+    #[allow(unused_variables)]
+    fn extract_with_total(
+        &self,
+        archive: &Path,
+        dest: &Path,
+        entries: Option<&[String]>,
+        password: Option<&str>,
+        total: Option<u64>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        self.extract(archive, dest, entries, password, progress)
+    }
+
     fn create(
         &self,
         dest: &Path,

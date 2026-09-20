@@ -30,10 +30,24 @@ pub fn with_trailing_slash(s: &str) -> String {
 /// True if archive entry `entry` is the selected path `sel` or lives under it
 /// (both sides normalized; `sel` may name a file or a directory).
 pub fn entry_matches(entry: &str, sel: &str) -> bool {
-    let ep = normalize(entry);
-    let f = normalize(sel);
-    let dir = f.trim_end_matches('/');
-    ep == f || ep == format!("{}/", dir) || ep.starts_with(&format!("{}/", dir))
+    entry_matches_norm(&normalize(entry), &normalize_sel_one(sel))
+}
+
+/// Pre-normalized (dir-form, no trailing slash) single selection.
+fn normalize_sel_one(s: &str) -> String {
+    normalize(s).trim_end_matches('/').to_string()
+}
+
+/// Pre-normalize a whole selection once, so hot matching loops compare without
+/// re-normalizing the selector per entry (no per-comparison allocations).
+pub fn normalize_sel(sels: &[String]) -> Vec<String> {
+    sels.iter().map(|s| normalize_sel_one(s)).collect()
+}
+
+/// Match an already-normalized entry against one pre-normalized selector.
+/// `sel` must come from [`normalize_sel`] (dir-form, no trailing slash).
+pub fn entry_matches_norm(entry: &str, sel: &str) -> bool {
+    entry == sel || (entry.starts_with(sel) && entry.as_bytes().get(sel.len()) == Some(&b'/'))
 }
 
 /// Prefix an entry name with `./` when it starts with `-`, so a hostile
@@ -63,5 +77,31 @@ mod tests {
         assert!(entry_matches("a/b.txt", "a/"));
         assert!(entry_matches("a/b/c.txt", "a"));
         assert!(!entry_matches("ab.txt", "a"));
+    }
+
+    #[test]
+    fn normalized_matching_agrees_with_legacy() {
+        let cases: &[(&str, &str)] = &[
+            ("a/b.txt", "a/b.txt"),
+            ("a/b.txt", "a/"),
+            ("a/b/c.txt", "a"),
+            ("ab.txt", "a"),
+            ("a", "a"),
+            ("a/", "a"),
+            ("a/b/", "a"),
+            ("./a/b.txt", "a"),
+            ("/x/y", "x/"),
+        ];
+        for (entry, sel) in cases {
+            let sels = normalize_sel(&[sel.to_string()]);
+            let norm = normalize(entry);
+            assert_eq!(
+                entry_matches_norm(&norm, &sels[0]),
+                entry_matches(entry, sel),
+                "mismatch for {:?} vs {:?}",
+                entry,
+                sel
+            );
+        }
     }
 }

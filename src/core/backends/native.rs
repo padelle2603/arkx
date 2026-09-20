@@ -15,9 +15,9 @@ use std::time::Instant;
 /// Extraction aborts with a clear error instead of filling the disk.
 const IO_BUF_SIZE: usize = 1024 * 1024;
 const COPY_CHUNK: usize = 65536;
-const MAX_EXTRACTED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
+pub(super) const MAX_EXTRACTED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
-fn quota_error() -> ArkxError {
+pub(super) fn quota_error() -> ArkxError {
     ArkxError::Corrupted(format!(
         "decompressed data exceeds the {:.0} GiB safety quota; refusing to continue (possible zip bomb)",
         MAX_EXTRACTED_BYTES as f64 / (1024.0 * 1024.0 * 1024.0)
@@ -60,7 +60,19 @@ impl ArchiveBackend for NativeBackend {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
-        self.extract_inner(archive, dest, entries, password, progress)
+        self.extract_inner(archive, dest, entries, password, None, progress)
+    }
+
+    fn extract_with_total(
+        &self,
+        archive: &Path,
+        dest: &Path,
+        entries: Option<&[String]>,
+        password: Option<&str>,
+        total: Option<u64>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
+        self.extract_inner(archive, dest, entries, password, total, progress)
     }
 
     fn create(
@@ -395,24 +407,27 @@ impl NativeBackend {
         dest: &Path,
         entries: Option<&[String]>,
         password: Option<&str>,
+        total: Option<u64>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let fmt = crate::core::detector::detect_format(archive);
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
 
         match fmt {
-            ArchiveFormat::Zip => self.extract_zip(archive, dest, entries, password, progress),
+            ArchiveFormat::Zip => {
+                self.extract_zip(archive, dest, entries, password, total, progress)
+            }
             ArchiveFormat::Tar
             | ArchiveFormat::TarGz
             | ArchiveFormat::TarBz2
             | ArchiveFormat::TarXz
             | ArchiveFormat::TarZst
-            | ArchiveFormat::TarLz4 => self.extract_tar(archive, dest, entries, progress),
+            | ArchiveFormat::TarLz4 => self.extract_tar(archive, dest, entries, total, progress),
             ArchiveFormat::Gz
             | ArchiveFormat::Bz2
             | ArchiveFormat::Xz
             | ArchiveFormat::Zst
-            | ArchiveFormat::Lz4 => self.extract_single(archive, dest, progress),
+            | ArchiveFormat::Lz4 => self.extract_single(archive, dest, total, progress),
             _ => Err(ArkxError::UnsupportedFormat(format!("{:?}", fmt))),
         }
     }
@@ -423,6 +438,7 @@ impl NativeBackend {
         dest: &Path,
         filter: Option<&[String]>,
         password: Option<&str>,
+        known_total: Option<u64>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
@@ -431,32 +447,44 @@ impl NativeBackend {
             zip::ZipArchive::new(reader).map_err(|e| ArkxError::Corrupted(e.to_string()))?;
 
         let filter = filter.map(|f| f.to_vec());
+        // Pre-normalize the selection once: the matching loops below only
+        // compare (no per-comparison allocations).
+        let sels = filter
+            .as_ref()
+            .map(|f| crate::core::paths::normalize_sel(f));
 
         // Real total bytes (may be 0 for empty archives: no fake max(1)).
-        let total_bytes: u64 = match &filter {
-            Some(sel) => {
-                let mut sum = 0u64;
-                for i in 0..zip.len() {
-                    if let Ok(f) = zip.by_index(i) {
-                        if sel
-                            .iter()
-                            .any(|s| crate::core::paths::entry_matches(f.name(), s))
-                        {
+        // The central-directory pass is cheap (never decompresses) and doubles
+        // as a first-pass entropy check, so it runs unless the caller already
+        // provided the byte total from the listing.
+        let total_bytes: u64 = match known_total {
+            Some(t) => t,
+            None => match &sels {
+                Some(sels) => {
+                    let mut sum = 0u64;
+                    for i in 0..zip.len() {
+                        if let Ok(f) = zip.by_index(i) {
+                            let norm = crate::core::paths::normalize(f.name());
+                            if sels
+                                .iter()
+                                .any(|s| crate::core::paths::entry_matches_norm(&norm, s))
+                            {
+                                sum = sum.saturating_add(f.size());
+                            }
+                        }
+                    }
+                    sum
+                }
+                None => {
+                    let mut sum = 0u64;
+                    for i in 0..zip.len() {
+                        if let Ok(f) = zip.by_index(i) {
                             sum = sum.saturating_add(f.size());
                         }
                     }
+                    sum
                 }
-                sum
-            }
-            None => {
-                let mut sum = 0u64;
-                for i in 0..zip.len() {
-                    if let Ok(f) = zip.by_index(i) {
-                        sum = sum.saturating_add(f.size());
-                    }
-                }
-                sum
-            }
+            },
         };
 
         if let Some(cb) = &progress {
@@ -469,6 +497,9 @@ impl NativeBackend {
         let base = resolved_base(dest);
 
         for i in 0..zip.len() {
+            if self.cancelled() {
+                return Err(ArkxError::Cancelled);
+            }
             // Encrypted entries are decrypted with the given password; a
             // missing password surfaces as WrongPassword so the caller can
             // prompt, never as an opaque decode failure.
@@ -479,10 +510,11 @@ impl NativeBackend {
                 None => zip.by_index(i).map_err(Self::zip_err)?,
             };
             let name = f.name().to_string();
-            if let Some(ref sel) = filter {
+            let norm = crate::core::paths::normalize(&name);
+            if let Some(ref sel) = sels {
                 if !sel
                     .iter()
-                    .any(|s| crate::core::paths::entry_matches(&name, s))
+                    .any(|s| crate::core::paths::entry_matches_norm(&norm, s))
                 {
                     continue;
                 }
@@ -591,6 +623,7 @@ impl NativeBackend {
         archive: &Path,
         dest: &Path,
         filter: Option<&[String]>,
+        known_total: Option<u64>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
@@ -603,18 +636,27 @@ impl NativeBackend {
         ar.set_preserve_mtime(true);
 
         let filter = filter.map(|f| f.to_vec());
+        // Pre-normalize the selection once: per-entry matching below only
+        // compares (no per-comparison allocations).
+        let sels = filter
+            .as_ref()
+            .map(|f| crate::core::paths::normalize_sel(f));
         let base = resolved_base(dest);
 
-        // Real total bytes (may be 0: no fake max(1)).
+        // Real total bytes (may be 0: no fake max(1)). When the caller already
+        // knows the total (GUI passes the listing-derived sum) skip the second
+        // decompression pass that `list_tar` would cost.
         let mut total_bytes = 0u64;
         if progress.is_some() {
-            if let Ok(info) = self.list_tar(archive) {
-                match &filter {
+            if let Some(t) = known_total {
+                total_bytes = t;
+            } else if let Ok(info) = self.list_tar(archive) {
+                match &sels {
                     Some(sel) => {
                         for e in &info.entries {
                             if sel
                                 .iter()
-                                .any(|f| crate::core::paths::entry_matches(&e.path, f))
+                                .any(|f| crate::core::paths::entry_matches_norm(&e.path, f))
                             {
                                 total_bytes = total_bytes.saturating_add(e.size);
                             }
@@ -636,6 +678,9 @@ impl NativeBackend {
             .entries()
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?
         {
+            if self.cancelled() {
+                return Err(ArkxError::Cancelled);
+            }
             let mut entry = entry.map_err(|e| ArkxError::Corrupted(e.to_string()))?;
             let path_raw = entry
                 .path()
@@ -644,10 +689,10 @@ impl NativeBackend {
                 .to_string();
             let path_norm = crate::core::paths::normalize(&path_raw);
             // Skip non-matching entries when filtering
-            if let Some(ref sel) = filter {
+            if let Some(ref sel) = sels {
                 if !sel
                     .iter()
-                    .any(|f| crate::core::paths::entry_matches(&path_norm, f))
+                    .any(|f| crate::core::paths::entry_matches_norm(&path_norm, f))
                 {
                     continue;
                 }
@@ -758,11 +803,12 @@ impl NativeBackend {
         &self,
         archive: &Path,
         dest: &Path,
+        known_total: Option<u64>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
         let meta = std::fs::metadata(archive).ok();
-        let total = meta.map(|m| m.len()).unwrap_or(0);
+        let total = known_total.unwrap_or_else(|| meta.map(|m| m.len()).unwrap_or(0));
         let reader: Box<dyn std::io::Read> = create_single_reader(file, archive)?;
         let out_name = archive
             .file_stem()
@@ -774,9 +820,16 @@ impl NativeBackend {
         if let Some(cb) = progress {
             cb(ProgressInfo::new(out_name.to_string(), 0, total));
             let mut reader = BufReader::with_capacity(IO_BUF_SIZE, reader);
-            let mut buf = vec![0u8; 8192];
+            let mut buf = vec![0u8; COPY_CHUNK];
             let mut extracted: u64 = 0;
+            // Throttle 8KB-read emissions to 100ms / 512KB so the UI is not
+            // spammed with a progress event per buffer.
+            let mut last_emit = Instant::now();
+            let mut last_bytes = 0u64;
             loop {
+                if self.cancelled() {
+                    return Err(ArkxError::Cancelled);
+                }
                 let n = reader.read(&mut buf).map_err(ArkxError::Io)?;
                 if n == 0 {
                     break;
@@ -784,12 +837,26 @@ impl NativeBackend {
                 out.write_all(&buf[..n]).map_err(ArkxError::Io)?;
                 extracted = extracted.saturating_add(n as u64);
                 if total > 0 {
-                    cb(ProgressInfo::new(
-                        out_name.to_string(),
-                        extracted.min(total),
-                        total,
-                    ));
+                    let elapsed =
+                        last_emit.elapsed().as_millis() > 100 || extracted - last_bytes >= 524288;
+                    if elapsed {
+                        cb(ProgressInfo::new(
+                            out_name.to_string(),
+                            extracted.min(total),
+                            total,
+                        ));
+                        last_emit = Instant::now();
+                        last_bytes = extracted;
+                    }
                 }
+            }
+            // Final update even if throttled away.
+            if total > 0 {
+                cb(ProgressInfo::new(
+                    out_name.to_string(),
+                    extracted.min(total),
+                    total,
+                ));
             }
             cb(crate::core::util::completed(total));
             out.flush().map_err(ArkxError::Io)?;
@@ -1119,10 +1186,11 @@ impl NativeBackend {
         entries: &[String],
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
-        let skip = |name: &str| {
-            entries
-                .iter()
-                .any(|s| crate::core::paths::entry_matches(name, s))
+        let sels = crate::core::paths::normalize_sel(entries);
+        let skip = move |name: &str| {
+            let norm = crate::core::paths::normalize(name);
+            sels.iter()
+                .any(|s| crate::core::paths::entry_matches_norm(&norm, s))
         };
         self.rewrite_zip(archive, None, &skip, progress)
     }
@@ -1815,6 +1883,7 @@ impl NativeBackend {
         let mut results = Vec::new();
         let mut passed = 0usize;
         let mut failed = 0usize;
+        let sels = entries.map(crate::core::paths::normalize_sel);
         // Reused across entries to avoid one 64KB allocation per file.
         let mut buf = vec![0u8; COPY_CHUNK];
         for i in 0..z.len() {
@@ -1822,10 +1891,11 @@ impl NativeBackend {
                 .by_index(i)
                 .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
             let name = f.name().to_string();
-            if let Some(sel) = entries {
+            if let Some(ref sel) = sels {
+                let norm = crate::core::paths::normalize(&name);
                 if !sel
                     .iter()
-                    .any(|s| crate::core::paths::entry_matches(&name, s))
+                    .any(|s| crate::core::paths::entry_matches_norm(&norm, s))
                 {
                     continue;
                 }
@@ -1919,6 +1989,7 @@ impl NativeBackend {
         tmp.push(format!(".arkx-secure-{}.part", std::process::id()));
         let tmp = PathBuf::from(tmp);
 
+        let sels = crate::core::paths::normalize_sel(entries);
         let total = z.len() as u64;
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
@@ -1929,9 +2000,10 @@ impl NativeBackend {
                     .by_index(i)
                     .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
                 let name = f.name().to_string();
-                if entries
+                let norm = crate::core::paths::normalize(&name);
+                if sels
                     .iter()
-                    .any(|e| crate::core::paths::entry_matches(&name, e))
+                    .any(|e| crate::core::paths::entry_matches_norm(&norm, e))
                 {
                     done += 1;
                     continue;

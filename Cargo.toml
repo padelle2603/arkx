@@ -1,6 +1,6 @@
 [package]
 name = "arkx"
-version = "1.6.1"
+version = "1.6.2"
 edition = "2021"
 description = "Fast multi-threaded Linux archive manager (PeaZip-inspired)"
 authors = ["padelle"]
