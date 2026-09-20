@@ -21,6 +21,8 @@ pub(crate) enum PasswordAction {
         /// Known byte total for the progress bar (from the listing), so the
         /// backend skips its own pre-listing pass.
         total: Option<u64>,
+        /// Known non-directory entry count for the per-entry bar total.
+        total_entries: Option<u64>,
     },
 }
 
@@ -127,12 +129,14 @@ pub(crate) fn prompt_password(
                     dest,
                     entries,
                     total,
+                    total_entries,
                 } => worker.borrow_mut().submit(JobKind::Extract {
                     archive: archive.clone(),
                     dest: dest.clone(),
                     entries: entries.clone(),
                     password: Some(pwd),
                     total_bytes: *total,
+                    total_entries: *total_entries,
                 }),
             }
         },

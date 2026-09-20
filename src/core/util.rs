@@ -3,11 +3,10 @@
 //! Nothing is hardcoded for a specific machine: everything scales on CPU and RAM
 //! detected at runtime, with explicit override (`--threads` / `ARKX_THREADS`).
 
-use crate::core::archive::{ArchiveInfo, EntryHashes, ProgressInfo};
-use std::io::Read;
+use crate::core::archive::{ArchiveInfo, EntryHashes};
+use std::io::{BufReader, Read};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Global override (0 = auto). Set by `--threads`, read by backends.
 static THREAD_OVERRIDE: AtomicUsize = AtomicUsize::new(0);
@@ -286,30 +285,6 @@ pub fn truncate_middle(s: &str, max: usize) -> String {
     format!("{}...{}", start, end)
 }
 
-/// Recursive file-byte sum under `path` (a file returns its own size).
-/// Best-effort: unreadable entries are skipped rather than failing.
-pub fn dir_size(path: &Path) -> u64 {
-    if let Ok(meta) = std::fs::metadata(path) {
-        if meta.is_file() {
-            return meta.len();
-        }
-    }
-    let mut total = 0u64;
-    if let Ok(walk) = std::fs::read_dir(path) {
-        for entry in walk.flatten() {
-            let p = entry.path();
-            if let Ok(m) = entry.metadata() {
-                if m.is_file() {
-                    total = total.saturating_add(m.len());
-                } else if m.is_dir() {
-                    total = total.saturating_add(dir_size(&p));
-                }
-            }
-        }
-    }
-    total
-}
-
 /// Read `r` to EOF, discarding everything (drain a child pipe to avoid a
 /// 64KB deadlock when the parent never reads).
 pub fn drain_reader(mut r: impl Read) {
@@ -354,54 +329,25 @@ pub fn sum_selected(info: &ArchiveInfo, sel: Option<&[String]>) -> u64 {
     }
 }
 
-/// Shared progress callback: `Box<dyn Fn(ProgressInfo) + Send>` behind a
-/// mutex, safe to clone into poller threads.
-pub type SharedCallback = Arc<Mutex<Box<dyn Fn(ProgressInfo) + Send>>>;
-
-/// Handle returned by [`spawn_extract_poller`]: drive the bar from `cb`, read
-/// the polled byte count from `done`, and stop the thread via `stop`.
-pub struct ExtractPoller {
-    pub cb: SharedCallback,
-    pub done: Arc<AtomicU64>,
-    pub stop: Arc<AtomicBool>,
-    pub handle: std::thread::JoinHandle<()>,
-}
-
-/// Spawn a background poller that drives the extract progress bar from the
-/// bytes written into `dest`: `done = dir_size(dest) - baseline` (the baseline
-/// sampled just before the child spawn, so an archive already in `dest`
-/// cancels out), polled every 250ms with change-throttling and capped at
-/// `total`. Shared by the 7z and bsdtar backends.
-pub fn spawn_extract_poller(
-    dest: &Path,
-    baseline: u64,
-    total: u64,
-    cb: Box<dyn Fn(ProgressInfo) + Send>,
-) -> ExtractPoller {
-    let cb: SharedCallback = Arc::new(Mutex::new(cb));
-    let done = Arc::new(AtomicU64::new(0));
-    let stop = Arc::new(AtomicBool::new(false));
-    let (cb_poll, done_poll, stop_poll) = (cb.clone(), done.clone(), stop.clone());
-    let dest_poll = dest.to_path_buf();
-    let handle = std::thread::spawn(move || {
-        let mut last_emitted = u64::MAX;
-        while !stop_poll.load(Ordering::Relaxed) {
-            std::thread::sleep(std::time::Duration::from_millis(250));
-            let d = dir_size(&dest_poll).saturating_sub(baseline);
-            done_poll.store(d, Ordering::Relaxed);
-            if d != last_emitted {
-                last_emitted = d;
-                if let Ok(guard) = cb_poll.lock() {
-                    guard(ProgressInfo::new("Extracting…".to_string(), d, total));
-                }
-            }
+/// Count of the non-directory entries of `info` that match any of the filters
+/// in `sel` (`None` = all). Drives the extract progress bar when the backend
+/// reports per-entry completion (7z/bsdtar), avoiding a per-tick filesystem
+/// walk of the destination tree.
+pub fn count_selected(info: &ArchiveInfo, sel: Option<&[String]>) -> u64 {
+    match sel {
+        None => info.entries.iter().filter(|e| !e.is_dir).count() as u64,
+        Some(sel) => {
+            let sels = crate::core::paths::normalize_sel(sel);
+            info.entries
+                .iter()
+                .filter(|e| {
+                    !e.is_dir
+                        && sels
+                            .iter()
+                            .any(|s| crate::core::paths::entry_matches_norm(&e.path, s))
+                })
+                .count() as u64
         }
-    });
-    ExtractPoller {
-        cb,
-        done,
-        stop,
-        handle,
     }
 }
 
@@ -438,8 +384,12 @@ pub fn hash_file(path: &Path) -> crate::core::error::Result<EntryHashes> {
 /// complete line (UTF-8-sensitive: a partial codepoint is dropped). Return
 /// `true` from `on_line` to stop early (used for cancellation).
 /// `reader` is consumed; a trailing unterminated line is still delivered.
-pub fn read_lines_until(mut reader: impl Read, mut on_line: impl FnMut(&str) -> bool) {
-    let mut buf = vec![0u8; 8192];
+/// Reads are buffered (64 KiB) and lines are borrowed from one no-realloc
+/// accumulation buffer, so per-line allocation is avoided: safe for the
+/// `\r`-refreshed label streams of 7z/bsdtar progress output.
+pub fn read_lines_until(reader: impl Read, mut on_line: impl FnMut(&str) -> bool) {
+    let mut reader = BufReader::with_capacity(64 * 1024, reader);
+    let mut buf = vec![0u8; 64 * 1024];
     let mut chunk: Vec<u8> = Vec::new();
     loop {
         let n = reader.read(&mut buf).unwrap_or(0);
@@ -449,13 +399,12 @@ pub fn read_lines_until(mut reader: impl Read, mut on_line: impl FnMut(&str) -> 
         for &b in &buf[..n] {
             if b == b'\r' || b == b'\n' {
                 if !chunk.is_empty() {
-                    if let Ok(s) = String::from_utf8(std::mem::take(&mut chunk)) {
-                        if on_line(&s) {
+                    if let Ok(s) = std::str::from_utf8(&chunk) {
+                        if on_line(s) {
                             return;
                         }
-                    } else {
-                        chunk.clear();
                     }
+                    chunk.clear();
                 }
             } else {
                 chunk.push(b);
@@ -463,8 +412,8 @@ pub fn read_lines_until(mut reader: impl Read, mut on_line: impl FnMut(&str) -> 
         }
     }
     if !chunk.is_empty() {
-        if let Ok(s) = String::from_utf8(chunk) {
-            on_line(&s);
+        if let Ok(s) = std::str::from_utf8(&chunk) {
+            on_line(s);
         }
     }
 }
@@ -555,17 +504,6 @@ mod tests {
         use sha2::Digest;
         expect.update(&big);
         assert_eq!(h2.sha256, format!("{:x}", expect.finalize()));
-    }
-
-    #[test]
-    fn dir_size_sums_recursively() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("a"), vec![1u8; 10]).unwrap();
-        let sub = dir.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        std::fs::write(sub.join("b"), vec![1u8; 20]).unwrap();
-        assert_eq!(dir_size(dir.path()), 30);
-        assert_eq!(dir_size(&dir.path().join("a")), 10);
     }
 
     #[cfg(unix)]

@@ -69,10 +69,17 @@ impl ArchiveBackend for NativeBackend {
         dest: &Path,
         entries: Option<&[String]>,
         password: Option<&str>,
-        total: Option<u64>,
+        known: Option<(u64, u64)>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
-        self.extract_inner(archive, dest, entries, password, total, progress)
+        self.extract_inner(
+            archive,
+            dest,
+            entries,
+            password,
+            known.map(|k| k.0),
+            progress,
+        )
     }
 
     fn create(
@@ -969,11 +976,134 @@ impl NativeBackend {
             .first()
             .and_then(|p| p.parent())
             .unwrap_or(Path::new("."));
-        // Dirs first (sorted, stable structure), then files: empty folders
-        // are thus preserved as in tar.
+        // Stable structure: dirs first (sorted), then files: empty folders are
+        // thus preserved as in tar.
         dirs.sort();
         let total = (dirs.len() + files.len()) as u64;
         let mut done = 0u64;
+
+        // Parallel compression gate (2c): no password (AES needs the serial
+        // writer path), real compression (Stored adds no CPU work to spread),
+        // more than one file to share, and enough headroom so the per-thread
+        // in-memory mini-zips cannot exhaust RAM. Each worker produces a
+        // compressed chunk into memory; the main thread then muxes the chunks
+        // into `dest` verbatim (`merge_archive` copies raw deflate data, no
+        // re-compression: the CPU win is real, the output is bit-identical).
+        let parallel = password.is_none()
+            && level > 0
+            && !files.is_empty()
+            && crate::core::util::available_memory_mb()
+                .map(|avail_mb| {
+                    let total_src = files
+                        .iter()
+                        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+                        .sum::<u64>();
+                    // Peak in-flight: ~each worker holds its compressed chunk
+                    // (≤ total source) plus the final archive → cap at 3/4 RAM.
+                    total_src.saturating_mul(2) <= avail_mb * 1024 * 1024 * 3 / 4
+                })
+                .unwrap_or(false);
+
+        if parallel {
+            use rayon::prelude::*;
+            use std::io::Cursor;
+            // Directories first, serial (cheap headers, order preserved).
+            for path in dirs.iter() {
+                if self.cancelled() {
+                    drop(zip);
+                    Self::discard_partial(dest);
+                    return Err(ArkxError::Cancelled);
+                }
+                let rel = prefixed_name(path, base);
+                let name = if rel.ends_with('/') || rel.is_empty() {
+                    rel
+                } else {
+                    format!("{}/", rel)
+                };
+                if name.is_empty() || name == "/" {
+                    continue;
+                }
+                done += 1;
+                if let Some(cb) = &progress {
+                    cb(ProgressInfo::new(name.clone(), done, total.max(1)));
+                }
+                zip.add_directory(name, options)
+                    .map_err(|e| ArkxError::Backend(e.to_string()))?;
+            }
+            // Files : chunked across cores; each worker emits a self-contained
+            // mini-zip whose entries get merged raw into the final archive.
+            let entries: Vec<(String, PathBuf)> = files
+                .iter()
+                .filter_map(|p| {
+                    let rel = prefixed_name(p, base);
+                    if rel.is_empty() || rel == "/" {
+                        None
+                    } else {
+                        Some((rel, p.clone()))
+                    }
+                })
+                .collect();
+            let n_chunks = crate::core::util::effective_threads().min(entries.len());
+            // Weight chunks by count (each compression unit is a file).
+            let results: Vec<(Vec<u8>, u64)> = entries
+                .par_chunks(entries.len().div_ceil(n_chunks))
+                .map(|chunk| {
+                    let mut buf: Vec<u8> = Vec::new();
+                    let mut cw = zip::ZipWriter::new(Cursor::new(&mut buf));
+                    for (name, p) in chunk {
+                        cw.start_file(name, options)
+                            .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                        let mut f = BufReader::with_capacity(
+                            IO_BUF_SIZE,
+                            File::open(p).map_err(ArkxError::Io)?,
+                        );
+                        std::io::copy(&mut f, &mut cw).map_err(ArkxError::Io)?;
+                    }
+                    cw.finish().map_err(|e| ArkxError::Backend(e.to_string()))?;
+                    Ok::<(Vec<u8>, u64), ArkxError>((buf, chunk.len() as u64))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            for (buf, n) in results {
+                if self.cancelled() {
+                    drop(zip);
+                    Self::discard_partial(dest);
+                    return Err(ArkxError::Cancelled);
+                }
+                let source = zip::ZipArchive::new(Cursor::new(buf))
+                    .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                zip.merge_archive(source)
+                    .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                // One progress tick per chunk (entries merged) — the per-tick
+                // cost is O(chunk), a fair fraction of the work it covers.
+                done += n;
+                if let Some(cb) = &progress {
+                    cb(ProgressInfo::new(
+                        "Merging…".to_string(),
+                        done,
+                        total.max(1),
+                    ));
+                }
+            }
+            if let Some(cb) = &progress {
+                cb(crate::core::util::completed(total));
+            }
+            // finish() writes the central directory but does NOT flush the
+            // BufWriter: without explicit flush small zips stay truncated.
+            let writer = zip
+                .finish()
+                .map_err(|e| ArkxError::Backend(e.to_string()))?;
+            let mut file = writer
+                .into_inner()
+                .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
+            file.flush().map_err(ArkxError::Io)?;
+            if skipped > 0 {
+                eprintln!(
+                    "[native] zip: skipped {} unreadable/special entries",
+                    skipped
+                );
+            }
+            return Ok(());
+        }
 
         for path in dirs.iter().chain(files.iter()) {
             if self.cancelled() {
@@ -1006,7 +1136,8 @@ impl NativeBackend {
             }
             zip.start_file(name, options)
                 .map_err(|e| ArkxError::Backend(e.to_string()))?;
-            let mut f = File::open(path).map_err(ArkxError::Io)?;
+            let mut f =
+                BufReader::with_capacity(IO_BUF_SIZE, File::open(path).map_err(ArkxError::Io)?);
             std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
         }
         if let Some(cb) = &progress {
@@ -1150,7 +1281,10 @@ impl NativeBackend {
                 } else {
                     zip.start_file(name, new_opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                    let mut f = File::open(path).map_err(ArkxError::Io)?;
+                    let mut f = BufReader::with_capacity(
+                        IO_BUF_SIZE,
+                        File::open(path).map_err(ArkxError::Io)?,
+                    );
                     std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
                 }
             }
@@ -1612,7 +1746,19 @@ fn create_tar_writer(file: File, fmt: &ArchiveFormat, level: u8) -> Result<TarWr
             bzip2::Compression::new(level.clamp(1, 9) as u32),
         )),
         ArchiveFormat::TarXz | ArchiveFormat::Xz => {
-            TarWriter::Xz(xz2::write::XzEncoder::new(buf, level.clamp(0, 9) as u32))
+            // Adaptive multithreaded xz (workers scaled on CPU/RAM): the
+            // stream stays standard .xz, any decoder can read it. Falls back
+            // to the single-threaded encoder when the system liblzma was
+            // built without MT support (lzma_stream_encoder_mt unavailable).
+            let mut mt = xz2::stream::MtStreamBuilder::new();
+            let state = mt
+                .threads(crate::core::util::zstd_workers().max(1))
+                .preset(level.clamp(0, 9) as u32)
+                .encoder();
+            match state {
+                Ok(state) => TarWriter::Xz(xz2::write::XzEncoder::new_stream(buf, state)),
+                Err(_) => TarWriter::Xz(xz2::write::XzEncoder::new(buf, level.clamp(0, 9) as u32)),
+            }
         }
         ArchiveFormat::TarZst | ArchiveFormat::Zst => {
             let mut enc = zstd::stream::write::Encoder::new(buf, zstd_level(level))

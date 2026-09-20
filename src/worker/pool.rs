@@ -156,13 +156,14 @@ impl WorkerPool {
                 entries,
                 password,
                 total_bytes,
+                total_entries,
             } => {
                 backend.extract_with_total(
                     &archive,
                     &dest,
                     entries.as_deref(),
                     password.as_deref(),
-                    total_bytes,
+                    total_bytes.zip(total_entries),
                     Some(Box::new(wrapped)),
                 )?;
                 Ok(JobResult::Extract)

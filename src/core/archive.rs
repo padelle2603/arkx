@@ -3,6 +3,7 @@ use serde::Serialize;
 
 use super::error::Result;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// One entry inside an archive.
 #[derive(Debug, Clone, Serialize)]
@@ -47,6 +48,9 @@ pub struct ProgressInfo {
     pub total: u64,
     pub percent: f32,
 }
+
+/// Progress callback shared between the stdout reader and the completion emit.
+pub type SharedCallback = Arc<Mutex<Box<dyn Fn(ProgressInfo) + Send>>>;
 
 impl ProgressInfo {
     pub fn new(file: String, current: u64, total: u64) -> Self {
@@ -113,9 +117,13 @@ pub trait ArchiveBackend: Send + Sync {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()>;
 
-    /// `extract` with a caller-provided byte total for the progress bar.
-    /// Gui/precomputes it from the already-loaded `ArchiveInfo`; passing it
-    /// lets tar/7z/bsdtar skip their own pre-listing pass (no double scan).
+    /// `extract` with a caller-provided total for the progress bar, as
+    /// `(bytes, non-directory entries)`. The GUI computes both from the
+    /// already-loaded `ArchiveInfo`; passing them lets tar/7z/bsdtar skip
+    /// their own pre-listing pass (no double scan). When given, the 7z/bsdtar
+    /// backends drive the bar from per-entry completion lines (O(1) per tick)
+    /// instead of walking `dest` every poll; native already counts bytes while
+    /// streaming and ignores the entry half.
     /// Default falls back to `extract` (recomputes the total internally).
     #[allow(unused_variables)]
     fn extract_with_total(
@@ -124,7 +132,7 @@ pub trait ArchiveBackend: Send + Sync {
         dest: &Path,
         entries: Option<&[String]>,
         password: Option<&str>,
-        total: Option<u64>,
+        known: Option<(u64, u64)>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         self.extract(archive, dest, entries, password, progress)

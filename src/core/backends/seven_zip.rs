@@ -1,7 +1,8 @@
-use crate::core::archive::{ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressInfo};
+use crate::core::archive::{
+    ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressInfo, SharedCallback,
+};
 use crate::core::detector::ArchiveFormat;
 use crate::core::error::{ArkxError, Result};
-use crate::core::util::dir_size;
 
 /// Thread cap for the 7z `-mmt` switch: use the machine's cores but never
 /// oversubscribe more than 32 (a 7z default that balances large archives).
@@ -11,7 +12,7 @@ fn sz_threads() -> usize {
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
@@ -20,9 +21,6 @@ pub struct SevenZipBackend {
     bin: PathBuf,
     cancel: Arc<AtomicBool>,
 }
-
-/// Progress callback shared between the 7z reader and the dest poller.
-type SharedCallback = Arc<Mutex<Box<dyn Fn(ProgressInfo) + Send>>>;
 
 impl SevenZipBackend {
     pub fn with_cancel(cancel: Arc<AtomicBool>) -> Self {
@@ -73,10 +71,10 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         dest: &Path,
         entries: Option<&[String]>,
         password: Option<&str>,
-        total: Option<u64>,
+        known: Option<(u64, u64)>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
-        self.extract_inner(archive, dest, entries, password, total, progress)
+        self.extract_inner(archive, dest, entries, password, known, progress)
     }
 
     fn create(
@@ -420,7 +418,7 @@ impl SevenZipBackend {
         dest: &Path,
         entries: Option<&[String]>,
         password: Option<&str>,
-        known_total: Option<u64>,
+        known: Option<(u64, u64)>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
@@ -428,18 +426,19 @@ impl SevenZipBackend {
             return Err(ArkxError::Cancelled);
         }
 
-        // Byte-based total for the bar (0 = encrypted headers → pulsing UI,
-        // never a fake %). The listing pass is skipped when the caller already
-        // knows the total (GUI), otherwise `7z l -slt` sums it. Computed BEFORE
-        // spawn so a declared zip bomb is refused while the child is not yet
-        // pumping bytes under `dest`.
-        let pre_total = if progress.is_some() {
-            match known_total {
-                Some(t) => t,
-                None => self.extract_total(archive, entries),
+        // Byte-based total for the zip-bomb quota. The bar itself is driven by
+        // entry count (see below), which the pipe reports O(1) per tick. The
+        // listing pass is skipped when the caller already knows the totals
+        // (GUI), otherwise `7z l -slt` computes them. Computed BEFORE spawn so
+        // a declared zip bomb is refused while the child is not yet pumping
+        // bytes under `dest`.
+        let (pre_total, pre_entries) = if progress.is_some() {
+            match known {
+                Some((t, n)) => (t, n),
+                None => self.extract_totals(archive, entries),
             }
         } else {
-            0
+            (0, 0)
         };
         if pre_total > super::native::MAX_EXTRACTED_BYTES {
             return Err(super::native::quota_error());
@@ -474,21 +473,19 @@ impl SevenZipBackend {
             .spawn()
             .map_err(|e| ArkxError::Backend(format!("spawn 7z: {}", e)))?;
 
-        // Byte-based 0%→100% progress (like PeaZip/file-roller): 7z's own % with
-        // -mmt=N is unreliable by upstream design (lzma2-mt buffering causes
-        // 0→97 jumps and 13%/84% stalls), so it is ignored for the bar and only
-        // used for the filename label. total = summed Size from `7z l -slt`
-        // (filtered for subsets), done = dir_size(dest) minus the baseline
-        // sampled before spawn (an archive already in dest cancels out).
+        // Entry-count 0%→100% progress: 7z's own % with -mmt=N is unreliable by
+        // upstream design (lzma2-mt buffering causes 0→97 jumps and 13%/84%
+        // stalls), so it is ignored for the bar and only used for the filename
+        // label. total = count of non-directory entries to extract (from the
+        // listing, filtered for subsets), done = count of distinct labels seen
+        // on stdout (each `\r`-refreshed status line names the file currently
+        // being extracted). O(1) per tick, unlike polling dir_size(dest).
         if let Some(cb) = progress {
             // Immediate 0% (total 0 = encrypted headers → pulsing UI, never a fake %).
             cb(ProgressInfo::preparing(pre_total));
 
-            let baseline = dir_size(dest);
-            let poller = crate::core::util::spawn_extract_poller(dest, baseline, pre_total, cb);
-            let cb_arc = poller.cb.clone();
-            let done = poller.done.clone();
-            let stop = poller.stop.clone();
+            let cb_arc: SharedCallback = Arc::new(Mutex::new(cb));
+            let done = Arc::new(AtomicU64::new(0));
 
             // Drain stderr on a separate thread to avoid pipe deadlock (64KB).
             let (stderr_arc, stderr_handle) = drain_stderr(child.stderr.take());
@@ -496,6 +493,7 @@ impl SevenZipBackend {
             if let Some(stdout) = child.stdout.take() {
                 // 7z with -bsp1 writes both filenames and percentages to stdout with '\r'.
                 // Percentages are discarded (see above); only the file label is kept.
+                let entries_total = pre_entries.max(1);
                 let mut last_emit = Instant::now();
                 let mut last_label = String::new();
                 crate::core::util::read_lines_until(stdout, |line| {
@@ -509,24 +507,28 @@ impl SevenZipBackend {
                         return false;
                     }
                     let now_fresh = label != last_label;
+                    if now_fresh {
+                        last_label = label.clone();
+                        done.fetch_add(1, Ordering::Relaxed);
+                    }
                     if now_fresh || last_emit.elapsed().as_millis() > 500 {
                         last_emit = Instant::now();
-                        last_label = label.clone();
                         let d = done.load(Ordering::Relaxed);
                         if let Ok(guard) = cb_arc.lock() {
-                            guard(ProgressInfo::new(label, d, pre_total));
+                            guard(ProgressInfo::new(label, d, entries_total));
                         }
                     }
                     false
                 });
             }
-            stop.store(true, Ordering::Relaxed);
-            let _ = poller.handle.join();
+            let _ = stderr_handle.join();
             let status = child.wait().map_err(ArkxError::Io)?;
             if self.cancelled() {
                 return Err(ArkxError::Cancelled);
             }
-            let _ = stderr_handle.join();
+            if let Ok(guard) = cb_arc.lock() {
+                guard(crate::core::util::completed(pre_entries));
+            }
             let code = status.code().unwrap_or(-1);
             // 7z exit codes: 0=OK, 1=Warning (e.g. Headers Error on solid RAR),
             // 2=Fatal/WrongPassword
@@ -613,15 +615,19 @@ impl SevenZipBackend {
         Ok(())
     }
 
-    /// Expected total bytes for the bar: summed Size from `7z l -slt`, filtered
-    /// to the subset when requested. 0 when listing fails or headers are
-    /// encrypted (→ pulsing UI, never a fake %).
-    fn extract_total(&self, archive: &Path, filter: Option<&[String]>) -> u64 {
+    /// Expected (total bytes, non-directory entry count) for the bar: summed Size
+    /// and count from `7z l -slt`, filtered to the subset when requested. Bytes
+    /// are used for the zip-bomb quota, entries for the per-entry progress.
+    /// 0/0 when listing fails or headers are encrypted (→ pulsing UI).
+    fn extract_totals(&self, archive: &Path, filter: Option<&[String]>) -> (u64, u64) {
         let info = match self.list(archive) {
             Ok(i) => i,
-            Err(_) => return 0,
+            Err(_) => return (0, 0),
         };
-        crate::core::util::sum_selected(&info, filter)
+        (
+            crate::core::util::sum_selected(&info, filter),
+            crate::core::util::count_selected(&info, filter),
+        )
     }
 
     fn create_inner(

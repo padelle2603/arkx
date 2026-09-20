@@ -16,6 +16,9 @@ pub enum JobKind {
         /// Known byte total for the progress bar (GUI-derived from the loaded
         /// listing). Lets tar/7z/bsdtar skip their own pre-listing pass.
         total_bytes: Option<u64>,
+        /// Known non-directory entry count, the per-entry progress bar total
+        /// (GUI-derived from the loaded listing).
+        total_entries: Option<u64>,
     },
     Add {
         archive: PathBuf,

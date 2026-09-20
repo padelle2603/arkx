@@ -32,8 +32,14 @@ pub fn queue_open_path(path: PathBuf) {
 }
 
 /// Parameters of a retriable extraction
-/// (archive, dest, entries, known byte total for the progress bar).
-type PendingExtract = (PathBuf, PathBuf, Option<Vec<String>>, Option<u64>);
+/// (archive, dest, entries, known byte total, known entry count for the bar).
+type PendingExtract = (
+    PathBuf,
+    PathBuf,
+    Option<Vec<String>>,
+    Option<u64>,
+    Option<u64>,
+);
 
 /// Clipboard item for copy/cut/paste: source archive + selected entries.
 type ClipboardItem = (PathBuf, Vec<String>);
@@ -2008,7 +2014,8 @@ pub fn build_ui(app: &adw::Application) {
                                 *ui_poll.is_busy.borrow_mut() = false;
                                 set_idle_sensitivity(&ui_poll);
                                 let retry = ui_poll.pending_extract.borrow().clone();
-                                if let Some((archive, dest, entries, total)) = retry {
+                                if let Some((archive, dest, entries, total, total_entries)) = retry
+                                {
                                     *ui_poll.pending_password.borrow_mut() = true;
                                     dialogs::prompt_password(
                                         &ui_poll.window,
@@ -2017,6 +2024,7 @@ pub fn build_ui(app: &adw::Application) {
                                             dest,
                                             entries,
                                             total,
+                                            total_entries,
                                         },
                                         ui_poll.worker.clone(),
                                         ui_poll.password_cache.clone(),
@@ -2272,10 +2280,22 @@ fn start_extract(
         .current_info
         .as_ref()
         .map(|i| crate::core::util::sum_selected(i, entries_opt.as_deref()));
+    // Per-entry bar total: each extracted non-directory entry advances it.
+    let total_entries = ui
+        .state
+        .borrow()
+        .current_info
+        .as_ref()
+        .map(|i| crate::core::util::count_selected(i, entries_opt.as_deref()));
     // Remember the exact operation even when no pre-prompt ran: a wrong
     // password mid-extraction must still be able to retry with these values.
-    *ui.pending_extract.borrow_mut() =
-        Some((archive.clone(), dest.clone(), entries_opt.clone(), total));
+    *ui.pending_extract.borrow_mut() = Some((
+        archive.clone(),
+        dest.clone(),
+        entries_opt.clone(),
+        total,
+        total_entries,
+    ));
     // Reuse the password remembered for this archive; prompt only if there is
     // none yet (password-first flow: the progress bar appears only once the
     // password is accepted).
@@ -2298,6 +2318,7 @@ fn start_extract(
                 dest,
                 entries: entries_opt,
                 total,
+                total_entries,
             },
             worker,
             ui.password_cache.clone(),
@@ -2324,6 +2345,7 @@ fn start_extract(
         entries: entries_opt,
         password: effective,
         total_bytes: total,
+        total_entries,
     });
 }
 

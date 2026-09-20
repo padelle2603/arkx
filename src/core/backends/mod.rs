@@ -128,7 +128,7 @@ impl BackendManager {
         dest: &Path,
         entries: Option<&[String]>,
         password: Option<&str>,
-        total: Option<u64>,
+        known: Option<(u64, u64)>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let fmt = super::detector::detect_format(archive);
@@ -141,7 +141,7 @@ impl BackendManager {
         if big_zip {
             match self
                 .seven
-                .extract_with_total(archive, dest, entries, password, total, progress)
+                .extract_with_total(archive, dest, entries, password, known, progress)
             {
                 Ok(()) => return Ok(()),
                 Err(e) => {
@@ -160,7 +160,7 @@ impl BackendManager {
         // re-run without progress.
         match self
             .primary(&fmt)
-            .extract_with_total(archive, dest, entries, password, total, progress)
+            .extract_with_total(archive, dest, entries, password, known, progress)
         {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -175,7 +175,7 @@ impl BackendManager {
                     eprintln!("[core] native extract failed, falling back to 7z: {}", e);
                     match self
                         .seven
-                        .extract_with_total(archive, dest, entries, password, total, None)
+                        .extract_with_total(archive, dest, entries, password, None, None)
                     {
                         Ok(()) => Ok(()),
                         Err(second) => {

@@ -1,5 +1,19 @@
 # Changelog
 
+## v1.6.3 — parallel zip creation, per-entry extract progress, MT xz
+
+- **Perf**: zip creation now compresses files in parallel (each worker emits an
+  in-memory chunk that is merged verbatim into the final archive, no
+  re-compression) when no password is set and RAM allows; deflate is handled
+  by zlib-ng for all gzip/zip writers.
+- **Perf**: 7z and bsdtar extraction progress is driven by the tool's own
+  per-entry completion lines (O(1) per tick) instead of walking the
+  destination directory every 250ms; `.tar.xz`/`.xz` creation uses liblzma's
+  multithreaded encoder when available.
+- **Perf**: `read_lines_until` and the zip read/write `io::copy` paths use a
+  large fixed buffer and avoid per-line/stream allocations, slicing large
+  I/O into 1 MiB chunks.
+
 ## v1.6.2 — cancel-aware extraction, password-aware edits and faster matching
 
 - **Fixed**: a cancel request now genuinely stops extraction — the cancel flag is
