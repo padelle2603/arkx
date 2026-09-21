@@ -426,7 +426,15 @@ pub fn read_lines_until(reader: impl Read, mut on_line: impl FnMut(&str) -> bool
     let mut buf = vec![0u8; 64 * 1024];
     let mut chunk: Vec<u8> = Vec::new();
     loop {
-        let n = reader.read(&mut buf).unwrap_or(0);
+        // A `read` that returns `Interrupted` is not EOF: retry it instead of
+        // treating it as end-of-stream (would truncate 7z/bsdtar output).
+        let n = loop {
+            match reader.read(&mut buf) {
+                Ok(n) => break n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break 0,
+            }
+        };
         if n == 0 {
             break;
         }

@@ -410,6 +410,9 @@ impl BackendManager {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        for (_, name) in sources {
+            clean_internal_name(name)?;
+        }
         let fmt = super::detector::detect_format(archive);
         match fmt {
             ArchiveFormat::Zip => self.native.add(archive, sources, password, progress),
@@ -427,17 +430,7 @@ impl BackendManager {
     /// which the backends record as a bare directory entry; the temp dir is
     /// cleaned up on every path.
     pub fn new_folder(&self, archive: &Path, name: &str, password: Option<&str>) -> Result<()> {
-        // Entry is a full archive path (trailing slash): each component must be a
-        // clean, non-empty name. Rejects "..", "." and double slashes (zip-slip
-        // and traversal guard, same rules the extractor enforces).
-        let components: Vec<&str> = name.trim_end_matches('/').split('/').collect();
-        if components.is_empty()
-            || components
-                .iter()
-                .any(|c| c.is_empty() || *c == "." || *c == ".." || c.contains('\\'))
-        {
-            return Err(ArkxError::InvalidInput(name.to_string()));
-        }
+        clean_internal_name(name)?;
         let tmp = crate::core::util::TaskTempDir::new("arkx-newdir")?;
         self.add(
             archive,
@@ -455,6 +448,9 @@ impl BackendManager {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        for entry in entries {
+            clean_internal_name(entry)?;
+        }
         let fmt = super::detector::detect_format(archive);
         match fmt {
             ArchiveFormat::Zip => self.native.remove(archive, entries, password, progress),
@@ -477,6 +473,7 @@ impl BackendManager {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        clean_internal_name(new_name)?;
         let fmt = super::detector::detect_format(archive);
         match fmt {
             ArchiveFormat::Zip => self
@@ -608,6 +605,22 @@ impl Default for BackendManager {
     }
 }
 
+/// Validate an archive-internal entry path (add / remove / rename / new_folder
+/// names from the user or CLI). Each component must be a clean, non-empty name:
+/// rejects "..", "." and double slashes, the same zip-slip / traversal guard the
+/// extractor enforces, so no `../../etc/passwd`-style entry is ever written.
+fn clean_internal_name(name: &str) -> Result<()> {
+    let components: Vec<&str> = name.trim_end_matches('/').split('/').collect();
+    if components.is_empty()
+        || components
+            .iter()
+            .any(|c| c.is_empty() || *c == "." || *c == ".." || c.contains('\\'))
+    {
+        return Err(ArkxError::InvalidInput(name.to_string()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +648,17 @@ mod tests {
                 "{label} must not be modifiable"
             );
         }
+    }
+
+    #[test]
+    fn clean_internal_name_rejects_traversal() {
+        assert!(clean_internal_name("docs/img.png").is_ok());
+        assert!(clean_internal_name("docs/").is_ok());
+        assert!(clean_internal_name("plain").is_ok());
+        assert!(clean_internal_name("../escape").is_err());
+        assert!(clean_internal_name("a/../../b").is_err());
+        assert!(clean_internal_name("a//b").is_err());
+        assert!(clean_internal_name("/abs").is_err());
+        assert!(clean_internal_name("a\\b").is_err());
     }
 }

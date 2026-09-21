@@ -505,16 +505,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
             let mut password: Option<String> = None;
+            let mut threads: Option<usize> = None;
             let mut i = 4;
             while i < args.len() {
-                if args[i] == "-p" || args[i] == "--password" {
-                    if let Some(v) = args.get(i + 1) {
-                        password = Some(v.clone());
-                    }
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+                i += consumed.max(1);
             }
             println!("Creating folder '{}' in {}...", folder, archive.display());
             let start = std::time::Instant::now();
@@ -534,16 +530,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             let old_name = crate::core::fm::decode_input_arg(&args[3]);
             let new_name = crate::core::fm::decode_input_arg(&args[4]);
             let mut password: Option<String> = None;
+            let mut threads: Option<usize> = None;
             let mut i = 5;
             while i < args.len() {
-                if args[i] == "-p" || args[i] == "--password" {
-                    if let Some(v) = args.get(i + 1) {
-                        password = Some(v.clone());
-                    }
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+                i += consumed.max(1);
             }
             println!(
                 "Renaming '{}' → '{}' in {}...",
@@ -582,19 +574,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     i += consumed;
                     continue;
                 }
-                if args[i] == "-p" || args[i] == "--password" {
-                    if let Some(v) = args.get(i + 1) {
-                        password = Some(v.clone());
-                    }
-                    i += 2;
-                } else {
-                    entries.push(
-                        crate::core::fm::decode_input_arg(&args[i])
-                            .to_string_lossy()
-                            .into(),
-                    );
-                    i += 1;
-                }
+                entries.push(
+                    crate::core::fm::decode_input_arg(&args[i])
+                        .to_string_lossy()
+                        .into(),
+                );
+                i += 1;
             }
             crate::core::util::set_thread_override(threads);
             println!("Testing {}...", archive.display());
@@ -633,16 +618,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 .to_string_lossy()
                 .to_string();
             let mut password: Option<String> = None;
+            let mut threads: Option<usize> = None;
             let mut i = 4;
             while i < args.len() {
-                if args[i] == "-p" || args[i] == "--password" {
-                    if let Some(v) = args.get(i + 1) {
-                        password = Some(v.clone());
-                    }
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+                let consumed =
+                    parse_common_flags(&args[i], args.get(i + 1), &mut password, &mut threads);
+                i += consumed.max(1);
             }
             let temp_dir = crate::core::util::open_with_dir()?;
             let path = backend.open_with(&archive, &entry, password.as_deref(), &temp_dir)?;

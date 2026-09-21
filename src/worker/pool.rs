@@ -36,6 +36,9 @@ pub struct WorkerPool {
     /// Live cancel flags, one per running job: cancelling must not reset the
     /// flag of a sibling job when this one finishes.
     cancel_flags: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
+    /// Pool-wide cancel: set by `cancel_all` so queued (not yet running) jobs
+    /// are dropped instead of still executing after the user cancels.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl WorkerPool {
@@ -43,12 +46,20 @@ impl WorkerPool {
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (evt_tx, evt_rx) = mpsc::channel::<WorkerEvent>();
         let cancel_flags = Arc::new(Mutex::new(Vec::<Arc<AtomicBool>>::new()));
+        let cancelled = Arc::new(AtomicBool::new(false));
 
         // Dispatcher thread — per-job threads so a pipe deadlock (7z) never
         // blocks dispatch. Progress stays byte-based (see backends).
         let flags = cancel_flags.clone();
+        let cancelled_dispatch = cancelled.clone();
         thread::spawn(move || {
             while let Ok(job) = job_rx.recv() {
+                if cancelled_dispatch.load(Ordering::Relaxed) {
+                    let _ = evt_tx.send(WorkerEvent::Error {
+                        err: ArkxError::Cancelled,
+                    });
+                    continue;
+                }
                 let kind_str = match &job.kind {
                     JobKind::List { .. } => "list",
                     JobKind::Extract { .. } => "extract",
@@ -122,6 +133,7 @@ impl WorkerPool {
             tx: job_tx,
             rx: evt_rx,
             cancel_flags,
+            cancelled,
         }
     }
 
@@ -348,6 +360,7 @@ impl WorkerPool {
     }
 
     pub fn cancel_all(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
         for f in self
             .cancel_flags
             .lock()

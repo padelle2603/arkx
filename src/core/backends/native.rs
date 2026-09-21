@@ -20,6 +20,16 @@ const IO_BUF_SIZE: usize = 1024 * 1024;
 const COPY_CHUNK: usize = 65536;
 pub(super) const MAX_EXTRACTED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
+/// Unique staging-file suffix: the pid alone collides when two add/remove
+/// jobs run concurrently, letting one job clobber the other's `.part` file.
+static NEXT_TMP_JOB: AtomicU64 = AtomicU64::new(0);
+
+fn part_temp_name(secure: bool) -> String {
+    let seq = NEXT_TMP_JOB.fetch_add(1, Ordering::Relaxed);
+    let stem = if secure { "secure-" } else { "" };
+    format!(".arkx-{stem}{}-{seq}.part", std::process::id())
+}
+
 pub(super) fn quota_error() -> ArkxError {
     ArkxError::Corrupted(format!(
         "decompressed data exceeds the {:.0} GiB safety quota; refusing to continue (possible zip bomb)",
@@ -1367,7 +1377,7 @@ impl NativeBackend {
         }
 
         let mut tmp = archive.as_os_str().to_os_string();
-        tmp.push(format!(".arkx-{}.part", std::process::id()));
+        tmp.push(part_temp_name(false));
         let tmp = PathBuf::from(tmp);
 
         let shared = progress.map(|cb| Arc::new(Mutex::new(cb)));
@@ -1522,7 +1532,7 @@ impl NativeBackend {
         };
 
         let mut tmp = archive.as_os_str().to_os_string();
-        tmp.push(format!(".arkx-{}.part", std::process::id()));
+        tmp.push(part_temp_name(false));
         let tmp = PathBuf::from(tmp);
 
         let shared = progress.map(|cb| Arc::new(Mutex::new(cb)));
@@ -2148,7 +2158,7 @@ impl NativeBackend {
         }
 
         let mut tmp = archive.as_os_str().to_os_string();
-        tmp.push(format!(".arkx-{}.part", std::process::id()));
+        tmp.push(part_temp_name(false));
         let tmp = PathBuf::from(tmp);
 
         let shared = progress.map(|cb| Arc::new(Mutex::new(cb)));
@@ -2330,7 +2340,7 @@ impl NativeBackend {
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let archive_len = archive.metadata().map(|m| m.len()).unwrap_or(0);
         let mut tmp = archive.as_os_str().to_os_string();
-        tmp.push(format!(".arkx-secure-{}.part", std::process::id()));
+        tmp.push(part_temp_name(true));
         let tmp = PathBuf::from(tmp);
 
         let sels = crate::core::paths::normalize_sel(entries);
