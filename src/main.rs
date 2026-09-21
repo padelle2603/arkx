@@ -6,6 +6,9 @@ use adw::prelude::*;
 use std::path::PathBuf;
 
 fn main() -> anyhow::Result<()> {
+    // Load the persisted speed profiles (extraction/compression) once, so CLI
+    // and GUI share the same tunings; missing config falls back to balanced.
+    crate::core::config::init();
     // CLI mode: skip the GUI for fast batch operations
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 {
@@ -32,7 +35,14 @@ fn main() -> anyhow::Result<()> {
         .build();
 
     app.connect_activate(|app| {
-        ui::build_ui(app);
+        // A second launch (e.g. double-click while the primary instance is
+        // alive) forwards `activate` without argv: focus the existing window
+        // instead of stacking an empty duplicate one.
+        if let Some(w) = app.windows().first() {
+            w.present();
+        } else {
+            ui::build_ui(app);
+        }
     });
 
     // Files opened from the file manager (gio open): the path is NOT in argv,
@@ -67,7 +77,7 @@ Commands:
                [-p <password>]     Password if needed
 
   a, create <dest> <file...>       Create archive (format from extension)
-               [-l <0-9>]          Compression level (default 6)
+               [-l <0-9>]          Compression level (default: active profile)
                [-p <password>]     Password (AES256 for 7z/zip)
                [-v <size>]         Split into volumes (.7z/.zip/.rar): e.g. 50m, 1g
                                    .zip needs Info-ZIP `zip`, .rar needs `rar` installed
@@ -295,7 +305,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     "Extracting {} -> {} ({} threads)...",
                     archive.display(),
                     dest.display(),
-                    crate::core::util::effective_threads()
+                    crate::core::util::extraction_log_threads()
                 );
                 let start = std::time::Instant::now();
                 backend.extract(
@@ -711,7 +721,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             let dest = PathBuf::from(&args[2]);
             // Collect sources (up to -l / -p / -v flags)
             let mut sources = Vec::new();
-            let mut level = 6u8;
+            let mut level = crate::core::config::compression_level();
             let mut password: Option<String> = None;
             let mut threads: Option<usize> = None;
             let mut volume: Option<String> = None;
@@ -760,11 +770,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
             crate::core::util::set_thread_override(threads);
             println!(
-                "Creating {} ({} files, level {}, {} threads){}...",
+                "Creating {} ({} files, level {}, {} threads, profile {}){}...",
                 dest.display(),
                 sources.len(),
                 level,
                 crate::core::util::effective_threads(),
+                compression_profile_label(),
                 volume
                     .as_deref()
                     .map(|v| format!(", volume {}", v))
@@ -798,7 +809,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 eprintln!("Source not found: {}", src.display());
                 std::process::exit(1);
             }
-            let mut level = 6u8;
+            let mut level = crate::core::config::compression_level();
             let mut password: Option<String> = None;
             let mut threads: Option<usize> = None;
             let mut i = 4;
@@ -863,12 +874,13 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
 
             let info = backend.detect_and_list(&src)?;
             println!(
-                "Converting {} ({}) -> {} (level {}, {} threads)...",
+                "Converting {} ({}) -> {} (level {}, {} threads, profile {})...",
                 src.display(),
                 info.format,
                 dest.display(),
                 level,
-                crate::core::util::effective_threads()
+                crate::core::util::effective_threads(),
+                compression_profile_label()
             );
             // Working dir under the system temp dir; removed on drop
             // (success or error) by the RAII guard. Same pid convention as the
@@ -997,6 +1009,15 @@ fn parse_level_or_exit(v: &str) -> u8 {
             eprintln!("Invalid -l/--level value: {v} (expected 0-9)");
             std::process::exit(1);
         }
+    }
+}
+
+/// Human label of the active compression profile (for progress logs).
+fn compression_profile_label() -> &'static str {
+    match crate::core::config::compression() {
+        crate::core::config::CompressTier::Fast => "fast",
+        crate::core::config::CompressTier::Balanced => "balanced",
+        crate::core::config::CompressTier::Small => "small",
     }
 }
 
@@ -1148,7 +1169,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
     let mut here = false;
     let mut dialog = false;
     let mut to: Option<PathBuf> = None;
-    let mut level = 6u8;
+    let mut level = crate::core::config::compression_level();
     let mut password: Option<String> = None;
     let mut progress = false;
     let mut no_progress = false;
@@ -1266,11 +1287,12 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
     }
 
     println!(
-        "Creating {} ({} files, level {}, {} threads)...",
+        "Creating {} ({} files, level {}, {} threads, profile {})...",
         dest.display(),
         sources.len(),
         level,
-        crate::core::util::effective_threads()
+        crate::core::util::effective_threads(),
+        compression_profile_label()
     );
     let start = std::time::Instant::now();
     backend.create(

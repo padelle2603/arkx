@@ -131,6 +131,30 @@ impl BackendManager {
         known: Option<(u64, u64)>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        // The `Conservative` extraction profile caps threads to 1; it applies
+        // only when the user did not already force an explicit `--threads` /
+        // `ARKX_THREADS` count (an explicit request outranks the profile).
+        if crate::core::util::thread_override().is_none() {
+            let saved = crate::core::util::thread_override();
+            crate::core::util::set_thread_override(crate::core::config::extraction_thread_cap());
+            let result =
+                self.extract_with_total_core(archive, dest, entries, password, known, progress);
+            crate::core::util::set_thread_override(saved);
+            result
+        } else {
+            self.extract_with_total_core(archive, dest, entries, password, known, progress)
+        }
+    }
+
+    fn extract_with_total_core(
+        &self,
+        archive: &Path,
+        dest: &Path,
+        entries: Option<&[String]>,
+        password: Option<&str>,
+        known: Option<(u64, u64)>,
+        progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
+    ) -> Result<()> {
         let fmt = super::detector::detect_format(archive);
         // Large zips → multithreaded 7z even if the table says native:
         // zero-fork only pays off below threshold (adaptive on RAM).

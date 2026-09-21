@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod backends;
+pub mod config;
 pub mod detector;
 pub mod error;
 pub mod fm;

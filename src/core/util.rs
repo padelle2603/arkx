@@ -23,6 +23,18 @@ pub fn thread_override() -> Option<usize> {
     }
 }
 
+/// Threads an extraction will actually use, for the CLI log line.
+/// An explicit `--threads` always wins; otherwise the Conservative profile
+/// caps the job to a single thread.
+pub fn extraction_log_threads() -> usize {
+    let capped = crate::core::config::extraction_thread_cap();
+    if let Some(n) = thread_override() {
+        return n;
+    }
+    let effective = effective_threads();
+    capped.map(|cap| effective.min(cap)).unwrap_or(effective)
+}
+
 /// Number of logical CPUs, with a sane fallback.
 pub fn num_cpus() -> usize {
     std::thread::available_parallelism()
@@ -96,10 +108,20 @@ pub fn zstd_workers() -> u32 {
 }
 
 /// Threshold above which an archive is "large" and deserves parallel backends/codecs.
-/// Scales with RAM (default 100MiB without info), with floor and ceiling
-/// so small machines don't fork too early and large ones don't
-/// stay single-threaded for too long.
+/// The Balanced tier scales with RAM (default 100MiB without info); `Fast`
+/// routes earlier (25 MiB) for zip→7z parallel extraction; `Conservative`
+/// never routes to 7z (single-threaded native only).
 pub fn big_archive_threshold_bytes() -> u64 {
+    use crate::core::config::ExtractTier;
+    match crate::core::config::extraction() {
+        ExtractTier::Fast => 25 * 1024 * 1024,
+        ExtractTier::Conservative => u64::MAX,
+        ExtractTier::Balanced => big_archive_threshold_balanced(),
+    }
+}
+
+/// Balanced (RAM-scaled) zip→7z threshold for extraction.
+fn big_archive_threshold_balanced() -> u64 {
     const MIN: u64 = 32 * 1024 * 1024;
     const MAX: u64 = 256 * 1024 * 1024;
     match available_memory_mb() {
@@ -109,7 +131,19 @@ pub fn big_archive_threshold_bytes() -> u64 {
 }
 
 /// Threshold above which zip creation switches to multithreaded 7z (total input).
+/// `Small` routes earlier (64 MiB) for the best ratio; `Fast` keeps zip native
+/// (parallel rayon writer) by never switching to 7z.
 pub fn zip_seven_threshold_bytes() -> u64 {
+    use crate::core::config::CompressTier;
+    match crate::core::config::compression() {
+        CompressTier::Fast => u64::MAX,
+        CompressTier::Small => 64 * 1024 * 1024,
+        CompressTier::Balanced => zip_seven_threshold_balanced(),
+    }
+}
+
+/// Balanced (RAM-scaled) zip→7z threshold for creation.
+fn zip_seven_threshold_balanced() -> u64 {
     const MIN: u64 = 64 * 1024 * 1024;
     const MAX: u64 = 1024 * 1024 * 1024;
     match available_memory_mb() {
@@ -587,6 +621,7 @@ mod tests {
 
     #[test]
     fn thresholds_have_sane_bounds() {
+        // Balanced (default): the RAM-scaled thresholds are inside their bounds.
         let t = big_archive_threshold_bytes();
         assert!(
             (32 * 1024 * 1024..=256 * 1024 * 1024).contains(&t),
@@ -599,6 +634,23 @@ mod tests {
             "z={}",
             z
         );
+    }
+
+    #[test]
+    fn thresholds_follow_profiles() {
+        use crate::core::config::{apply, CompressTier, ExtractTier};
+        // Extraction: Fast routes early (25 MiB), Conservative never (u64::MAX).
+        apply(ExtractTier::Fast, CompressTier::Balanced);
+        assert_eq!(big_archive_threshold_bytes(), 25 * 1024 * 1024);
+        apply(ExtractTier::Conservative, CompressTier::Balanced);
+        assert_eq!(big_archive_threshold_bytes(), u64::MAX);
+        // Compression: Small routes from 64 MiB, Fast never switches to 7z.
+        apply(ExtractTier::Balanced, CompressTier::Small);
+        assert_eq!(zip_seven_threshold_bytes(), 64 * 1024 * 1024);
+        apply(ExtractTier::Balanced, CompressTier::Fast);
+        assert_eq!(zip_seven_threshold_bytes(), u64::MAX);
+        // Restore defaults so other tests run pinned to balanced behavior.
+        apply(ExtractTier::Balanced, CompressTier::Balanced);
     }
 
     #[test]

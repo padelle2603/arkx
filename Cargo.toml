@@ -18,6 +18,7 @@ rayon = "1.10"
 anyhow = "1.0"
 thiserror = "2.0"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 infer = "0.16"
 walkdir = "2.5"
 zip = { version = "2.2", default-features = false, features = ["deflate-zlib-ng", "bzip2", "zstd", "xz", "time", "aes-crypto"] }
