@@ -1,7 +1,7 @@
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 use gtk4 as gtk;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Mutex;
@@ -109,6 +109,92 @@ fn submit_edit_with_password(
     );
 }
 
+// --- Speed profiles -------------------------------------------------------
+
+/// Header-button icon: a sun→cloud gradient driven by the more conservative of
+/// the two profiles (0 = sun/Fast, 1 = few-clouds/Balanced, 2 = overcast).
+fn profile_icon() -> &'static str {
+    use crate::core::config::{CompressTier, ExtractTier};
+    let e = match crate::core::config::extraction() {
+        ExtractTier::Fast => 0u8,
+        ExtractTier::Balanced => 1,
+        ExtractTier::Conservative => 2,
+    };
+    let c = match crate::core::config::compression() {
+        CompressTier::Fast => 0u8,
+        CompressTier::Balanced => 1,
+        CompressTier::Small => 2,
+    };
+    match e.max(c) {
+        0 => "weather-clear-symbolic",
+        1 => "weather-few-clouds-symbolic",
+        _ => "weather-overcast-symbolic",
+    }
+}
+
+/// Tooltip summarising the current profiles on both axes.
+fn profile_tooltip() -> String {
+    use crate::core::config::{CompressTier, ExtractTier};
+    let e = match crate::core::config::extraction() {
+        ExtractTier::Fast => "Fast",
+        ExtractTier::Balanced => "Balanced",
+        ExtractTier::Conservative => "Conservative",
+    };
+    let c = match crate::core::config::compression() {
+        CompressTier::Fast => "Fast",
+        CompressTier::Balanced => "Balanced",
+        CompressTier::Small => "Small",
+    };
+    format!("Speed profiles · Extraction: {e} · Compression: {c}")
+}
+
+/// One selectable row of the profile popover. A `ToggleButton` styled as a
+/// choice: one active per section, managed like radios (setting one clears
+/// the others). Child layout = tier icon + name/caption + recommendation badge.
+fn profile_choice_row(
+    icon: &str,
+    name: &str,
+    caption: &str,
+    tag: Option<&str>,
+    caution: bool,
+) -> gtk::ToggleButton {
+    let btn = gtk::ToggleButton::new();
+    btn.add_css_class("profile-choice");
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    row.set_margin_start(8);
+    row.set_margin_end(8);
+    row.set_margin_top(4);
+    row.set_margin_bottom(4);
+    let img = gtk::Image::from_icon_name(icon);
+    img.set_valign(gtk::Align::Center);
+    row.append(&img);
+    let texts = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    texts.set_hexpand(true);
+    let name_lbl = gtk::Label::new(Some(name));
+    name_lbl.add_css_class("profile-name");
+    name_lbl.set_xalign(0.0);
+    let cap_lbl = gtk::Label::new(Some(caption));
+    cap_lbl.add_css_class("profile-caption");
+    cap_lbl.set_xalign(0.0);
+    cap_lbl.set_wrap(true);
+    texts.append(&name_lbl);
+    texts.append(&cap_lbl);
+    row.append(&texts);
+    if let Some(t) = tag {
+        let tag_lbl = gtk::Label::new(Some(t));
+        tag_lbl.add_css_class("profile-tag");
+        tag_lbl.add_css_class(if caution {
+            "badge-caution"
+        } else {
+            "badge-recommended"
+        });
+        tag_lbl.set_valign(gtk::Align::Center);
+        row.append(&tag_lbl);
+    }
+    btn.set_child(Some(&row));
+    btn
+}
+
 // Builds the main UI
 pub fn build_ui(app: &adw::Application) {
     // CSS distintivo — responsive + frame + non generico
@@ -141,6 +227,14 @@ pub fn build_ui(app: &adw::Application) {
         .breadcrumb-btn:hover { background: #27272a; }
         .breadcrumb-sep { color: #52525b; margin: 0 2px; }
         .table-header { background: #18181b; border-bottom: 1px solid #27272a; padding: 6px 12px; font-size: 11px; font-weight: 600; color: #a1a1aa; letter-spacing: 0.5px; }
+        /* Speed-profile popover */
+        .profile-popover { padding: 4px; min-width: 350px; }
+        .profile-heading { font-size: 11px; font-weight: 700; letter-spacing: 0.4px; color: #a1a1aa; padding: 6px 8px 2px; }
+        .profile-name { font-weight: 600; }
+        .profile-caption { font-size: 11px; color: #71717a; }
+        .profile-tag { font-size: 10px; font-weight: 600; border-radius: 9px; padding: 2px 8px; }
+        .badge-recommended { color: #22c55e; background: rgba(34, 197, 94, 0.14); }
+        .badge-caution { color: #f59e0b; background: rgba(245, 158, 11, 0.15); }
         /* Scrollbar sempre visibili quando serve */
         scrollbar { opacity: 1; }
         scrollbar slider { min-width: 8px; min-height: 8px; background: #3f3f46; border-radius: 4px; }
@@ -222,6 +316,161 @@ pub fn build_ui(app: &adw::Application) {
     extract_sel_btn.add_css_class("header-btn");
     extract_sel_btn.set_sensitive(false);
     header.pack_start(&extract_sel_btn);
+
+    // Speed profiles: persistent per-axis presets (extraction + compression).
+    // The button just reflects the state; the popover edits and persists it.
+    let profile_btn = gtk::MenuButton::new();
+    profile_btn.add_css_class("header-btn");
+    profile_btn.set_tooltip_text(Some(&profile_tooltip()));
+    profile_btn.set_icon_name(profile_icon());
+    let profile_pop = gtk::Popover::new();
+    profile_pop.add_css_class("profile-popover");
+    profile_btn.set_popover(Some(&profile_pop));
+    {
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        content.set_margin_top(4);
+        content.set_margin_bottom(6);
+
+        let head_e = gtk::Label::new(Some("Extraction — resources vs speed"));
+        head_e.add_css_class("profile-heading");
+        head_e.set_xalign(0.0);
+        content.append(&head_e);
+        let e_fast = profile_choice_row(
+            "weather-clear-symbolic",
+            "Fast",
+            "All cores · zip→7z routing from 25 MiB",
+            Some("Heavy CPU/RAM"),
+            true,
+        );
+        let e_bal = profile_choice_row(
+            "weather-few-clouds-symbolic",
+            "Balanced",
+            "System-adaptive · RAM-scaled threshold",
+            Some("Recommended"),
+            false,
+        );
+        let e_con = profile_choice_row(
+            "weather-overcast-symbolic",
+            "Conservative",
+            "1 thread · native backends, no 7z",
+            Some("Battery friendly"),
+            false,
+        );
+        content.append(&e_fast);
+        content.append(&e_bal);
+        content.append(&e_con);
+
+        let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+        sep.set_margin_top(6);
+        sep.set_margin_bottom(6);
+        content.append(&sep);
+
+        let head_c = gtk::Label::new(Some("Compression — speed vs size"));
+        head_c.add_css_class("profile-heading");
+        head_c.set_xalign(0.0);
+        content.append(&head_c);
+        let c_fast = profile_choice_row(
+            "weather-clear-symbolic",
+            "Fast",
+            "Level 1 · zip stays native (parallel)",
+            Some("Bigger files"),
+            true,
+        );
+        let c_bal = profile_choice_row(
+            "weather-few-clouds-symbolic",
+            "Balanced",
+            "Level 6 · system-adaptive",
+            Some("Recommended"),
+            false,
+        );
+        let c_sml = profile_choice_row(
+            "weather-overcast-symbolic",
+            "Small",
+            "Level 9 · zip→7z routing from 64 MiB",
+            Some("Slow on big data"),
+            true,
+        );
+        content.append(&c_fast);
+        content.append(&c_bal);
+        content.append(&c_sml);
+
+        profile_pop.set_child(Some(&content));
+
+        // Persist on change and refresh the header button. One active per
+        // section: selecting a row clears the other two (radio-like).
+        use crate::core::config::{CompressTier, ExtractTier};
+        let btn = profile_btn.clone();
+        let refresh = move || {
+            btn.set_icon_name(profile_icon());
+            btn.set_tooltip_text(Some(&profile_tooltip()));
+        };
+
+        // Selection groups: one active per section, radio-like. Selecting a
+        // row clears the other two via the shared group handle.
+        let e_ctrl: Rc<RefCell<Vec<gtk::ToggleButton>>> = Rc::new(RefCell::new(vec![
+            e_fast.clone(),
+            e_bal.clone(),
+            e_con.clone(),
+        ]));
+        let c_ctrl: Rc<RefCell<Vec<gtk::ToggleButton>>> = Rc::new(RefCell::new(vec![
+            c_fast.clone(),
+            c_bal.clone(),
+            c_sml.clone(),
+        ]));
+
+        for (btn, tier) in [
+            (e_fast.clone(), ExtractTier::Fast),
+            (e_bal.clone(), ExtractTier::Balanced),
+            (e_con.clone(), ExtractTier::Conservative),
+        ] {
+            let ctrl = e_ctrl.clone();
+            let refresh = refresh.clone();
+            btn.connect_toggled(move |b| {
+                if b.is_active() {
+                    for other in ctrl.borrow().iter() {
+                        if other != b {
+                            other.set_active(false);
+                        }
+                    }
+                    crate::core::config::set_extraction(tier);
+                    refresh();
+                }
+            });
+        }
+        for (btn, tier) in [
+            (c_fast.clone(), CompressTier::Fast),
+            (c_bal.clone(), CompressTier::Balanced),
+            (c_sml.clone(), CompressTier::Small),
+        ] {
+            let ctrl = c_ctrl.clone();
+            let refresh = refresh.clone();
+            btn.connect_toggled(move |b| {
+                if b.is_active() {
+                    for other in ctrl.borrow().iter() {
+                        if other != b {
+                            other.set_active(false);
+                        }
+                    }
+                    crate::core::config::set_compression(tier);
+                    refresh();
+                }
+            });
+        }
+
+        // Reflect the persisted profiles on the choices (fires toggled, which
+        // re-persists the same values: harmless and keeps the button in sync).
+        match crate::core::config::extraction() {
+            ExtractTier::Fast => e_fast.set_active(true),
+            ExtractTier::Balanced => e_bal.set_active(true),
+            ExtractTier::Conservative => e_con.set_active(true),
+        }
+        match crate::core::config::compression() {
+            CompressTier::Fast => c_fast.set_active(true),
+            CompressTier::Balanced => c_bal.set_active(true),
+            CompressTier::Small => c_sml.set_active(true),
+        }
+    }
+    header.pack_start(&profile_btn);
 
     // Search
     let search_entry = gtk::SearchEntry::new();
@@ -507,6 +756,11 @@ pub fn build_ui(app: &adw::Application) {
         if *ui.is_busy.borrow() {
             ui.status_left
                 .set_text("Busy: wait for the current operation to finish");
+            return true;
+        }
+        if !archive_editable(&ui) {
+            ui.status_left
+                .set_text("Archive is read-only: cannot add files");
             return true;
         }
         let Some(archive) = ui.state.borrow().current_archive.clone() else {
@@ -954,6 +1208,15 @@ pub fn build_ui(app: &adw::Application) {
         // Build the contextual popover menu (win.* actions read
         // state.selected_entries when activated). Items are grouped into
         // titled sections so the menu reads as a small organized palette.
+        // Edit operations (new folder/remove/rename/cut/paste) are only shown
+        // on archive formats that can be modified in place; on read-only ones
+        // (rar/gz/xz/…) they are omitted instead of greyed out.
+        let st_menu = ui_menu.state.borrow();
+        let modifiable = st_menu
+            .current_info
+            .as_ref()
+            .is_some_and(|i| crate::core::backends::BackendManager::modifiable_label(&i.format));
+        drop(st_menu);
         let menu = gio::Menu::new();
 
         let operations = gio::Menu::new();
@@ -965,16 +1228,20 @@ pub fn build_ui(app: &adw::Application) {
             Some("Extract selected to…"),
             Some("win.extract-selected-to"),
         );
-        operations.append(Some("New folder"), Some("win.new-folder"));
-        operations.append(Some("Remove from archive"), Some("win.remove-selected"));
-        operations.append(Some("Rename"), Some("win.rename"));
+        if modifiable {
+            operations.append(Some("New folder"), Some("win.new-folder"));
+            operations.append(Some("Remove from archive"), Some("win.remove-selected"));
+            operations.append(Some("Rename"), Some("win.rename"));
+        }
         menu.append_section(Some("Operations"), &operations);
 
         let clipboard = gio::Menu::new();
         clipboard.append(Some("Copy path"), Some("win.copy-path"));
         clipboard.append(Some("Copy"), Some("win.copy-entry"));
-        clipboard.append(Some("Cut"), Some("win.cut-entry"));
-        clipboard.append(Some("Paste"), Some("win.paste"));
+        if modifiable {
+            clipboard.append(Some("Cut"), Some("win.cut-entry"));
+            clipboard.append(Some("Paste"), Some("win.paste"));
+        }
         menu.append_section(Some("Clipboard"), &clipboard);
 
         let system = gio::Menu::new();
@@ -1094,6 +1361,12 @@ pub fn build_ui(app: &adw::Application) {
         if dismiss_and_check_idle(&ui_rm, &open_menu_rm) {
             return;
         }
+        if !archive_editable(&ui_rm) {
+            ui_rm
+                .status_left
+                .set_text("Archive is read-only: remove is not available");
+            return;
+        }
         let st = ui_rm.state.borrow();
         let archive = match st.current_archive.clone() {
             Some(a) => a,
@@ -1137,6 +1410,12 @@ pub fn build_ui(app: &adw::Application) {
     let rn_shortcuts = shortcut_controller.clone();
     action_rename.connect_activate(move |_, _| {
         if dismiss_and_check_idle(&ui_rn, &open_menu_rn) {
+            return;
+        }
+        if !archive_editable(&ui_rn) {
+            ui_rn
+                .status_left
+                .set_text("Archive is read-only: rename is not available");
             return;
         }
         if ui_rn.state.borrow().editing_path.is_some() {
@@ -1321,6 +1600,12 @@ pub fn build_ui(app: &adw::Application) {
     let open_menu_ct = open_menu.clone();
     action_cut_entry.connect_activate(move |_, _| {
         dismiss_context_menu(&open_menu_ct);
+        if !archive_editable(&ui_ct) {
+            ui_ct
+                .status_left
+                .set_text("Archive is read-only: cut is not available");
+            return;
+        }
         let st = ui_ct.state.borrow();
         let selected = st.selected_entries.clone();
         let archive = st.current_archive.clone();
@@ -1343,6 +1628,12 @@ pub fn build_ui(app: &adw::Application) {
     let open_menu_ps = open_menu.clone();
     action_paste.connect_activate(move |_, _| {
         if dismiss_and_check_idle(&ui_ps, &open_menu_ps) {
+            return;
+        }
+        if !archive_editable(&ui_ps) {
+            ui_ps
+                .status_left
+                .set_text("Archive is read-only: paste is not available");
             return;
         }
         // Cut takes priority, copy is the fallback.
@@ -1442,6 +1733,12 @@ pub fn build_ui(app: &adw::Application) {
     let open_menu_nf = open_menu.clone();
     action_new_folder.connect_activate(move |_, _| {
         if dismiss_and_check_idle(&ui_nf, &open_menu_nf) {
+            return;
+        }
+        if !archive_editable(&ui_nf) {
+            ui_nf
+                .status_left
+                .set_text("Archive is read-only: new folder is not available");
             return;
         }
         let st = ui_nf.state.borrow();
@@ -1975,6 +2272,7 @@ pub fn build_ui(app: &adw::Application) {
                                 dialog.present(Some(&ui_poll.window));
                             }
                         }
+                        Ok(JobResult::TestSkipped) => {}
                         Ok(JobResult::OpenWith(path)) => {
                             status_left.set_text(&format!("Opened: {}", path.display()));
                         }
@@ -2131,6 +2429,33 @@ pub fn build_ui(app: &adw::Application) {
             open_archive(p, ui.clone());
         }
     }
+
+    // A path can also be queued *after* the window exists: the file-manager
+    // `open` signal is forwarded by the single-instance GApplication while a
+    // window is already on screen (the second `activate` never carries argv).
+    // Drain the queue on a lightweight per-window timer so the archive opens
+    // inside the alive window instead of lingering unread.
+    let closed = Rc::new(Cell::new(false));
+    {
+        let closed_c = closed.clone();
+        window.connect_destroy(move |_| closed_c.set(true));
+    }
+    let drain_ui = ui.clone();
+    let drain_closed = closed.clone();
+    glib::timeout_add_local(Duration::from_millis(250), move || {
+        if drain_closed.get() {
+            return glib::ControlFlow::Break;
+        }
+        let p = PENDING_OPEN
+            .lock()
+            .ok()
+            .and_then(|mut g| g.take())
+            .filter(|p| p.exists() && p.is_file());
+        if let Some(p) = p {
+            open_archive(p, drain_ui.clone());
+        }
+        glib::ControlFlow::Continue
+    });
 }
 
 fn dismiss_context_menu(menu: &Rc<RefCell<Option<gtk::PopoverMenu>>>) {
@@ -2150,6 +2475,17 @@ fn dismiss_and_check_idle(ui: &Ui, menu: &Rc<RefCell<Option<gtk::PopoverMenu>>>)
         return true;
     }
     false
+}
+
+/// Whether the open archive can be modified in place (zip/7z/tar only).
+/// Edit handlers must guard against read-only formats: their shortcuts
+/// fire regardless of the context menu, which omits those items entirely.
+fn archive_editable(ui: &Ui) -> bool {
+    match ui.state.borrow().current_info.as_ref() {
+        // No archive open yet: handlers bail out on their own.
+        None => true,
+        Some(info) => crate::core::backends::BackendManager::modifiable_label(&info.format),
+    }
 }
 
 fn create_title_widget() -> gtk::Box {

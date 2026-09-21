@@ -222,8 +222,13 @@ impl WorkerPool {
                 entries,
                 password,
             } => {
-                let report = backend.test(&archive, entries.as_deref(), password.as_deref())?;
-                Ok(JobResult::Test(report))
+                match backend.test(&archive, entries.as_deref(), password.as_deref()) {
+                    Ok(report) => Ok(JobResult::Test(report)),
+                    // The open-time auto-test is best-effort: a format the
+                    // backend cannot verify must not surface an error dialog.
+                    Err(ArkxError::UnsupportedFormat(_)) => Ok(JobResult::TestSkipped),
+                    Err(e) => Err(e),
+                }
             }
             JobKind::OpenWith {
                 archive,

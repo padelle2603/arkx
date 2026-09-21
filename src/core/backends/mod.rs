@@ -491,6 +491,14 @@ impl BackendManager {
         }
     }
 
+    /// Whether entries of a format can be added/removed/renamed in place.
+    /// Single source of truth for the GUI (menu trimming, action guards); it
+    /// must stay in sync with the routing in `add`/`remove`/`rename`/
+    /// `new_folder` (labels come from `ArchiveFormat::display_name`).
+    pub fn modifiable_label(label: &str) -> bool {
+        matches!(label, "ZIP" | "7Z" | "TAR")
+    }
+
     /// Test integrity of archive entries.
     pub fn test(
         &self,
@@ -501,7 +509,10 @@ impl BackendManager {
         let fmt = super::detector::detect_format(archive);
         match fmt {
             ArchiveFormat::Zip => self.native.test(archive, entries, password),
-            ArchiveFormat::SevenZip | ArchiveFormat::Tar => {
+            // RAR: 7-Zip is already the list/extract backend and `7z t` can
+            // verify rar contents, so the open-time background check works
+            // instead of surfacing "integrity not supported".
+            ArchiveFormat::SevenZip | ArchiveFormat::Tar | ArchiveFormat::Rar => {
                 self.seven.test(archive, entries, password)
             }
             _ => Err(ArkxError::UnsupportedFormat(format!(
@@ -594,5 +605,35 @@ impl BackendManager {
 impl Default for BackendManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::detector::ArchiveFormat;
+
+    #[test]
+    fn modifiable_labels_match_edit_routing() {
+        // Every format routed to an in-place edit backend in add/remove/rename
+        // must report `modifiable_label == true`. Labels are the display names
+        // stamped into ArchiveInfo.format.
+        for fmt in [
+            ArchiveFormat::Zip,
+            ArchiveFormat::SevenZip,
+            ArchiveFormat::Tar,
+        ] {
+            assert!(
+                BackendManager::modifiable_label(fmt.display_name()),
+                "{} should be modifiable",
+                fmt.display_name()
+            );
+        }
+        for label in ["RAR", "TAR.GZ", "XZ", "GZIP", "ISO", "CAB", "DEB", "RPM"] {
+            assert!(
+                !BackendManager::modifiable_label(label),
+                "{label} must not be modifiable"
+            );
+        }
     }
 }

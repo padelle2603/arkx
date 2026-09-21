@@ -6,6 +6,30 @@ fn backend() -> arkx::core::backends::BackendManager {
     arkx::core::backends::BackendManager::new()
 }
 
+#[test]
+fn rar_integrity_test_routed_to_seven() {
+    // RAR is created with the proprietary `rar` CLI when present; the
+    // open-time integrity check must then run (`7z t`, seven backend) and
+    // report clean instead of "integrity not supported".
+    if !tool_in_path(&["rar"]) {
+        eprintln!("`rar` not found: skipping rar integrity test");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("data.bin");
+    fs::write(&src, vec![0x5A; 64 * 1024]).unwrap();
+    let archive = tmp.path().join("check.rar");
+
+    let bm = backend();
+    bm.create(&archive, &[src], 6, None, None, None).unwrap();
+    let report = bm.test(&archive, None, None).unwrap();
+    assert!(
+        report.passed >= 1,
+        "rar integrity test should pass: {report:?}"
+    );
+    assert_eq!(report.failed, 0);
+}
+
 fn create_src_dir(base: &std::path::Path) -> (PathBuf, Vec<PathBuf>) {
     let src = base.join("src");
     fs::create_dir(&src).unwrap();

@@ -96,6 +96,9 @@ pub enum JobResult {
     Remove,
     Rename,
     Test(crate::core::archive::TestReport),
+    /// The background integrity check could not run for this format
+    /// (UnsupportedFormat): a quiet outcome, never an error dialog.
+    TestSkipped,
     OpenWith(std::path::PathBuf),
     Paste,
     SecureDelete,

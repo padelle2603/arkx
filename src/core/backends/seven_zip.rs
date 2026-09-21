@@ -166,7 +166,10 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             .map_err(|e| ArkxError::Backend(format!("Cannot run 7z: {}", e)))?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
+        // Exit 1 = warning, not a failure (e.g. "Headers Error" on solid RAR);
+        // the line scan below still flags real errors (CRC/Error/Cannot open).
+        let is_warning = output.status.code() == Some(1);
+        if !output.status.success() && !is_warning {
             let msg = format!("{}{}", stdout, stderr);
             return Err(ArkxError::Backend(format!(
                 "7z test failed: {}",
