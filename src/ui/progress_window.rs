@@ -249,12 +249,17 @@ impl ProgressWindow {
         let now = Instant::now();
         let (prev_bytes, prev_time) = *self.last_sample.borrow();
         let dt = now.duration_since(prev_time).as_secs_f64();
-        if dt >= 0.05 {
+        if dt > 0.0 {
             let instant = info.current.saturating_sub(prev_bytes) as f64 / dt;
-            let ema = if self.speed_ema.get() <= 0.0 {
+            let ema = if self.speed_ema.get() <= 0.0 || dt > 1.5 {
+                // First sample, or a long gap (re-seed: no stale history).
                 instant
             } else {
-                0.3 * instant + 0.7 * self.speed_ema.get()
+                // Time-normalized EMA: alpha depends on the real inter-event
+                // gap, so bursts and stalls smooth to one effective constant
+                // even though the backend cadence is not perfectly regular.
+                let alpha = 1.0 - (-dt / 2.0).exp();
+                alpha * instant + (1.0 - alpha) * self.speed_ema.get()
             };
             self.speed_ema.set(ema.max(0.0));
             *self.last_sample.borrow_mut() = (info.current, now);
@@ -268,20 +273,26 @@ impl ProgressWindow {
                 humansize::format_size(info.total, humansize::BINARY)
             ));
             let speed = self.speed_ema.get();
-            if speed > 0.0 {
+            if speed >= 1.0 {
                 self.detail_speed.set_text(&format!(
                     "{}/s",
                     humansize::format_size(speed as u64, humansize::BINARY)
                 ));
                 let remaining = info.total.saturating_sub(info.current) as f64 / speed;
-                self.detail_eta.set_text(&format_duration(remaining));
+                // ETA clamp: sub-B/s speeds would print absurd hour counts.
+                if remaining > 24.0 * 3600.0 {
+                    self.detail_eta.set_text("…");
+                } else {
+                    self.detail_eta.set_text(&format_duration(remaining));
+                }
             } else {
+                self.detail_speed.set_text("—");
                 self.detail_eta.set_text("…");
             }
         } else {
             self.detail_bytes.set_text("…");
             let speed = self.speed_ema.get();
-            if speed > 0.0 {
+            if speed >= 1.0 {
                 self.detail_speed.set_text(&format!(
                     "{}/s",
                     humansize::format_size(speed as u64, humansize::BINARY)

@@ -1,12 +1,15 @@
-use crate::core::archive::{ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressInfo};
+use crate::core::archive::{
+    ArchiveBackend, ArchiveEntry, ArchiveInfo, ProgressInfo, SharedCallback,
+};
 use crate::core::detector::ArchiveFormat;
 use crate::core::error::{ArkxError, Result};
+use crate::core::util::{merge_progress_target, Smoother};
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex,
 };
 use std::time::Instant;
 
@@ -979,8 +982,14 @@ impl NativeBackend {
         // Stable structure: dirs first (sorted), then files: empty folders are
         // thus preserved as in tar.
         dirs.sort();
-        let total = (dirs.len() + files.len()) as u64;
-        let mut done = 0u64;
+        let shared = progress.map(|cb| Arc::new(Mutex::new(cb)));
+        // Byte-based progress: the bar reads source bytes actually being
+        // compressed (dirs contribute 0), so speed, ETA and "Written" match
+        // reality instead of counting entries.
+        let total_src: u64 = files
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
+            .sum::<u64>();
 
         // Parallel compression gate (2c): no password (AES needs the serial
         // writer path), real compression (Stored adds no CPU work to spread),
@@ -989,15 +998,22 @@ impl NativeBackend {
         // compressed chunk into memory; the main thread then muxes the chunks
         // into `dest` verbatim (`merge_archive` copies raw deflate data, no
         // re-compression: the CPU win is real, the output is bit-identical).
+        // The crate's `merge_archive` drops the ZIP64 extra field from the
+        // central-directory entries it merges for plain (non-AES) large files,
+        // producing a zip that strict readers (7z) reject ("Sub items Errors").
+        // Entries that need ZIP64 go down the serial writer, which emits the
+        // extra field correctly.
+        let any_zip64 = files.iter().any(|p| {
+            std::fs::metadata(p)
+                .map(|m| zip_entry_large(m.len()))
+                .unwrap_or(false)
+        });
         let parallel = password.is_none()
             && level > 0
             && !files.is_empty()
+            && !any_zip64
             && crate::core::util::available_memory_mb()
                 .map(|avail_mb| {
-                    let total_src = files
-                        .iter()
-                        .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-                        .sum::<u64>();
                     // Peak in-flight: ~each worker holds its compressed chunk
                     // (≤ total source) plus the final archive → cap at 3/4 RAM.
                     total_src.saturating_mul(2) <= avail_mb * 1024 * 1024 * 3 / 4
@@ -1023,10 +1039,7 @@ impl NativeBackend {
                 if name.is_empty() || name == "/" {
                     continue;
                 }
-                done += 1;
-                if let Some(cb) = &progress {
-                    cb(ProgressInfo::new(name.clone(), done, total.max(1)));
-                }
+                emit_progress(&shared, ProgressInfo::new(name.clone(), 0, total_src));
                 zip.add_directory(name, options)
                     .map_err(|e| ArkxError::Backend(e.to_string()))?;
             }
@@ -1044,49 +1057,160 @@ impl NativeBackend {
                 })
                 .collect();
             let n_chunks = crate::core::util::effective_threads().min(entries.len());
-            // Weight chunks by count (each compression unit is a file).
+            // Byte progress during the CPU-bound phase: workers count the
+            // source bytes each reads into a shared atomic; a lightweight
+            // poller turns that into progress events (the cb is never called
+            // from inside rayon, where locking would stall the pool).
+            let read_bytes = Arc::new(AtomicU64::new(0));
+            let current_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+            let io_stop = Arc::new(AtomicBool::new(false));
+            // Last value the poller put on the bar: the merge anchor must
+            // continue from there, otherwise the target jumps to 100%.
+            let shown = Arc::new(AtomicU64::new(0));
+            // Merge-phase staging (consumed by the poller below): once every
+            // chunk is read+deflated, the destination file size carries the
+            // bar from the read anchor up to `total_src`. The dest grows
+            // continuously as entries are copied, so the merge signal is
+            // byte-granular — unlike counting completed buffers, which bursts
+            // (one step per mini-zip) and freezes in between.
+            let merge_started = Arc::new(AtomicBool::new(false));
+            let merge_anchor = Arc::new(AtomicU64::new(0));
+            let merge_total_bytes = Arc::new(AtomicU64::new(0));
+            // Dest file size at merge start: `current size − anchor` is the
+            // merged+written volume (monotonic, continuous ≈ 1 MiB flushes).
+            let merge_dest_anchor = Arc::new(AtomicU64::new(0));
+            // Set once the merge completes normally: the poller's final tick
+            // then lands the bar exactly on the completed state instead of
+            // leaving a last-visible-% → 100 jump (cancelled/error merges
+            // keep the gap so the bar never fakes completion).
+            let merge_normal = Arc::new(AtomicBool::new(false));
+            let poller = if shared.is_some() {
+                let read_bytes = read_bytes.clone();
+                let current_name = current_name.clone();
+                let stop = io_stop.clone();
+                let merge_started = merge_started.clone();
+                let merge_anchor = merge_anchor.clone();
+                let merge_total_bytes = merge_total_bytes.clone();
+                let merge_dest_anchor = merge_dest_anchor.clone();
+                let shared_p = shared.clone();
+                let shown = shown.clone();
+                let merge_normal = merge_normal.clone();
+                let dest_path = dest.to_path_buf();
+                Some(std::thread::spawn(move || {
+                    // Fixed-cadence + lively smoother: the read counter is
+                    // near-continuous (byte-granular), so it tracks real
+                    // progress within a ~10% step and the merge maps the
+                    // remaining bar off the destination size, so it never
+                    // freezes at the phase boundary or between buffers.
+                    let mut smoother = Smoother::lively(total_src);
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        let raw = read_bytes.load(Ordering::Relaxed).min(total_src);
+                        let target = if merge_started.load(Ordering::Relaxed) {
+                            let growth = std::fs::metadata(&dest_path)
+                                .map(|m| m.len())
+                                .unwrap_or(0)
+                                .saturating_sub(merge_dest_anchor.load(Ordering::Relaxed));
+                            merge_progress_target(
+                                merge_anchor.load(Ordering::Relaxed),
+                                total_src,
+                                growth,
+                                merge_total_bytes.load(Ordering::Relaxed),
+                            )
+                        } else {
+                            raw
+                        };
+                        smoother.nudge(target);
+                        if stop.load(Ordering::Relaxed) && merge_normal.load(Ordering::Relaxed) {
+                            smoother.complete();
+                        }
+                        let current = smoother.value();
+                        shown.store(current, Ordering::Relaxed);
+                        let label = current_name.lock().map(|g| g.clone()).unwrap_or_default();
+                        emit_progress(&shared_p, ProgressInfo::new(label, current, total_src));
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                    }
+                }))
+            } else {
+                None
+            };
             let results: Vec<(Vec<u8>, u64)> = entries
                 .par_chunks(entries.len().div_ceil(n_chunks))
                 .map(|chunk| {
                     let mut buf: Vec<u8> = Vec::new();
                     let mut cw = zip::ZipWriter::new(Cursor::new(&mut buf));
                     for (name, p) in chunk {
-                        cw.start_file(name, options)
+                        let file = File::open(p).map_err(ArkxError::Io)?;
+                        let large = zip_entry_large(file.metadata().map(|m| m.len()).unwrap_or(0));
+                        cw.start_file(name, options.large_file(large))
                             .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                        let mut f = BufReader::with_capacity(
-                            IO_BUF_SIZE,
-                            File::open(p).map_err(ArkxError::Io)?,
-                        );
-                        std::io::copy(&mut f, &mut cw).map_err(ArkxError::Io)?;
+                        if let Ok(mut g) = current_name.lock() {
+                            *g = name.clone();
+                        }
+                        let f = BufReader::with_capacity(IO_BUF_SIZE, file);
+                        let mut cf = CountingReader {
+                            inner: f,
+                            counter: read_bytes.clone(),
+                        };
+                        std::io::copy(&mut cf, &mut cw).map_err(ArkxError::Io)?;
                     }
                     cw.finish().map_err(|e| ArkxError::Backend(e.to_string()))?;
                     Ok::<(Vec<u8>, u64), ArkxError>((buf, chunk.len() as u64))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            for (buf, n) in results {
+            // Switch the poller to the merge stage: the read anchor and the
+            // compressed bytes (known only after `.collect()`) drive the
+            // remaining progress, so the bar keeps climbing through the merge
+            // instead of freezing until the final `completed` jump.
+            let anchor = shown.load(Ordering::Relaxed).min(total_src);
+            let merged_total: u64 = results.iter().map(|(buf, _)| buf.len() as u64).sum();
+            if let Ok(mut g) = current_name.lock() {
+                *g = "Merging…".to_string();
+            }
+            let dest_anchor = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            merge_anchor.store(anchor, Ordering::Relaxed);
+            merge_total_bytes.store(merged_total, Ordering::Relaxed);
+            merge_dest_anchor.store(dest_anchor, Ordering::Relaxed);
+            merge_started.store(true, Ordering::Relaxed);
+            let mut cancelled_merge = false;
+            let mut merge_err: Option<ArkxError> = None;
+            for (buf, _n) in results {
                 if self.cancelled() {
-                    drop(zip);
-                    Self::discard_partial(dest);
-                    return Err(ArkxError::Cancelled);
+                    cancelled_merge = true;
+                    break;
                 }
-                let source = zip::ZipArchive::new(Cursor::new(buf))
-                    .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                zip.merge_archive(source)
-                    .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                // One progress tick per chunk (entries merged) — the per-tick
-                // cost is O(chunk), a fair fraction of the work it covers.
-                done += n;
-                if let Some(cb) = &progress {
-                    cb(ProgressInfo::new(
-                        "Merging…".to_string(),
-                        done,
-                        total.max(1),
-                    ));
+                let source = match zip::ZipArchive::new(Cursor::new(buf)) {
+                    Ok(z) => z,
+                    Err(e) => {
+                        merge_err = Some(ArkxError::Backend(e.to_string()));
+                        break;
+                    }
+                };
+                if let Err(e) = zip.merge_archive(source) {
+                    merge_err = Some(ArkxError::Backend(e.to_string()));
+                    break;
                 }
             }
-            if let Some(cb) = &progress {
-                cb(crate::core::util::completed(total));
+            if !cancelled_merge && merge_err.is_none() {
+                merge_normal.store(true, Ordering::Relaxed);
             }
+            io_stop.store(true, Ordering::Relaxed);
+            if let Some(h) = poller {
+                let _ = h.join();
+            }
+            if let Some(e) = merge_err {
+                drop(zip);
+                Self::discard_partial(dest);
+                return Err(e);
+            }
+            if cancelled_merge {
+                drop(zip);
+                Self::discard_partial(dest);
+                return Err(ArkxError::Cancelled);
+            }
+            emit_progress(&shared, crate::core::util::completed(total_src));
             // finish() writes the central directory but does NOT flush the
             // BufWriter: without explicit flush small zips stay truncated.
             let writer = zip
@@ -1105,6 +1229,7 @@ impl NativeBackend {
             return Ok(());
         }
 
+        let mut done_bytes = 0u64;
         for path in dirs.iter().chain(files.iter()) {
             if self.cancelled() {
                 drop(zip);
@@ -1125,24 +1250,31 @@ impl NativeBackend {
             if name.is_empty() || name == "/" {
                 continue;
             }
-            done += 1;
-            if let Some(cb) = &progress {
-                cb(ProgressInfo::new(name.clone(), done, total.max(1)));
-            }
             if is_dir {
+                // Dirs carry 0 output bytes: keep the "current item" label
+                // moving, but never fake progress for empty folders.
+                emit_progress(
+                    &shared,
+                    ProgressInfo::new(name.clone(), done_bytes, total_src),
+                );
                 zip.add_directory(name, options)
                     .map_err(|e| ArkxError::Backend(e.to_string()))?;
                 continue;
             }
-            zip.start_file(name, options)
+            let file = File::open(path).map_err(ArkxError::Io)?;
+            let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            let large = zip_entry_large(size);
+            zip.start_file(name.clone(), options.large_file(large))
                 .map_err(|e| ArkxError::Backend(e.to_string()))?;
-            let mut f =
-                BufReader::with_capacity(IO_BUF_SIZE, File::open(path).map_err(ArkxError::Io)?);
+            let mut f = BufReader::with_capacity(IO_BUF_SIZE, file);
             std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
+            done_bytes = done_bytes.saturating_add(size);
+            emit_progress(
+                &shared,
+                ProgressInfo::new(name.clone(), done_bytes.min(total_src), total_src),
+            );
         }
-        if let Some(cb) = &progress {
-            cb(crate::core::util::completed(total));
-        }
+        emit_progress(&shared, crate::core::util::completed(total_src));
         // finish() writes the central directory but does NOT flush the BufWriter:
         // without explicit flush small zips (<1MB) stay truncated/empty.
         let writer = zip
@@ -1238,14 +1370,30 @@ impl NativeBackend {
         tmp.push(format!(".arkx-{}.part", std::process::id()));
         let tmp = PathBuf::from(tmp);
 
-        let total = old.len() as u64 + new_items.len() as u64;
+        let shared = progress.map(|cb| Arc::new(Mutex::new(cb)));
+        let mut total_bytes = 0u64;
+        for i in 0..old.len() {
+            if let Ok(f) = old.by_index(i) {
+                let name = f.name().to_string();
+                if !replace.contains(&name) && !f.is_dir() {
+                    total_bytes = total_bytes.saturating_add(f.size());
+                }
+            }
+        }
+        total_bytes = new_items.iter().fold(total_bytes, |acc, (p, _)| {
+            if p.is_dir() {
+                acc
+            } else {
+                acc.saturating_add(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            }
+        });
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             let new_opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated)
                 .compression_level(Some(6));
-            let mut done = 0u64;
+            let mut done_bytes = 0u64;
 
             for i in 0..old.len() {
                 let mut f = old
@@ -1255,46 +1403,51 @@ impl NativeBackend {
                 if replace.contains(&name) {
                     continue;
                 }
-                done += 1;
-                if let Some(cb) = &progress {
-                    cb(ProgressInfo::new(name.clone(), done, total.max(1)));
-                }
-                let opts: zip::write::FileOptions<()> =
-                    zip::write::FileOptions::default().compression_method(f.compression());
+                let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                    .compression_method(f.compression())
+                    .large_file(zip_entry_large(f.size()));
                 if f.is_dir() {
-                    zip.add_directory(name, opts)
+                    zip.add_directory(name.clone(), opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
                 } else {
-                    zip.start_file(name, opts)
+                    zip.start_file(name.clone(), opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
                     std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
+                    done_bytes = done_bytes.saturating_add(f.size());
                 }
+                emit_progress(
+                    &shared,
+                    ProgressInfo::new(
+                        name.clone(),
+                        done_bytes.min(total_bytes),
+                        total_bytes.max(1),
+                    ),
+                );
             }
             for (path, name) in &new_items {
-                done += 1;
-                if let Some(cb) = &progress {
-                    cb(ProgressInfo::new(name.clone(), done, total.max(1)));
-                }
                 if path.is_dir() {
                     zip.add_directory(name, new_opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
                 } else {
-                    zip.start_file(name, new_opts)
+                    let file = File::open(path).map_err(ArkxError::Io)?;
+                    let size = file.metadata().map(|m| m.len()).unwrap_or(0);
+                    let large = zip_entry_large(size);
+                    zip.start_file(name, new_opts.large_file(large))
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                    let mut f = BufReader::with_capacity(
-                        IO_BUF_SIZE,
-                        File::open(path).map_err(ArkxError::Io)?,
-                    );
+                    let mut f = BufReader::with_capacity(IO_BUF_SIZE, file);
                     std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
+                    done_bytes = done_bytes.saturating_add(size);
                 }
+                emit_progress(
+                    &shared,
+                    ProgressInfo::new(
+                        name.clone(),
+                        done_bytes.min(total_bytes),
+                        total_bytes.max(1),
+                    ),
+                );
             }
-            if let Some(cb) = &progress {
-                cb(ProgressInfo::new(
-                    "Completed".to_string(),
-                    total.max(1),
-                    total.max(1),
-                ));
-            }
+            emit_progress(&shared, crate::core::util::completed(total_bytes));
             let writer = zip
                 .finish()
                 .map_err(|e| ArkxError::Backend(e.to_string()))?;
@@ -1372,14 +1525,23 @@ impl NativeBackend {
         tmp.push(format!(".arkx-{}.part", std::process::id()));
         let tmp = PathBuf::from(tmp);
 
-        let total = old.len() as u64;
+        let shared = progress.map(|cb| Arc::new(Mutex::new(cb)));
+        let mut total_bytes = 0u64;
+        for i in 0..old.len() {
+            if let Ok(f) = old.by_index(i) {
+                let name = f.name().to_string();
+                if !skip(&name) && !f.is_dir() {
+                    total_bytes = total_bytes.saturating_add(f.size());
+                }
+            }
+        }
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             if let Some(c) = comment {
                 zip.set_comment(c);
             }
-            let mut done = 0u64;
+            let mut done_bytes = 0u64;
             for i in 0..old.len() {
                 let mut f = old
                     .by_index(i)
@@ -1388,28 +1550,28 @@ impl NativeBackend {
                 if skip(&name) {
                     continue;
                 }
-                done += 1;
-                if let Some(cb) = &progress {
-                    cb(ProgressInfo::new(name.clone(), done, total.max(1)));
-                }
-                let opts: zip::write::FileOptions<()> =
-                    zip::write::FileOptions::default().compression_method(f.compression());
+                let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                    .compression_method(f.compression())
+                    .large_file(zip_entry_large(f.size()));
                 if f.is_dir() {
-                    zip.add_directory(name, opts)
+                    zip.add_directory(name.clone(), opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
                 } else {
-                    zip.start_file(name, opts)
+                    zip.start_file(name.clone(), opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
                     std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
+                    done_bytes = done_bytes.saturating_add(f.size());
                 }
+                emit_progress(
+                    &shared,
+                    ProgressInfo::new(
+                        name.clone(),
+                        done_bytes.min(total_bytes),
+                        total_bytes.max(1),
+                    ),
+                );
             }
-            if let Some(cb) = &progress {
-                cb(ProgressInfo::new(
-                    "Completed".to_string(),
-                    total.max(1),
-                    total.max(1),
-                ));
-            }
+            emit_progress(&shared, crate::core::util::completed(total_bytes));
             let writer = zip
                 .finish()
                 .map_err(|e| ArkxError::Backend(e.to_string()))?;
@@ -1905,6 +2067,37 @@ fn prefixed_name(path: &Path, base: &Path) -> String {
         .unwrap_or_else(|| "file".to_string())
 }
 
+/// ZIP64 must be enabled once a single entry exceeds 4 GiB−1 uncompressed:
+/// the `zip` crate aborts the write otherwise with "Large file option has
+/// not been set" (checked per entry, not on the whole archive).
+fn zip_entry_large(size: u64) -> bool {
+    size > zip::ZIP64_BYTES_THR
+}
+
+/// Read wrapper that counts source bytes read (≈ CPU work done) into a shared
+/// atomic, so the parallel compression phase can report real byte progress.
+struct CountingReader<R> {
+    inner: R,
+    counter: Arc<AtomicU64>,
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.counter.fetch_add(n as u64, Ordering::Relaxed);
+        Ok(n)
+    }
+}
+
+/// Send a progress event if a sink was registered.
+fn emit_progress(shared: &Option<SharedCallback>, info: ProgressInfo) {
+    if let Some(cb) = shared {
+        if let Ok(guard) = cb.lock() {
+            guard(info);
+        }
+    }
+}
+
 impl NativeBackend {
     fn rename_zip(
         &self,
@@ -1958,11 +2151,20 @@ impl NativeBackend {
         tmp.push(format!(".arkx-{}.part", std::process::id()));
         let tmp = PathBuf::from(tmp);
 
-        let total = z.len() as u64;
+        let shared = progress.map(|cb| Arc::new(Mutex::new(cb)));
+        let mut total_bytes = 0u64;
+        for i in 0..z.len() {
+            if let Ok(f) = z.by_index(i) {
+                let norm = crate::core::paths::normalize(f.name());
+                if (affected.contains(&norm) || !claimed.contains(&norm)) && !f.is_dir() {
+                    total_bytes = total_bytes.saturating_add(f.size());
+                }
+            }
+        }
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
-            let mut done = 0u64;
+            let mut done_bytes = 0u64;
             for i in 0..z.len() {
                 let mut f = z
                     .by_index(i)
@@ -1978,12 +2180,9 @@ impl NativeBackend {
                 } else {
                     name.clone()
                 };
-                done += 1;
-                if let Some(cb) = &progress {
-                    cb(ProgressInfo::new(target.clone(), done, total.max(1)));
-                }
-                let opts: zip::write::FileOptions<()> =
-                    zip::write::FileOptions::default().compression_method(f.compression());
+                let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                    .compression_method(f.compression())
+                    .large_file(zip_entry_large(f.size()));
                 if f.is_dir() {
                     zip.add_directory(&target, opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
@@ -1991,15 +2190,14 @@ impl NativeBackend {
                     zip.start_file(&target, opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
                     std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
+                    done_bytes = done_bytes.saturating_add(f.size());
                 }
+                emit_progress(
+                    &shared,
+                    ProgressInfo::new(target, done_bytes.min(total_bytes), total_bytes.max(1)),
+                );
             }
-            if let Some(cb) = &progress {
-                cb(ProgressInfo::new(
-                    "Completed".to_string(),
-                    total.max(1),
-                    total.max(1),
-                ));
-            }
+            emit_progress(&shared, crate::core::util::completed(total_bytes));
             let writer = zip
                 .finish()
                 .map_err(|e| ArkxError::Backend(e.to_string()))?;
@@ -2136,11 +2334,23 @@ impl NativeBackend {
         let tmp = PathBuf::from(tmp);
 
         let sels = crate::core::paths::normalize_sel(entries);
-        let total = z.len() as u64;
+        let shared = progress.map(|cb| Arc::new(Mutex::new(cb)));
+        let mut total_bytes = 0u64;
+        for i in 0..z.len() {
+            if let Ok(f) = z.by_index(i) {
+                let norm = crate::core::paths::normalize(f.name());
+                let selected = sels
+                    .iter()
+                    .any(|e| crate::core::paths::entry_matches_norm(&norm, e));
+                if !selected && !f.is_dir() {
+                    total_bytes = total_bytes.saturating_add(f.size());
+                }
+            }
+        }
         let result: Result<()> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
-            let mut done = 0u64;
+            let mut done_bytes = 0u64;
             for i in 0..z.len() {
                 let mut f = z
                     .by_index(i)
@@ -2151,15 +2361,11 @@ impl NativeBackend {
                     .iter()
                     .any(|e| crate::core::paths::entry_matches_norm(&norm, e))
                 {
-                    done += 1;
                     continue;
                 }
-                done += 1;
-                if let Some(cb) = &progress {
-                    cb(ProgressInfo::new(name.clone(), done, total.max(1)));
-                }
-                let opts: zip::write::FileOptions<()> =
-                    zip::write::FileOptions::default().compression_method(f.compression());
+                let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
+                    .compression_method(f.compression())
+                    .large_file(zip_entry_large(f.size()));
                 if f.is_dir() {
                     zip.add_directory(&name, opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
@@ -2167,8 +2373,14 @@ impl NativeBackend {
                     zip.start_file(&name, opts)
                         .map_err(|e| ArkxError::Backend(e.to_string()))?;
                     std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
+                    done_bytes = done_bytes.saturating_add(f.size());
                 }
+                emit_progress(
+                    &shared,
+                    ProgressInfo::new(name, done_bytes.min(total_bytes), total_bytes.max(1)),
+                );
             }
+            emit_progress(&shared, crate::core::util::completed(total_bytes));
             let writer = zip
                 .finish()
                 .map_err(|e| ArkxError::Backend(e.to_string()))?;
@@ -2223,6 +2435,39 @@ mod tests {
 
     fn backend() -> NativeBackend {
         NativeBackend::with_cancel(Arc::new(AtomicBool::new(false)))
+    }
+
+    #[test]
+    fn zip_entry_large_threshold() {
+        assert!(!zip_entry_large(0));
+        assert!(!zip_entry_large(zip::ZIP64_BYTES_THR));
+        assert!(zip_entry_large(zip::ZIP64_BYTES_THR + 1));
+    }
+
+    #[test]
+    #[ignore = "writes/reads ~4 GiB: run manually"]
+    fn zip_create_entry_above_zip64_threshold() {
+        // A single entry > 4 GiB−1 must survive the round trip with its real
+        // size. `merge_archive` (parallel) drops the ZIP64 extra from plain
+        // large entries, so the writer routes ZIP64 archives through the serial
+        // path, which emits the extra field; `entry.size()` then equals the
+        // real value instead of the 0xFFFFFFFF sentinel. Sparse source keeps
+        // disk usage low; deflate turns the zeros into near-nothing.
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.dat");
+        let f = std::fs::File::create(&big).unwrap();
+        f.set_len(zip::ZIP64_BYTES_THR + 1).unwrap();
+        drop(f);
+
+        let dest = dir.path().join("big.zip");
+        backend()
+            .create(&dest, std::slice::from_ref(&big), 1, None, None, None)
+            .unwrap();
+
+        let file = std::fs::File::open(&dest).unwrap();
+        let mut z = zip::ZipArchive::new(file).unwrap();
+        let entry = z.by_index(0).unwrap();
+        assert_eq!(entry.size(), zip::ZIP64_BYTES_THR + 1);
     }
 
     #[test]

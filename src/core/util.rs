@@ -510,6 +510,220 @@ pub fn completed(total: u64) -> crate::core::archive::ProgressInfo {
     }
 }
 
+/// Burst-smoothing progress governor.
+///
+/// UI events are meant to fire on a fixed cadence (the io-poll thread), while
+/// the underlying counters arrive in irregular bursts (7z's `%`, kernel
+/// `/proc` byte counters, per-file floors). Driving the bar straight from
+/// those bursts is what produces the "freeze → jump → freeze" behaviour: a
+/// fast first read slams the bar to ~50%, a solid-block flush jumps it, then
+/// it stays frozen for minutes.
+///
+/// `display` is monotonic and converges toward `raw` with an exponential
+/// catch-up that is additionally bounded per tick, so:
+///   - a single-sample spike never leaps more than a few % of `total`;
+///   - a long stall followed by a huge `raw` move still climbs stepwise;
+///   - sustained fast streams are tracked (the lag stays small).
+///
+/// `nudge` never regresses and never overshoots `total` (the caller may still
+/// jump straight to 100 via `complete`, the one allowed end-of-job transition).
+#[derive(Debug)]
+pub struct Smoother {
+    total: u64,
+    display: u64,
+    last: std::time::Instant,
+    tau: f64,
+    /// Max fraction of the remaining gap closed by a single tick, even when
+    /// that tick comes after a long freeze (0.04 → at most 4% of `total`).
+    max_rate: f64,
+    /// Liveness floor: even a tiny `raw` advance must move the bar (e.g. a
+    /// single huge file whose true signal only crept by 0.1%).
+    min_step: u64,
+    /// Hard per-tick ceiling on `display` advance (absolute bytes), so a
+    /// near-continuous counter can never leap more than this even right after
+    /// a long freeze (u64::MAX = unclamped, the historical behavior).
+    abs_cap: u64,
+}
+
+impl Smoother {
+    pub fn new(total: u64) -> Self {
+        Self {
+            total,
+            display: 0,
+            last: std::time::Instant::now(),
+            tau: 0.8,
+            max_rate: 0.04,
+            min_step: (total / 500).max(1),
+            abs_cap: u64::MAX,
+        }
+    }
+
+    /// Tracking profile for byte-granular counters (native zip) that arrive
+    /// nearly continuously: fast catch-up with a ~10%-of-total per-tick cap,
+    /// so a whole-file read burst can't leap but a genuinely fast stream (Fast
+    /// tier easily moves 50-100%/s) is sketched in real time instead of being
+    /// throttled to a crawl and then jumping at the end.
+    pub fn lively(total: u64) -> Self {
+        Self {
+            total,
+            display: 0,
+            last: std::time::Instant::now(),
+            tau: 0.4,
+            max_rate: 0.15,
+            min_step: (total / 3000).max(1),
+            abs_cap: (total / 10).max(1),
+        }
+    }
+
+    /// Current displayed value (monotonic, in [0, total]).
+    pub fn value(&self) -> u64 {
+        self.display
+    }
+
+    /// Advance toward `raw` (coerced to [0, total]) using wall-clock time.
+    pub fn nudge(&mut self, raw: u64) {
+        self.nudge_at(raw, std::time::Instant::now());
+    }
+
+    /// Testable core of `nudge` with an explicit timestamp.
+    pub fn nudge_at(&mut self, raw: u64, now: std::time::Instant) {
+        let raw = raw.min(self.total);
+        if raw <= self.display {
+            // Idle while not moving forwards; do not consume the clock so a
+            // sparse-but-filled burst is still clamped by `max_rate`.
+            return;
+        }
+        let dt = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        let rate = 1.0 - (-dt / self.tau).exp();
+        let gap = raw - self.display;
+        let gain = (gap as f64 * rate)
+            .min(gap as f64 * self.max_rate)
+            .max(self.min_step as f64)
+            .min(self.abs_cap as f64);
+        self.display = ((self.display as f64) + gain).min(raw as f64) as u64;
+    }
+
+    /// Force the final state (only the end of a job may jump to 100).
+    pub fn complete(&mut self) -> u64 {
+        self.display = self.total;
+        self.display
+    }
+}
+
+/// Staged progress target for the native-parallel zip merge phase. After every
+/// chunk has been read and deflated (`anchor` = value reached by the read
+/// counter), the merged compressed bytes drive the remaining `total - anchor`
+/// linearly. Monotonic in `merged`, ends at `total` when the merge is done, so
+/// the bar keeps moving through a phase that would otherwise be silent.
+pub fn merge_progress_target(anchor: u64, total: u64, merged: u64, merge_total: u64) -> u64 {
+    if merge_total == 0 {
+        return anchor.min(total);
+    }
+    let anchor = anchor.min(total);
+    let remaining = total - anchor;
+    let done = merged.min(merge_total);
+    anchor + (remaining as u128 * done as u128 / merge_total as u128) as u64
+}
+
+#[cfg(test)]
+mod smoother_tests {
+    use super::{merge_progress_target, Smoother};
+    use std::time::{Duration, Instant};
+
+    fn now_at(ms: u64) -> Instant {
+        Instant::now() + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn never_regresses() {
+        let mut s = Smoother::new(10_000);
+        let mut prev = 0;
+        let mut t = 0;
+        for raw in [0, 5_000, 4_000, 8_000, 2_000, 10_000] {
+            t += 250;
+            s.nudge_at(raw, now_at(t));
+            assert!(s.value() >= prev, "regressed after raw={raw}");
+            prev = s.value();
+        }
+        assert!(s.value() <= 10_000);
+    }
+
+    #[test]
+    fn single_sample_spike_is_bounded() {
+        // A 46% burst in the very first sample must not leap: ≤4% of total.
+        let mut s = Smoother::new(10_000);
+        s.nudge_at(4_600, now_at(250));
+        assert!(s.value() <= 400, "spike not clamped: {}", s.value());
+    }
+
+    #[test]
+    fn long_stall_then_jump_climbs_stepwise() {
+        // 90% arrives after a 10s freeze: still bounded per tick (≤4%).
+        let mut s = Smoother::new(10_000);
+        s.nudge_at(0, now_at(0));
+        s.nudge_at(9_000, now_at(10_000));
+        assert!(s.value() <= 400, "stall jump not clamped: {}", s.value());
+    }
+
+    #[test]
+    fn catches_up_toward_raw() {
+        let mut s = Smoother::new(10_000);
+        let mut t = 0;
+        let mut last = 0;
+        for _ in 0..100 {
+            t += 250;
+            s.nudge_at(5_000, now_at(t));
+            assert!(s.value() >= last);
+            last = s.value();
+        }
+        assert_eq!(last, 5_000, "did not converge");
+    }
+
+    #[test]
+    fn never_overshoots_total_and_completes() {
+        let mut s = Smoother::new(10_000);
+        s.nudge_at(99_999, now_at(250));
+        assert!(s.value() <= 10_000);
+        assert_eq!(s.complete(), 10_000);
+    }
+
+    #[test]
+    fn lively_caps_single_tick_to_abs() {
+        // A 50% burst in one tick must move the bar ≤~10% of total, not 50%.
+        let mut s = Smoother::lively(10_000);
+        s.nudge_at(5_000, now_at(100));
+        assert!(s.value() <= 1_000, "lively spike not capped: {}", s.value());
+    }
+
+    #[test]
+    fn merge_progress_target_is_monotonic_and_reaches_total() {
+        const TOTAL: u64 = 10_000;
+        let anchor = 8_000;
+        let merge_total = 100;
+        let mut prev = merge_progress_target(anchor, TOTAL, 0, merge_total);
+        assert_eq!(prev, anchor, "start must equal the read-phase anchor");
+        for merged in 1..=merge_total {
+            let v = merge_progress_target(anchor, TOTAL, merged, merge_total);
+            assert!(v >= prev, "regressed {v} < {prev}");
+            prev = v;
+        }
+        assert_eq!(prev, TOTAL, "must reach total when the merge completes");
+    }
+
+    #[test]
+    fn merge_progress_target_edge_cases() {
+        // Unknown merge (empty payload): hold the anchor, never panic.
+        assert_eq!(merge_progress_target(3_000, 10_000, 5, 0), 3_000);
+        // Anchor already at total: stays at total regardless of merged.
+        assert_eq!(merge_progress_target(10_000, 10_000, 0, 50), 10_000);
+        // Anchor above total (raw counter raced ahead): clamped to total.
+        assert_eq!(merge_progress_target(12_000, 10_000, 25, 50), 10_000);
+        // Excess merged bytes are clamped, still fine at total.
+        assert_eq!(merge_progress_target(8_000, 10_000, 200, 100), 10_000);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

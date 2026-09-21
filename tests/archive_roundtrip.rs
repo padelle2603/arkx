@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 fn backend() -> arkx::core::backends::BackendManager {
     arkx::core::backends::BackendManager::new()
@@ -540,4 +541,130 @@ fn rar_volume_split_uses_rar_when_installed() {
         "expected vol.part1.rar"
     );
     assert!(!archive.exists(), "rar -v produces parts, not a base file");
+}
+
+/// Cheap deterministic pseudo-random buffer (compressible data would zip too
+/// fast for the progress ticker to emit more than a couple of events).
+fn pseudo_random(len: usize) -> Vec<u8> {
+    let mut state: u32 = 0x9E3779B9;
+    (0..len)
+        .map(|_| {
+            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
+fn assert_equal_progress_stream(events: &[arkx::core::archive::ProgressInfo], total: u64) {
+    // Progress must never regress or exceed the total...
+    let mut last = 0u64;
+    for e in events {
+        assert!(e.current >= last, "regressed {} < {last}", e.current);
+        last = e.current;
+        assert!(e.percent <= 100.0 + 1e-3, "percent over 100: {}", e.percent);
+        if e.total == total && total > 0 {
+            assert!(e.current <= total, "over total: {} > {total}", e.current);
+        }
+    }
+    // ...ends on the 100/100 "Completed" marker (the one allowed jump).
+    let done = events.last().unwrap();
+    assert_eq!(done.current, done.total, "last event not Completed");
+}
+
+#[test]
+fn seven_zip_progress_stream_is_monotonic_and_completes() {
+    use arkx::core::archive::ProgressInfo;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("huge.bin");
+    fs::write(&src, pseudo_random(48 * 1024 * 1024)).unwrap();
+    let archive = tmp.path().join("prog.7z");
+    let extract_dir = tmp.path().join("out");
+
+    let bm = backend();
+
+    // 7z create: fixed-cadence ticker + Smoother, monotonic, ends 100%.
+    let created: Vec<ProgressInfo> = {
+        let seen: Arc<Mutex<Vec<ProgressInfo>>> = Arc::new(Mutex::new(Vec::new()));
+        let emit = {
+            let seen = seen.clone();
+            move |info: ProgressInfo| {
+                seen.lock().unwrap().push(info);
+            }
+        };
+        bm.create(
+            &archive,
+            std::slice::from_ref(&src),
+            6,
+            None,
+            None,
+            Some(Box::new(emit)),
+        )
+        .unwrap();
+        Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+    };
+    assert!(
+        created.len() >= 2,
+        "expected ≥2 events, got {}",
+        created.len()
+    );
+    assert_equal_progress_stream(&created, 48 * 1024 * 1024);
+
+    // 7z extract (same backend): byte-based / ramped-% ticker, same contract.
+    let extracted: Vec<ProgressInfo> = {
+        let seen: Arc<Mutex<Vec<ProgressInfo>>> = Arc::new(Mutex::new(Vec::new()));
+        let emit = {
+            let seen = seen.clone();
+            move |info: ProgressInfo| {
+                seen.lock().unwrap().push(info);
+            }
+        };
+        bm.extract(&archive, &extract_dir, None, None, Some(Box::new(emit)))
+            .unwrap();
+        Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+    };
+    assert!(
+        extracted.len() >= 2,
+        "expected ≥2 events, got {}",
+        extracted.len()
+    );
+    assert_equal_progress_stream(&extracted, 48 * 1024 * 1024);
+}
+
+#[test]
+fn native_parallel_zip_progress_stream_is_monotonic_and_completes() {
+    use arkx::core::archive::ProgressInfo;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut sources = Vec::new();
+    for i in 0..4 {
+        let p = tmp.path().join(format!("blob{i}.bin"));
+        fs::write(&p, pseudo_random(15 * 1024 * 1024)).unwrap();
+        sources.push(p);
+    }
+    let archive = tmp.path().join("native_parallel.zip");
+
+    let bm = backend();
+    // 60 MiB total: below the minimum zip→7z threshold (64 MiB), so creation
+    // stays on the native parallel writer and covers the read phase *and* the
+    // (formerly silent) merge phase of the poller.
+    let events: Vec<ProgressInfo> = {
+        let seen: Arc<Mutex<Vec<ProgressInfo>>> = Arc::new(Mutex::new(Vec::new()));
+        let emit = {
+            let seen = seen.clone();
+            move |info: ProgressInfo| {
+                seen.lock().unwrap().push(info);
+            }
+        };
+        bm.create(&archive, &sources, 6, None, None, Some(Box::new(emit)))
+            .unwrap();
+        Arc::try_unwrap(seen).unwrap().into_inner().unwrap()
+    };
+    assert!(
+        events.len() >= 2,
+        "expected ≥2 events, got {}",
+        events.len()
+    );
+    assert_equal_progress_stream(&events, 60 * 1024 * 1024);
+    assert!(archive.exists());
 }
