@@ -73,7 +73,7 @@ fn config_path() -> PathBuf {
 /// mirror. Should be called once at startup (CLI and GUI alike).
 pub fn init() {
     let cfg = load_from(&config_path());
-    *CURRENT.write().unwrap() = cfg;
+    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = cfg;
 }
 
 /// Read a config from a file, tolerating missing/corrupt content.
@@ -112,17 +112,20 @@ pub fn save_to(cfg: &Config, path: &std::path::Path) {
 
 /// Current extraction profile.
 pub fn extraction() -> ExtractTier {
-    CURRENT.read().unwrap().extraction
+    CURRENT.read().unwrap_or_else(|e| e.into_inner()).extraction
 }
 
 /// Current compression profile.
 pub fn compression() -> CompressTier {
-    CURRENT.read().unwrap().compression
+    CURRENT
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .compression
 }
 
 /// Update the runtime mirror only (used by tests and profile setters).
 pub fn apply(extraction: ExtractTier, compression: CompressTier) {
-    *CURRENT.write().unwrap() = Config {
+    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Config {
         extraction,
         compression,
     };

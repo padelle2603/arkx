@@ -164,6 +164,7 @@ pub fn filesystem_free_bytes(path: &std::path::Path) -> Option<u64> {
     };
     let out = std::process::Command::new("df")
         .args(["-B1", "--output=avail"])
+        .arg("--")
         .arg(&anchor)
         .output()
         .ok()?;
