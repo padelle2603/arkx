@@ -5,6 +5,11 @@ use arkx::ui;
 use adw::prelude::*;
 use std::path::PathBuf;
 
+/// CLI exit codes (GNU/tar convention): 0 success, 1 operation error,
+/// 2 usage/argument error.
+const EXIT_ERROR: i32 = 1;
+const EXIT_USAGE: i32 = 2;
+
 fn main() -> anyhow::Result<()> {
     // Load the persisted speed profiles (extraction/compression) once, so CLI
     // and GUI share the same tunings; missing config falls back to balanced.
@@ -73,6 +78,8 @@ Commands:
   l, list <archive>                List archive contents
   x, extract <archive> [dest]      Extract archive into dest (default: .)
                [--here]            Extract next to each archive (file-manager mode)
+               [--extract-here]    Alias of --here
+               [--extract-to <d>]  Explicit destination (alias of the positional dest)
                [--dialog]          Ask destination with a native dialog
                [-p <password>]     Password if needed
 
@@ -182,7 +189,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         "l" | "list" => {
             if args.len() < 3 {
                 eprintln!("Usage: arkx l <archive>");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let path = resolve_volume_path(&PathBuf::from(&args[2]));
             let info = backend.detect_and_list(&path)?;
@@ -231,13 +238,13 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             crate::core::util::set_thread_override(threads);
             if archives.is_empty() {
                 eprintln!("Usage: arkx x <archive> [dest] [--here] [--dialog] [-p password]");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             // The GUI progress app handles one archive per invocation: with
             // several inputs it would silently quit after the first one.
             if progress && archives.len() > 1 {
                 eprintln!("--progress supports a single archive at a time.");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             // --dialog: ask only once (like Ark "Extract to...")
             let dialog_dest: Option<PathBuf> = if dialog {
@@ -260,7 +267,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             for archive in &archives {
                 if !archive.exists() {
                     eprintln!("Not found: {}", archive.display());
-                    std::process::exit(1);
+                    std::process::exit(EXIT_ERROR);
                 }
                 let dest = if let Some(d) = &dialog_dest {
                     d.clone()
@@ -281,7 +288,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     // Only with a single archive does a positional dest make sense
                     if archives.len() > 1 {
                         eprintln!("With multiple archives use --here or --dialog instead of a single dest.");
-                        std::process::exit(1);
+                        std::process::exit(EXIT_USAGE);
                     }
                     d.clone()
                 } else {
@@ -340,7 +347,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 eprintln!(
                     "Usage: arkx add <archive> <file...> [--to <dir>] [-p password] [--threads N]"
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let archive = crate::core::fm::decode_input_arg(&args[2]);
             if !archive.exists() {
@@ -348,7 +355,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     "Not found: {} (use `arkx a <dest> <file...>` to create a new archive)",
                     archive.display()
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let mut to_dir: Option<String> = None;
             let mut password: Option<String> = None;
@@ -372,7 +379,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                             i += 1;
                         } else {
                             eprintln!("--to requires a directory (entry paths are relative to it)");
-                            std::process::exit(1);
+                            std::process::exit(EXIT_USAGE);
                         }
                     }
                     s if s.starts_with("--to=") => {
@@ -383,13 +390,13 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     }
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
-                        std::process::exit(1);
+                        std::process::exit(EXIT_USAGE);
                     }
                     p => {
                         let f = crate::core::fm::decode_input_arg(p);
                         if !f.exists() {
                             eprintln!("Not found: {}", f.display());
-                            std::process::exit(1);
+                            std::process::exit(EXIT_ERROR);
                         }
                         files.push(f);
                     }
@@ -398,7 +405,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
             if files.is_empty() {
                 eprintln!("No files specified");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             crate::core::util::set_thread_override(threads);
             // Entry names: `--to <dir>` prefixes the entries with the dir,
@@ -436,7 +443,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         "r" | "rm" | "d" | "delete" | "remove" => {
             if args.len() < 4 {
                 eprintln!("Usage: arkx remove <archive> <entry...> [-p password] [--threads N]");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let archive = crate::core::fm::decode_input_arg(&args[2]);
             if !archive.exists() {
@@ -444,7 +451,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     "Not found: {} (use `arkx l <archive>` to list its entries)",
                     archive.display()
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let mut password: Option<String> = None;
             let mut threads: Option<usize> = None;
@@ -460,7 +467,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 match args[i].as_str() {
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
-                        std::process::exit(1);
+                        std::process::exit(EXIT_USAGE);
                     }
                     p => entries.push(
                         crate::core::fm::decode_input_arg(p)
@@ -472,7 +479,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
             if entries.is_empty() {
                 eprintln!("No entries to remove");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             crate::core::util::set_thread_override(threads);
             println!(
@@ -488,12 +495,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         "mk" | "mkdir" => {
             if args.len() < 4 {
                 eprintln!("Usage: arkx mkdir <archive> <folder> [-p password]");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let archive = crate::core::fm::decode_input_arg(&args[2]);
             if !archive.exists() {
                 eprintln!("Not found: {}", archive.display());
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let raw = crate::core::fm::decode_input_arg(&args[3])
                 .to_string_lossy()
@@ -502,7 +509,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 crate::core::paths::with_trailing_slash(&crate::core::paths::normalize(&raw));
             if folder.is_empty() || folder == "/" || folder == "./" {
                 eprintln!("Invalid folder name: {}", raw);
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let mut password: Option<String> = None;
             let mut threads: Option<usize> = None;
@@ -520,12 +527,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         "rn" | "rename" => {
             if args.len() < 5 {
                 eprintln!("Usage: arkx rename <archive> <old_entry> <new_entry> [-p password]");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let archive = crate::core::fm::decode_input_arg(&args[2]);
             if !archive.exists() {
                 eprintln!("Not found: {}", archive.display());
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let old_name = crate::core::fm::decode_input_arg(&args[3]);
             let new_name = crate::core::fm::decode_input_arg(&args[4]);
@@ -556,12 +563,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         "t" | "test" => {
             if args.len() < 3 {
                 eprintln!("Usage: arkx test <archive> [entries...] [-p password]");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let archive = crate::core::fm::decode_input_arg(&args[2]);
             if !archive.exists() {
                 eprintln!("Not found: {}", archive.display());
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let mut password: Option<String> = None;
             let mut threads: Option<usize> = None;
@@ -607,12 +614,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         "o" | "open" => {
             if args.len() < 4 {
                 eprintln!("Usage: arkx open <archive> <entry> [-p password]");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let archive = crate::core::fm::decode_input_arg(&args[2]);
             if !archive.exists() {
                 eprintln!("Not found: {}", archive.display());
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let entry = crate::core::fm::decode_input_arg(&args[3])
                 .to_string_lossy()
@@ -632,7 +639,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("Failed to launch {}: {}", path.display(), e);
-                    std::process::exit(1);
+                    std::process::exit(EXIT_ERROR);
                 }
             };
             let _ = child.wait();
@@ -641,12 +648,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         "w" | "wipe" => {
             if args.len() < 4 {
                 eprintln!("Usage: arkx wipe <archive> <entry...> [-p password] [--passes N]");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let archive = crate::core::fm::decode_input_arg(&args[2]);
             if !archive.exists() {
                 eprintln!("Not found: {}", archive.display());
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let mut password: Option<String> = None;
             let mut passes = 3usize;
@@ -680,7 +687,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             crate::core::util::set_thread_override(threads);
             if entries.is_empty() {
                 eprintln!("No entries specified");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             println!(
                 "Secure-deleting {} entries from {} ({} passes)...",
@@ -697,7 +704,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 eprintln!(
                     "Usage: arkx a <dest.zip|dest.7z|dest.tar.gz> <file...> [-l 0-9] [-p password] [-v <size>]"
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let dest = PathBuf::from(&args[2]);
             // Collect sources (up to -l / -p / -v flags)
@@ -722,7 +729,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                             continue;
                         } else {
                             eprintln!("-l/--level requires a value (0-9)");
-                            std::process::exit(1);
+                            std::process::exit(EXIT_USAGE);
                         }
                     }
                     "-v" | "--volume-size" => {
@@ -732,12 +739,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                             continue;
                         } else {
                             eprintln!("-v/--volume-size requires a value (e.g. 50m, 1g, 1000000)");
-                            std::process::exit(1);
+                            std::process::exit(EXIT_USAGE);
                         }
                     }
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
-                        std::process::exit(1);
+                        std::process::exit(EXIT_USAGE);
                     }
                     _ => {
                         sources.push(PathBuf::from(&args[i]));
@@ -747,7 +754,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             }
             if sources.is_empty() {
                 eprintln!("No source files specified");
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             crate::core::util::set_thread_override(threads);
             println!(
@@ -782,13 +789,13 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 eprintln!(
                     "Usage: arkx convert <src> <dest.zip|dest.7z|dest.tar.gz> [-l 0-9] [-p password] [--threads N]"
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             let src = resolve_volume_path(&PathBuf::from(&args[2]));
             let dest = PathBuf::from(&args[3]);
             if !src.exists() {
                 eprintln!("Source not found: {}", src.display());
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             let mut level = crate::core::config::compression_level();
             let mut password: Option<String> = None;
@@ -809,15 +816,15 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                             continue;
                         }
                         eprintln!("-l/--level requires a value (0-9)");
-                        std::process::exit(1);
+                        std::process::exit(EXIT_USAGE);
                     }
                     s if s.starts_with('-') => {
                         eprintln!("Unknown flag: {}", s);
-                        std::process::exit(1);
+                        std::process::exit(EXIT_USAGE);
                     }
                     _ => {
                         eprintln!("Unexpected argument: {}", args[i]);
-                        std::process::exit(1);
+                        std::process::exit(EXIT_USAGE);
                     }
                 }
             }
@@ -834,7 +841,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                 eprintln!(
                     "Cannot convert to a single-file stream; use .tar.gz/.tar.bz2/.tar.xz/... instead"
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             // Refuse to clobber the very archive being converted.
             let src_abs = std::fs::canonicalize(&src).map_err(ArkxError::Io)?;
@@ -849,7 +856,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
                     "Refusing to overwrite the source archive: {}",
                     src.display()
                 );
-                std::process::exit(1);
+                std::process::exit(EXIT_ERROR);
             }
             crate::core::util::set_thread_override(threads);
 
@@ -920,7 +927,7 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
         _ => {
             eprintln!("Unknown command: {}", args[1]);
             print_help();
-            std::process::exit(1);
+            std::process::exit(EXIT_USAGE);
         }
     }
     Ok(())
@@ -953,7 +960,7 @@ fn parse_common_flags(
             return 2;
         }
         eprintln!("{} requires a value", tok);
-        std::process::exit(1);
+        std::process::exit(EXIT_USAGE);
     }
     if let Some(v) = tok.strip_prefix("--threads=") {
         *threads = parse_threads_or_exit(v);
@@ -965,7 +972,7 @@ fn parse_common_flags(
             return 2;
         }
         eprintln!("--threads requires a value");
-        std::process::exit(1);
+        std::process::exit(EXIT_USAGE);
     }
     0
 }
@@ -977,7 +984,7 @@ fn parse_threads_or_exit(v: &str) -> Option<usize> {
         Ok(n) if n > 0 => Some(n),
         _ => {
             eprintln!("Invalid --threads value: {v} (expected a positive integer)");
-            std::process::exit(1);
+            std::process::exit(EXIT_USAGE);
         }
     }
 }
@@ -988,7 +995,7 @@ fn parse_level_or_exit(v: &str) -> u8 {
         Ok(n) => n.min(9),
         Err(_) => {
             eprintln!("Invalid -l/--level value: {v} (expected 0-9)");
-            std::process::exit(1);
+            std::process::exit(EXIT_USAGE);
         }
     }
 }
@@ -1013,7 +1020,7 @@ fn parse_volume_or_exit(v: &str) -> String {
             .all(|b| matches!(b, b'b' | b'k' | b'm' | b'g'));
     if !valid {
         eprintln!("Invalid -v/--volume-size value: {v} (examples: 50m, 1g, 1000000)");
-        std::process::exit(1);
+        std::process::exit(EXIT_USAGE);
     }
     t
 }
@@ -1092,13 +1099,27 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
         }
         match args[i].as_str() {
             "--here" => here = true,
+            "--extract-here" => here = true,
             "--dialog" | "--ask-dest" => dialog = true,
             "--progress" | "--gui" => progress = true,
+            "--extract-to" => {
+                let Some(v) = args.get(i + 1) else {
+                    eprintln!("--extract-to requires a destination path");
+                    std::process::exit(EXIT_USAGE);
+                };
+                dest_arg = Some(crate::core::fm::decode_input_arg(v));
+                i += 1;
+            }
+            s if s.starts_with("--extract-to=") => {
+                dest_arg = Some(crate::core::fm::decode_input_arg(
+                    s.trim_start_matches("--extract-to="),
+                ));
+            }
             s if s.starts_with('-') && archives.is_empty() && s != "-" => {
                 // Unknown flag before archives: clear error
                 // (after archives, a file starting with - is almost never intended)
                 eprintln!("Unknown flag: {}", s);
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             _ => {
                 let p = crate::core::fm::decode_input_arg(&args[i]);
@@ -1174,7 +1195,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
                     i += 1;
                 } else {
                     eprintln!("-f/--format requires a value (zip|tar.gz|7z)");
-                    std::process::exit(1);
+                    std::process::exit(EXIT_USAGE);
                 }
             }
             "--to" => {
@@ -1183,7 +1204,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
                     i += 1;
                 } else {
                     eprintln!("--to requires a destination path");
-                    std::process::exit(1);
+                    std::process::exit(EXIT_USAGE);
                 }
             }
             "-l" | "--level" => {
@@ -1192,7 +1213,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
                     i += 1;
                 } else {
                     eprintln!("-l/--level requires a value (0-9)");
-                    std::process::exit(1);
+                    std::process::exit(EXIT_USAGE);
                 }
             }
             s if s.starts_with("--format=") => {
@@ -1205,7 +1226,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             }
             s if s.starts_with('-') => {
                 eprintln!("Unknown flag: {}", s);
-                std::process::exit(1);
+                std::process::exit(EXIT_USAGE);
             }
             _ => sources.push(crate::core::fm::decode_input_arg(&args[i])),
         }
@@ -1213,7 +1234,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
     }
     if sources.is_empty() {
         eprintln!("Usage: arkx compress [--here] [--format zip|tar.gz|7z] [--to <dest>] [--dialog] [--progress] [--threads N] <file...>");
-        std::process::exit(1);
+        std::process::exit(EXIT_USAGE);
     }
     crate::core::util::set_thread_override(threads);
     // Only local files (like Ark: disabled on remote URLs)
@@ -1221,11 +1242,11 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
         let str = s.to_string_lossy();
         if str.starts_with("http://") || str.starts_with("https://") || str.starts_with("smb://") {
             eprintln!("Only local files supported: {}", s.display());
-            std::process::exit(1);
+            std::process::exit(EXIT_ERROR);
         }
         if !s.exists() {
             eprintln!("Not found: {}", s.display());
-            std::process::exit(1);
+            std::process::exit(EXIT_ERROR);
         }
     }
 
