@@ -16,6 +16,7 @@ pub fn set_thread_override(n: Option<usize>) {
     THREAD_OVERRIDE.store(n.unwrap_or(0), Ordering::Relaxed);
 }
 
+/// Current thread override (`--threads` / `ARKX_THREADS`), `None` = auto.
 pub fn thread_override() -> Option<usize> {
     match THREAD_OVERRIDE.load(Ordering::Relaxed) {
         0 => None,
