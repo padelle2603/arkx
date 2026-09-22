@@ -1406,24 +1406,21 @@ impl NativeBackend {
             let mut done_bytes = 0u64;
 
             for i in 0..old.len() {
-                let mut f = old
+                // Preserved entries are copied bit-for-bit (no recompress):
+                // adding a small file must not re-deflate the whole archive.
+                let f = old
                     .by_index(i)
                     .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
                 let name = f.name().to_string();
                 if replace.contains(&name) {
                     continue;
                 }
-                let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
-                    .compression_method(f.compression())
-                    .large_file(zip_entry_large(f.size()));
-                if f.is_dir() {
-                    zip.add_directory(name.clone(), opts)
-                        .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                } else {
-                    zip.start_file(name.clone(), opts)
-                        .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                    std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
-                    done_bytes = done_bytes.saturating_add(f.size());
+                let size = f.size();
+                let is_dir = f.is_dir();
+                zip.raw_copy_file(f)
+                    .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                if !is_dir {
+                    done_bytes = done_bytes.saturating_add(size);
                 }
                 emit_progress(
                     &shared,
@@ -1553,24 +1550,23 @@ impl NativeBackend {
             }
             let mut done_bytes = 0u64;
             for i in 0..old.len() {
-                let mut f = old
+                // `raw_copy_file` copies the entry's already-compressed bytes
+                // verbatim (no decompress/recompress): rewriting a multi-GB
+                // archive to drop one small entry is disk-bound instead of
+                // minutes of single-threaded CPU on the preserved remainder.
+                let f = old
                     .by_index(i)
                     .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
                 let name = f.name().to_string();
                 if skip(&name) {
                     continue;
                 }
-                let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
-                    .compression_method(f.compression())
-                    .large_file(zip_entry_large(f.size()));
-                if f.is_dir() {
-                    zip.add_directory(name.clone(), opts)
-                        .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                } else {
-                    zip.start_file(name.clone(), opts)
-                        .map_err(|e| ArkxError::Backend(e.to_string()))?;
-                    std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
-                    done_bytes = done_bytes.saturating_add(f.size());
+                let size = f.size();
+                let is_dir = f.is_dir();
+                zip.raw_copy_file(f)
+                    .map_err(|e| ArkxError::Backend(e.to_string()))?;
+                if !is_dir {
+                    done_bytes = done_bytes.saturating_add(size);
                 }
                 emit_progress(
                     &shared,
