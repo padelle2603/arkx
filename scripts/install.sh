@@ -20,6 +20,7 @@ cargo build --release 2>&1 | tail -n 5
 _vlog "Installing to /usr/local/bin/arkx..."
 sudo install -Dm755 target/release/arkx /usr/local/bin/arkx
 sudo install -Dm644 data/arkx.desktop /usr/share/applications/arkx.desktop
+sudo install -Dm644 data/arkx.1 /usr/share/man/man1/arkx.1
 # App icons (SVG + rendered PNGs)
 sudo install -Dm644 data/icons/hicolor/scalable/apps/arkx.svg /usr/share/icons/hicolor/scalable/apps/arkx.svg
 for s in 16 32 48 64 128 256; do
@@ -57,6 +58,7 @@ echo ""
 echo "Installed:"
 echo "  - /usr/local/bin/arkx (binary)"
 echo "  - /usr/share/applications/arkx.desktop"
+echo "  - /usr/share/man/man1/arkx.1 (man page)"
 echo "  - Icons (SVG + PNG, 16-256px)"
 echo "  - Dolphin service menus"
 echo ""

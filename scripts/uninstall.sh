@@ -25,6 +25,9 @@ _vlog "Removing desktop entries..."
 sudo rm -f /usr/share/applications/arkx.desktop
 sudo rm -f /usr/share/applications/extractor.desktop
 
+_vlog "Removing man page..."
+sudo rm -f /usr/share/man/man1/arkx.1
+
 _vlog "Removing icons..."
 sudo rm -f /usr/share/icons/hicolor/scalable/apps/arkx.svg
 for s in 16 32 48 64 128 256; do
@@ -45,5 +48,5 @@ if command -v arkx >/dev/null 2>&1; then
 fi
 
 echo ""
-echo "Removed: binary, desktop entries, icons and Dolphin service menus."
+echo "Removed: binary, desktop entries, man page, icons and Dolphin service menus."
 echo "Done."

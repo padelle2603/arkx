@@ -1,11 +1,11 @@
 # Maintainer: padelle <padelle@github>
 pkgname=arkx
-pkgver=1.2.0
+pkgver=1.6.3
 pkgrel=1
 pkgdesc="Fast multi-threaded Linux archive manager, PeaZip-inspired — ZIP, 7Z, RAR, TAR.GZ, ISO"
 arch=('x86_64')
 url="https://github.com/padelle2603/arkx"
-license=('GPL3')
+license=('GPL-3.0-or-later')
 depends=('gtk4' 'libadwaita' 'hicolor-icon-theme' '7zip')
 makedepends=('cargo' 'rust' 'pkgconf')
 optdepends=('unrar: for optimized RAR extraction')
@@ -23,6 +23,7 @@ package() {
   # Backwards-compatible symlink for the old binary name
   ln -sf arkx "$pkgdir/usr/bin/extractor"
   install -Dm644 "data/arkx.desktop" "$pkgdir/usr/share/applications/arkx.desktop"
+  install -Dm644 "data/arkx.1" "$pkgdir/usr/share/man/man1/arkx.1"
   # Dolphin service menus (Ark parity: Comprimi / Estrai)
   install -Dm644 "data/servicemenus/arkx-compress.desktop" "$pkgdir/usr/share/kio/servicemenus/arkx-compress.desktop"
   install -Dm644 "data/servicemenus/arkx-extract.desktop" "$pkgdir/usr/share/kio/servicemenus/arkx-extract.desktop"

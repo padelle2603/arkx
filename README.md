@@ -69,7 +69,7 @@ cargo build --release
 ./target/release/arkx
 ```
 
-Tests: `cargo test` · Lint: `cargo clippy` · Install: `./scripts/install.sh` · AppImage build: `./scripts/build-appimage.sh`
+Tests: `cargo test` · Lint: `cargo clippy` · Install: `./scripts/install.sh`
 
 ## Privacy & Legal
 

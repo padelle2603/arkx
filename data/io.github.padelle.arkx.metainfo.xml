@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 padelle -->
+<component type="desktop-application">
+  <id>io.github.padelle.arkx</id>
+  <launchable type="desktop-id">arkx.desktop</launchable>
+  <name>Arkx</name>
+  <summary>Fast multi-threaded Linux archive manager</summary>
+  <description>
+    <p>Arkx is a fast, multi-threaded archive manager for Linux. Open, browse and extract ZIP, 7Z, RAR, TAR and 20+ more formats from a clean GTK4 interface or the terminal.</p>
+    <ul>
+      <li>Never hangs: every job runs on a background worker, fully cancellable</li>
+      <li>Honest byte-based progress with speed, ETA and a details pane</li>
+      <li>Hybrid backends: native Rust streaming for ZIP/TAR plus multithreaded 7z for RAR/7Z/ISO/CAB, with automatic fallback</li>
+      <li>Dolphin file-manager integration: Compress/Extract service menus and a progress window</li>
+    </ul>
+  </description>
+  <developer id="padelle.github.io">
+    <name>padelle</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <content_rating type="oars-1.1" />
+  <url type="homepage">https://github.com/padelle2603/arkx</url>
+  <url type="bugtracker">https://github.com/padelle2603/arkx/issues</url>
+  <url type="vcs-browser">https://github.com/padelle2603/arkx</url>
+  <releases>
+    <release version="1.6.3" date="2026-09-20">
+      <description>
+        <ul>
+          <li>Perf: parallel zip creation, per-entry extract progress, multithreaded xz</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.6.2" date="2026-09-20">
+      <description>
+        <ul>
+          <li>Fixed: cancel-aware extraction, password-aware edits, zip-bomb quota enforced on all backends</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.6.1" date="2026-09-19">
+      <description>
+        <ul>
+          <li>Feature: checksums, inline rename, multi-volume creation</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.6.0" date="2026-09-19">
+      <description>
+        <ul>
+          <li>Feature: archive comments, native AES-256 zip, format conversion, multi-volume split</li>
+        </ul>
+      </description>
+    </release>
+  </releases>
+</component>

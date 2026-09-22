@@ -2,7 +2,9 @@
 Version=1.0
 Name=Arkx
 GenericName=Archive Manager
+GenericName[it]=Gestore archivi
 Comment=Fast multi-threaded archive manager (ZIP, 7Z, RAR, TAR.GZ…)
+Comment[it]=Gestore archivi veloce e multi-thread (ZIP, 7Z, RAR, TAR.GZ…)
 X-AppVersion=1.6.3
 Exec=arkx %F
 Icon=arkx

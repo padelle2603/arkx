@@ -1,0 +1,171 @@
+.TH ARKX 1 "September 2026" "arkx 1.6.3" "User Commands"
+.SH NAME
+arkx \- fast multi-threaded archive manager (CLI + GTK4 GUI)
+.SH SYNOPSIS
+.B arkx
+[\fICOMMAND\fR] [\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B arkx
+is an archive manager for Linux with a GTK4/libadwaita GUI and a
+command-line interface. It reads most common formats (ZIP, 7Z, RAR,
+TAR and TAR.\fIext\fR variants, ISO, CAB, CPIO and more) and writes
+ZIP, 7Z and TAR.\fIext\fR archives. Backends: 7-Zip, libarchive and
+the Rust native codec, dispatched automatically per format.
+.PP
+With no arguments it launches the GUI; with a single archive argument
+it launches the GUI with that archive open.
+.SH COMMANDS
+.TP
+.BR l ", " list " " \fIarchive\fR
+List the contents of
+.IR archive .
+.TP
+.BR x ", " extract " " \fIarchive\fR [\fIdest\fR]
+Extract
+.I archive
+into
+.I dest
+(default: the current directory). Supported options:
+.RS
+.TP
+.B \-\-extract-here
+Extract next to each archive (file-manager mode). Alias of
+.BR \-\-here .
+.TP
+.B \-\-extract-to \fIdir\fR
+Explicit extraction destination. Alias of the positional
+.IR dest .
+.TP
+.B \-\-dialog
+Ask for the destination with a native dialog.
+.TP
+.BR \-p " " \fIpassword\fR
+Password for encrypted archives.
+.RE
+.TP
+.BR a ", " create " " \fIdest\fR \fIfile\fR...
+Create an archive; the format is inferred from the extension of
+.IR dest .
+.RS
+.TP
+.BR \-l " " \fI0\-9\fR
+Compression level (default: the active GUI profile).
+.TP
+.BR \-p " " \fIpassword\fR
+Encrypt with a password (AES-256 for 7z/zip).
+.TP
+.BR \-v " " \fIsize\fR
+Split into volumes (.7z/.zip/.rar); size examples: 50m, 1g, 1000000.
+.I zip
+and
+.I rar
+need Info-ZIP `zip` / `rar` installed.
+.RE
+.TP
+.BR u ", " add " " \fIarchive\fR \fIfile\fR...
+Add files to an existing archive (zip/7z/tar).
+.RS
+.TP
+.BR \-\-to " " \fIdir\fR
+Entry paths relative to
+.I dir
+(default: the archive root).
+.TP
+.BR \-p " " \fIpassword\fR
+Password for encrypted 7z/zip.
+.TP
+.BR \-\-threads " " \fIN\fR
+Cap worker threads.
+.RE
+.TP
+.BR r ", " remove ", " rm " " \fIarchive\fR \fIentry\fR...
+Delete entries from an archive (zip/7z/tar).
+.TP
+.BR mk ", " mkdir " " \fIarchive\fR \fIfolder\fR " " [\fI\-p\fR \fIpassword\fR]
+Create an empty folder inside the archive.
+.TP
+.BR rn ", " rename " " \fIarchive\fR \fIold\fR \fInew\fR " " [\fI\-p\fR \fIpassword\fR]
+Rename an entry inside the archive.
+.TP
+.BR t ", " test " " \fIarchive\fR [\fIentries\fR...] [\fI\-p\fR \fIpassword\fR]
+Test archive integrity; prints a per-entry pass/fail report and returns a
+non-zero status if any entry failed.
+.TP
+.BR o ", " open " " \fIarchive\fR \fIentry\fR " " [\fI\-p\fR \fIpassword\fR]
+Extract the entry to a temporary location and open it with the default
+application.
+.TP
+.BR w ", " wipe " " \fIarchive\fR \fIentry\fR... " " [\fI\-\-passes\fR \fIN\fR]
+Securely overwrite entries inside the archive before removal.
+.TP
+.BR c ", " compress " " [\fIoptions\fR] \fIfile\fR...
+Compress files/folders Dolphin-style; by default creates
+.IR name ".\fIfmt\fR"
+next to the sources without overwriting.
+.RS
+.TP
+.BR \-\-format " " \fIzip|tar.gz|7z\fR
+Target format.
+.TP
+.BR \-\-to " " \fIdest\fR
+Destination archive path.
+.TP
+.BR \-\-here
+Compress next to the sources.
+.TP
+.BR \-\-dialog
+Ask with a native dialog.
+.TP
+.BR \-\-progress
+Show the in-app progress window.
+.RE
+.TP
+.BR convert " " \fIsrc\fR " " \fIdest\fR " " [\fI\-l\fR \fI0\-9\fR] [\fI\-p\fR \fIpassword\fR] [\fI\-\-threads\fR \fIN\fR]
+Re-pack one archive into another format (zip/7z/tar.* destinations).
+.SS Common flags
+.TP
+.BR \-p " " \fIpassword\fR
+Password for encrypted archives.
+.TP
+.BR \-\-threads " " \fIN\fR
+Cap worker threads (default: auto from CPU/RAM).
+.SH OPTIONS
+.TP
+.BR \-h ", " \-\-help
+Print help and exit.
+.TP
+.BR \-V ", " \-\-version
+Print version and exit.
+.SH ENVIRONMENT
+.TP
+.B ARKX_THREADS
+Number of worker threads to use (same as \fB\-\-threads\fR).
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Operational error (archive not found, unreadable source, failed operation).
+.TP
+.B 2
+Usage error (invalid or missing arguments, unknown command or flag).
+.SH EXAMPLES
+.nf
+arkx l archive.zip
+arkx x archive.7z ~/Downloads
+arkx x archive.rar . -p secret
+arkx extract --here download.zip
+arkx a archive.7z file1.txt folder/ -l 9 -p pwd
+arkx a movie.7z movie.mkv -v 100m            # split 100MB volumes
+arkx add archive.zip backup.txt --to docs/   # add into docs/
+arkx remove archive.zip docs/backup.txt      # delete an entry
+arkx compress --here --format=zip docs/      # docs.zip next to docs/
+arkx compress --dialog photos/               # Compress to... (kdialog)
+arkx convert old.rar new.zip                 # re-pack into another format
+arkx archive.tar.gz                          # open GUI
+.fi
+.SH AUTHOR
+padelle <https://github.com/padelle2603/arkx>
+.SH BUGS
+Report bugs at <https://github.com/padelle2603/arkx/issues>.

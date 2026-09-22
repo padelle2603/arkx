@@ -6,6 +6,9 @@ description = "Fast multi-threaded Linux archive manager (PeaZip-inspired)"
 authors = ["padelle"]
 license = "GPL-3.0-or-later"
 repository = "https://github.com/padelle2603/arkx"
+keywords = ["archive", "zip", "tar", "7z", "compression"]
+categories = ["command-line-utilities", "compression"]
+rust-version = "1.80"
 
 [dependencies]
 gtk4 = { version = "0.9", features = ["v4_12"] }
