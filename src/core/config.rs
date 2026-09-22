@@ -146,7 +146,10 @@ pub fn set_compression(tier: CompressTier) {
 }
 
 fn save_current() {
-    save_to(&CURRENT.read().unwrap(), &config_path());
+    save_to(
+        &CURRENT.read().unwrap_or_else(|e| e.into_inner()),
+        &config_path(),
+    );
 }
 
 /// Compression level applied by the CLI when `-l` is not given.
