@@ -74,3 +74,5 @@ Tests: `cargo test` · Lint: `cargo clippy` · Install: `./scripts/install.sh`
 ## Privacy & Legal
 
 Arkx works **100% offline** — no accounts, no telemetry, no network calls. See [PRIVACY.md](PRIVACY.md). License and third-party notices: [LEGAL.md](LEGAL.md) (GPL-3.0).
+
+*Developed with the assistance of [opencode](https://opencode.ai).*
