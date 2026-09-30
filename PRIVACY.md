@@ -16,8 +16,11 @@ there is almost nothing to disclose.
   from archives are shown in the UI and never leave your machine.
 - **Passwords**: typed archive passwords live only in RAM for the extraction
   they unlock. They are never written to disk, logs or config files.
-- **Settings**: Arkx stores no configuration file and no history. The file
-  manager may remember that Arkx opens archives (standard MIME association).
+- **Settings**: Arkx stores one configuration file, `config.json` in
+  `$XDG_CONFIG_HOME/arkx/` (`~/.config/arkx/config.json` by default). It holds
+  only the two speed profiles you pick — one of three levels for extraction,
+  one of three for compression. No personal data, no history. The file manager
+  may remember that Arkx opens archives (standard MIME association).
 
 ## Permissions
 
