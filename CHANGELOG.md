@@ -44,6 +44,22 @@
   instead of being passed to 7-Zip or tar, which would expand them. An archive
   containing one entry named `*.txt` could otherwise make a single-entry delete
   remove every matching entry, and a single-entry extract write extra files.
+- **Fixed**: a relative source (`arkx c --format=zip docs/`) made the input-size
+  estimate 0, which silently disabled both the disk-space preflight and the
+  zip→7z routing. Absolute paths behaved differently for the same command.
+- **Fixed**: creating an archive truncates the destination before any
+  validation; a failed or killed job left a truncated archive, or one holding
+  only directory entries. All three creation paths stage a `.part` sibling and
+  swap it in atomically, like every archive-rewriting path already did.
+- **Fixed**: the parallel zip writer ignored the cancel flag for the whole job
+  while the serial one checked it per entry, so Cancel did nothing until the
+  compression was over.
+- **Fixed**: the ZIP64 guard looked at entry size only, so an archive over the
+  4 GiB offset limit built from smaller entries came out with a central
+  directory strict readers reject.
+- **Fixed**: zip entries created by arkx carried neither the source mtime nor
+  its permission bits, so a backup round-tripped to the compression timestamp
+  with no exec bits. tar and 7z preserved both.
 - **Changed**: the 16 GiB decompression quota is **removed** from all three
   backends. It stopped zip bombs but also refused legitimate large archives
   (a 60 GiB game could not be extracted). See README "Known limits".
