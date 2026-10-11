@@ -1012,41 +1012,13 @@ pub fn build_ui(app: &adw::Application) {
     // Back button
     let ui_back = ui.clone();
     back_btn.connect_clicked(move |_| {
-        let mut st = ui_back.state.borrow_mut();
-        if st.current_path.is_empty() {
+        let cur = ui_back.state.borrow().current_path.clone();
+        if cur.is_empty() {
             return;
         }
         // Drop the last component.
-        st.current_path = navigate_up(&st.current_path);
-        let cur = st.current_path.clone();
-        let info_opt = st.current_info.clone();
-        let filter = st.filter_text.clone();
-        drop(st);
-        if let Some(info) = info_opt {
-            update_breadcrumb(
-                &ui_back.breadcrumb,
-                &cur,
-                &info,
-                ui_back.state.clone(),
-                ui_back.list.clone(),
-                ui_back.status_left.clone(),
-                ui_back.status_right.clone(),
-            );
-            let (sc, sa, hidden) = {
-                let st = ui_back.state.borrow();
-                (st.sort_col, st.sort_asc, st.cut_hidden.clone())
-            };
-            populate_current_view(&ui_back.list, &info, &cur, &filter, sc, sa, &hidden);
-            ui_back.back.set_sensitive(!cur.is_empty());
-            ui_back.status_left.set_text(&format!(
-                "Folder: /{}",
-                if cur.is_empty() {
-                    "".to_string()
-                } else {
-                    cur.clone()
-                }
-            ));
-        }
+        let parent = navigate_up(&cur);
+        goto(&ui_back, &parent, folder_status(&parent));
     });
 
     // Archive creation lives in the CLI (`arkx a`); the header stays clean.
@@ -1088,37 +1060,8 @@ pub fn build_ui(app: &adw::Application) {
             drop(st);
             if path_str == "__UP__" {
                 // Go up one level.
-                let mut st_mut = ui_nav.state.borrow_mut();
-                st_mut.current_path = navigate_up(&st_mut.current_path);
-                let Some(info_c) = st_mut.current_info.clone() else {
-                    return;
-                };
-                let new_path = st_mut.current_path.clone();
-                let filter_c = st_mut.filter_text.clone();
-                drop(st_mut);
-                update_breadcrumb(
-                    &ui_nav.breadcrumb,
-                    &new_path,
-                    &info_c,
-                    ui_nav.state.clone(),
-                    ui_nav.list.clone(),
-                    ui_nav.status_left.clone(),
-                    ui_nav.status_right.clone(),
-                );
-                let (sc, sa, hidden) = {
-                    let st = ui_nav.state.borrow();
-                    (st.sort_col, st.sort_asc, st.cut_hidden.clone())
-                };
-                populate_current_view(&ui_nav.list, &info_c, &new_path, &filter_c, sc, sa, &hidden);
-                ui_nav.back.set_sensitive(!new_path.is_empty());
-                ui_nav.status_left.set_text(&format!(
-                    "Folder: /{}",
-                    if new_path.is_empty() {
-                        "".to_string()
-                    } else {
-                        new_path.clone()
-                    }
-                ));
+                let parent = navigate_up(&cur);
+                goto(&ui_nav, &parent, folder_status(&parent));
                 return;
             }
             if let Some(info) = info_opt {
@@ -1127,40 +1070,8 @@ pub fn build_ui(app: &adw::Application) {
                 if let Some(entry) = children.iter().find(|e| e.path == path_str) {
                     if entry.is_dir {
                         // Dive in.
-                        let mut st_mut = ui_nav.state.borrow_mut();
-                        let Some(info_c) = st_mut.current_info.clone() else {
-                            return;
-                        };
-                        st_mut.current_path = paths::with_trailing_slash(&entry.path.clone());
-                        let new_path = st_mut.current_path.clone();
-                        let filter_c = st_mut.filter_text.clone();
-                        drop(st_mut);
-                        update_breadcrumb(
-                            &ui_nav.breadcrumb,
-                            &new_path,
-                            &info_c,
-                            ui_nav.state.clone(),
-                            ui_nav.list.clone(),
-                            ui_nav.status_left.clone(),
-                            ui_nav.status_right.clone(),
-                        );
-                        let (sc, sa, hidden) = {
-                            let st = ui_nav.state.borrow();
-                            (st.sort_col, st.sort_asc, st.cut_hidden.clone())
-                        };
-                        populate_current_view(
-                            &ui_nav.list,
-                            &info_c,
-                            &new_path,
-                            &filter_c,
-                            sc,
-                            sa,
-                            &hidden,
-                        );
-                        ui_nav.back.set_sensitive(true);
-                        ui_nav
-                            .status_left
-                            .set_text(&format!("Opened: /{}", new_path));
+                        let target = paths::with_trailing_slash(&entry.path);
+                        goto(&ui_nav, &target, format!("Opened: /{}", target));
                     } else {
                         // Plain file: show info for now.
                         ui_nav.status_left.set_text(&format!(
@@ -2616,6 +2527,41 @@ fn set_idle_sensitivity(ui: &Ui) {
         .set_sensitive(ui.state.borrow().current_info.is_some());
     ui.extract_sel
         .set_sensitive(!ui.state.borrow().selected_entries.is_empty());
+}
+
+/// Navigate to `path` inside the open archive: every way in (back button,
+/// double-click on a folder, the `..` row) funnels through here, so the
+/// breadcrumb, the view, the back button and the status line can never
+/// disagree about where we are.
+fn goto(ui: &Ui, path: &str, status: String) {
+    let (Some(info), filter, (sc, sa, hidden)) = ({
+        let st = ui.state.borrow();
+        (
+            st.current_info.clone(),
+            st.filter_text.clone(),
+            (st.sort_col, st.sort_asc, st.cut_hidden.clone()),
+        )
+    }) else {
+        return;
+    };
+    ui.state.borrow_mut().current_path = path.to_string();
+    update_breadcrumb(
+        &ui.breadcrumb,
+        path,
+        &info,
+        ui.state.clone(),
+        ui.list.clone(),
+        ui.status_left.clone(),
+        ui.status_right.clone(),
+    );
+    populate_current_view(&ui.list, &info, path, &filter, sc, sa, &hidden);
+    ui.back.set_sensitive(!path.is_empty());
+    ui.status_left.set_text(&status);
+}
+
+/// Status line for a move the user triggered rather than opened.
+fn folder_status(path: &str) -> String {
+    format!("Folder: /{}", path)
 }
 
 fn rebuild_list(ui: Ui) {

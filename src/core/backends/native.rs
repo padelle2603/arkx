@@ -26,6 +26,31 @@ fn part_temp_name(secure: bool) -> String {
     format!(".arkx-{stem}{}-{seq}.part", std::process::id())
 }
 
+/// `ZipWriter::finish()` writes the central directory but does NOT flush the
+/// `BufWriter`: without this, archives under 1 MB stay truncated or empty.
+fn finish_and_flush<W: std::io::Write + std::io::Seek>(zip: zip::ZipWriter<W>) -> Result<()> {
+    zip.finish()
+        .map_err(|e| ArkxError::Backend(e.to_string()))?
+        .flush()
+        .map_err(ArkxError::Io)
+}
+
+/// Flush the finished archive and swap its staging file in atomically (the
+/// staging file is a sibling, so the rename is same-filesystem). On any error
+/// the staging file is removed and the original archive is left untouched.
+fn finalize_zip<W: std::io::Write + std::io::Seek>(
+    zip: zip::ZipWriter<W>,
+    tmp: &Path,
+    archive: &Path,
+) -> Result<()> {
+    let swap =
+        finish_and_flush(zip).and_then(|()| std::fs::rename(tmp, archive).map_err(ArkxError::Io));
+    if swap.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    swap
+}
+
 pub struct NativeBackend {
     cancel: Arc<AtomicBool>,
 }
@@ -1201,13 +1226,7 @@ impl NativeBackend {
             emit_progress(&shared, crate::core::util::completed(total_src));
             // finish() writes the central directory but does NOT flush the
             // BufWriter: without explicit flush small zips stay truncated.
-            let writer = zip
-                .finish()
-                .map_err(|e| ArkxError::Backend(e.to_string()))?;
-            let mut file = writer
-                .into_inner()
-                .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
-            file.flush().map_err(ArkxError::Io)?;
+            finish_and_flush(zip)?;
             if skipped > 0 {
                 eprintln!(
                     "[native] zip: skipped {} unreadable/special entries",
@@ -1265,14 +1284,7 @@ impl NativeBackend {
         emit_progress(&shared, crate::core::util::completed(total_src));
         // finish() writes the central directory but does NOT flush the BufWriter:
         // without explicit flush small zips (<1MB) stay truncated/empty.
-        let writer = zip
-            .finish()
-            .map_err(|e| ArkxError::Backend(e.to_string()))?;
-        let mut file = writer
-            .into_inner()
-            .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
-        use std::io::Write as _WriteFlush;
-        file.flush().map_err(ArkxError::Io)?;
+        finish_and_flush(zip)?;
         if skipped > 0 {
             eprintln!(
                 "[native] zip: skipped {} unreadable/special entries",
@@ -1375,7 +1387,7 @@ impl NativeBackend {
                 acc.saturating_add(std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
             }
         });
-        let result: Result<()> = (|| {
+        let built: Result<zip::ZipWriter<BufWriter<File>>> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             let new_opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
@@ -1433,23 +1445,9 @@ impl NativeBackend {
                 );
             }
             emit_progress(&shared, crate::core::util::completed(total_bytes));
-            let writer = zip
-                .finish()
-                .map_err(|e| ArkxError::Backend(e.to_string()))?;
-            let mut file = writer
-                .into_inner()
-                .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
-            use std::io::Write as _WriteFlush;
-            file.flush().map_err(ArkxError::Io)?;
-            Ok(())
+            Ok(zip)
         })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-            return result;
-        }
-        // Atomic swap on the same filesystem (temp is a sibling).
-        std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
-        Ok(())
+        finalize_zip(built?, &tmp, archive)
     }
 
     fn remove_zip(
@@ -1520,7 +1518,7 @@ impl NativeBackend {
                 }
             }
         }
-        let result: Result<()> = (|| {
+        let built: Result<zip::ZipWriter<BufWriter<File>>> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             if let Some(c) = comment {
@@ -1556,22 +1554,9 @@ impl NativeBackend {
                 );
             }
             emit_progress(&shared, crate::core::util::completed(total_bytes));
-            let writer = zip
-                .finish()
-                .map_err(|e| ArkxError::Backend(e.to_string()))?;
-            let mut file = writer
-                .into_inner()
-                .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
-            use std::io::Write as _WriteFlush;
-            file.flush().map_err(ArkxError::Io)?;
-            Ok(())
+            Ok(zip)
         })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-            return result;
-        }
-        std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
-        Ok(())
+        finalize_zip(built?, &tmp, archive)
     }
 
     fn create_tar(
@@ -2145,7 +2130,7 @@ impl NativeBackend {
                 }
             }
         }
-        let result: Result<()> = (|| {
+        let built: Result<zip::ZipWriter<BufWriter<File>>> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             let mut done_bytes = 0u64;
@@ -2182,22 +2167,9 @@ impl NativeBackend {
                 );
             }
             emit_progress(&shared, crate::core::util::completed(total_bytes));
-            let writer = zip
-                .finish()
-                .map_err(|e| ArkxError::Backend(e.to_string()))?;
-            let mut file = writer
-                .into_inner()
-                .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
-            use std::io::Write as _WriteFlush;
-            file.flush().map_err(ArkxError::Io)?;
-            Ok(())
+            Ok(zip)
         })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
-            return result;
-        }
-        std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
-        Ok(())
+        finalize_zip(built?, &tmp, archive)
     }
 
     fn test_zip(
@@ -2339,7 +2311,7 @@ impl NativeBackend {
                 }
             }
         }
-        let result: Result<()> = (|| {
+        let built: Result<zip::ZipWriter<BufWriter<File>>> = (|| {
             let file = File::create(&tmp).map_err(ArkxError::Io)?;
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             let mut done_bytes = 0u64;
@@ -2373,51 +2345,47 @@ impl NativeBackend {
                 );
             }
             emit_progress(&shared, crate::core::util::completed(total_bytes));
-            let writer = zip
-                .finish()
-                .map_err(|e| ArkxError::Backend(e.to_string()))?;
-            let mut file = writer
-                .into_inner()
-                .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
-            use std::io::Write as _WriteFlush;
-            file.flush().map_err(ArkxError::Io)?;
+            Ok(zip)
+        })();
+        let result: Result<()> = (|| {
+            finish_and_flush(built?)?;
+            // Swap the clean archive in atomically BEFORE wiping. Holding the
+            // original inode open first means it is reachable only through our
+            // own descriptor, so a crash leaves a usable archive instead of a
+            // wiped one.
+            let mut original = File::options()
+                .write(true)
+                .open(archive)
+                .map_err(ArkxError::Io)?;
+            use std::io::{Seek as _WriteSeek, Write as _Write};
+            std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
+            // Overwrite the original inode's data: the deleted entries are
+            // unrecoverable from it, and the archive at `archive` is the clean one.
+            for pass in 0..=passes {
+                original
+                    .seek(std::io::SeekFrom::Start(0))
+                    .map_err(ArkxError::Io)?;
+                let mut urandom = File::open("/dev/urandom").map_err(ArkxError::Io)?;
+                let mut buf = vec![0u8; COPY_CHUNK];
+                let mut written = 0u64;
+                while written < archive_len {
+                    let n = std::cmp::min(buf.len() as u64, archive_len - written) as usize;
+                    if pass == 0 {
+                        urandom.read_exact(&mut buf[..n]).map_err(ArkxError::Io)?;
+                    } else {
+                        buf[..n].fill(0);
+                    }
+                    original.write_all(&buf[..n]).map_err(ArkxError::Io)?;
+                    written += n as u64;
+                }
+                original.flush().map_err(ArkxError::Io)?;
+            }
             Ok(())
         })();
         if result.is_err() {
             let _ = std::fs::remove_file(&tmp);
-            return result;
         }
-        // Swap the clean archive in atomically BEFORE wiping. Holding the original
-        // inode open first means it is reachable only through our own descriptor, so
-        // a crash leaves a usable archive instead of a wiped one.
-        let mut original = File::options()
-            .write(true)
-            .open(archive)
-            .map_err(ArkxError::Io)?;
-        use std::io::{Seek as _WriteSeek, Write as _Write};
-        std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
-        // Overwrite the original inode's data: the deleted entries are unrecoverable
-        // from it, and the archive sitting at `archive` is the clean one.
-        for pass in 0..=passes {
-            original
-                .seek(std::io::SeekFrom::Start(0))
-                .map_err(ArkxError::Io)?;
-            let mut urandom = File::open("/dev/urandom").map_err(ArkxError::Io)?;
-            let mut buf = vec![0u8; COPY_CHUNK];
-            let mut written = 0u64;
-            while written < archive_len {
-                let n = std::cmp::min(buf.len() as u64, archive_len - written) as usize;
-                if pass == 0 {
-                    urandom.read_exact(&mut buf[..n]).map_err(ArkxError::Io)?;
-                } else {
-                    buf[..n].fill(0);
-                }
-                original.write_all(&buf[..n]).map_err(ArkxError::Io)?;
-                written += n as u64;
-            }
-            original.flush().map_err(ArkxError::Io)?;
-        }
-        Ok(())
+        result
     }
 }
 
