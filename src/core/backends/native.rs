@@ -42,6 +42,23 @@ fn part_temp_name(secure: bool) -> String {
     format!(".arkx-{stem}{}-{seq}.part", std::process::id())
 }
 
+/// zip stores a DOS timestamp; the listing speaks chrono. The crate's own
+/// conversion goes through the `time` crate, which we do not depend on, so
+/// read the civil fields it exposes instead.
+fn zip_dt_to_chrono(dt: zip::DateTime) -> Option<chrono::DateTime<chrono::Local>> {
+    use chrono::TimeZone;
+    chrono::Local
+        .with_ymd_and_hms(
+            i32::from(dt.year()),
+            u32::from(dt.month()),
+            u32::from(dt.day()),
+            u32::from(dt.hour()),
+            u32::from(dt.minute()),
+            u32::from(dt.second()),
+        )
+        .single()
+}
+
 /// `ZipWriter::finish()` writes the central directory but does NOT flush the
 /// `BufWriter`: without this, archives under 1 MB stay truncated or empty.
 fn finish_and_flush<W: std::io::Write + std::io::Seek>(zip: zip::ZipWriter<W>) -> Result<()> {
@@ -309,7 +326,7 @@ impl NativeBackend {
                 is_dir,
                 size,
                 packed_size: comp_size,
-                modified: None,
+                modified: f.last_modified().and_then(zip_dt_to_chrono),
                 mode: Some(f.unix_mode().unwrap_or(0o644)),
                 crc32: Some(format!("{:08X}", f.crc32())),
                 method: Some(format!("{:?}", f.compression())),
@@ -1040,6 +1057,55 @@ impl NativeBackend {
             None => options,
         };
 
+        // Per-entry metadata (mtime + unix mode). `FileOptions::default()` carries
+        // neither, and `default_for_write()` is the *current* time, so an
+        // archive built without this loses both on the way back out: a backup
+        // made with arkx comes back with the compression timestamp and no
+        // permission bits. tar and 7z preserve both.
+        fn with_meta<'a>(
+            opts: zip::write::FileOptions<'a, ()>,
+            p: &Path,
+        ) -> zip::write::FileOptions<'a, ()> {
+            match std::fs::symlink_metadata(p) {
+                Ok(m) => {
+                    // zip stores a DOS timestamp: 1980 floor, 2-second steps.
+                    // Anything it cannot represent falls back to "now".
+                    let when = m
+                        .modified()
+                        .ok()
+                        .and_then(|t| {
+                            // zip's DateTime is a DOS timestamp and its only
+                            // conversion wants `time::OffsetDateTime`, a crate
+                            // we do not depend on. Going through chrono's civil
+                            // fields avoids adding one.
+                            use chrono::{Datelike, Timelike};
+                            let at: chrono::DateTime<chrono::Local> = t.into();
+                            zip::DateTime::from_date_and_time(
+                                at.year().try_into().ok()?,
+                                at.month() as u8,
+                                at.day() as u8,
+                                at.hour() as u8,
+                                at.minute() as u8,
+                                at.second() as u8,
+                            )
+                            .ok()
+                        })
+                        .unwrap_or_else(zip::DateTime::default_for_write);
+                    let opts = opts.last_modified_time(when);
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        opts.unix_permissions(m.permissions().mode() & 0o777)
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        opts
+                    }
+                }
+                Err(_) => opts,
+            }
+        }
+
         let base = sources
             .first()
             .and_then(|p| p.parent())
@@ -1109,7 +1175,7 @@ impl NativeBackend {
                     continue;
                 }
                 emit_progress(&shared, ProgressInfo::new(name.clone(), 0, total_src));
-                zip.add_directory(name, options)
+                zip.add_directory(name, with_meta(options, path))
                     .map_err(|e| ArkxError::Backend(e.to_string()))?;
             }
             // Files : chunked across cores; each worker emits a self-contained
@@ -1223,7 +1289,7 @@ impl NativeBackend {
                         }
                         let file = File::open(p).map_err(ArkxError::Io)?;
                         let large = zip_entry_large(file.metadata().map(|m| m.len()).unwrap_or(0));
-                        cw.start_file(name, options.large_file(large))
+                        cw.start_file(name, with_meta(options.large_file(large), p))
                             .map_err(|e| ArkxError::Backend(e.to_string()))?;
                         if let Ok(mut g) = current_name.lock() {
                             *g = name.clone();
@@ -1344,14 +1410,14 @@ impl NativeBackend {
                     &shared,
                     ProgressInfo::new(name.clone(), done_bytes, total_src),
                 );
-                zip.add_directory(name, options)
+                zip.add_directory(name, with_meta(options, path))
                     .map_err(|e| ArkxError::Backend(e.to_string()))?;
                 continue;
             }
             let file = File::open(path).map_err(ArkxError::Io)?;
             let size = file.metadata().map(|m| m.len()).unwrap_or(0);
             let large = zip_entry_large(size);
-            zip.start_file(name.clone(), options.large_file(large))
+            zip.start_file(name.clone(), with_meta(options.large_file(large), path))
                 .map_err(|e| ArkxError::Backend(e.to_string()))?;
             let mut f = BufReader::with_capacity(IO_BUF_SIZE, file);
             std::io::copy(&mut f, &mut zip).map_err(ArkxError::Io)?;
@@ -1472,7 +1538,10 @@ impl NativeBackend {
             let mut zip = zip::ZipWriter::new(BufWriter::with_capacity(IO_BUF_SIZE, file));
             let new_opts: zip::write::FileOptions<()> = zip::write::FileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated)
-                .compression_level(Some(6));
+                // The active profile, not a magic 6: `add` has no `level`
+                // parameter to thread down, and a hardcoded value made the
+                // Small profile produce one archive with two policies in it.
+                .compression_level(Some(crate::core::config::compression_level() as i64));
             let mut done_bytes = 0u64;
 
             for i in 0..old.len() {
@@ -2536,6 +2605,71 @@ mod tests {
         assert!(!zip_entry_large(0));
         assert!(!zip_entry_large(zip::ZIP64_BYTES_THR));
         assert!(zip_entry_large(zip::ZIP64_BYTES_THR + 1));
+    }
+
+    /// A zip made by arkx must carry the source mtime and permission bits.
+    /// Without them a backup round-trips to the compression timestamp with no
+    /// exec bits — while tar and 7z preserve both.
+    #[test]
+    fn created_zip_keeps_mtime_and_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::SystemTime;
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let exe = src.join("run.sh");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let plain = src.join("notes.txt");
+        std::fs::write(&plain, b"hello").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        // A mtime well in the past: "now" would be an obvious giveaway, and
+        // files created together share a timestamp anyway.
+        let wanted = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_577_934_246);
+        std::fs::File::options()
+            .write(true)
+            .open(&plain)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(wanted))
+            .unwrap();
+
+        let archive = dir.path().join("a.zip");
+        backend()
+            .create(&archive, std::slice::from_ref(&src), 6, None, None, None)
+            .unwrap();
+
+        let info = backend().list(&archive).unwrap();
+        for (name, want_mode) in [("src/run.sh", 0o755u32), ("src/notes.txt", 0o640)] {
+            let e = info
+                .entries
+                .iter()
+                .find(|e| e.path == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            // The zip crate stores the full st_mode (with the file-type
+            // bits); extract masks them off, so the check does too.
+            assert_eq!(
+                e.mode.map(|m| m & 0o7777),
+                Some(want_mode),
+                "{name} lost its permission bits in the archive"
+            );
+        }
+        let got: Option<SystemTime> = info
+            .entries
+            .iter()
+            .find(|e| e.path == "src/notes.txt")
+            .and_then(|e| e.modified)
+            .map(Into::into);
+        let drift = got
+            .and_then(|g| {
+                g.duration_since(wanted)
+                    .ok()
+                    .or_else(|| wanted.duration_since(g).ok())
+            })
+            .map(|d: std::time::Duration| d.as_secs())
+            .unwrap_or(u64::MAX);
+        // zip keeps 2-second resolution.
+        assert!(drift <= 2, "mtime drifted by {drift}s from the source time");
     }
 
     /// A cancelled creation must stop and leave nothing behind: no half

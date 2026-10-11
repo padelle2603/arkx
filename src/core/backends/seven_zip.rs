@@ -7,8 +7,11 @@ use crate::core::util::Smoother;
 
 /// Thread cap for the 7z `-mmt` switch: use the machine's cores but never
 /// oversubscribe more than 32 (a 7z default that balances large archives).
+/// Also RAM-capped like `zstd_workers`: `-md=64m` below means each thread holds
+/// a 64 MiB dictionary, so 32 threads on a 4 GiB machine want 2 GiB of them
+/// alone. 192 MiB per worker is a generous allowance over that.
 fn sz_threads() -> usize {
-    crate::core::util::effective_threads().min(32)
+    crate::core::util::memory_capped_workers(crate::core::util::effective_threads().min(32), 192)
 }
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
