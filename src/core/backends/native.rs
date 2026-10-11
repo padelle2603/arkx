@@ -13,12 +13,8 @@ use std::sync::{
 };
 use std::time::Instant;
 
-/// Zip-bomb guard: refuse to decompress more than this many bytes for a
-/// single archive in the native backend (honest quota, not a ratio heuristic).
-/// Extraction aborts with a clear error instead of filling the disk.
 const IO_BUF_SIZE: usize = 1024 * 1024;
 const COPY_CHUNK: usize = 65536;
-pub(super) const MAX_EXTRACTED_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
 
 /// Unique staging-file suffix: the pid alone collides when two add/remove
 /// jobs run concurrently, letting one job clobber the other's `.part` file.
@@ -28,13 +24,6 @@ fn part_temp_name(secure: bool) -> String {
     let seq = NEXT_TMP_JOB.fetch_add(1, Ordering::Relaxed);
     let stem = if secure { "secure-" } else { "" };
     format!(".arkx-{stem}{}-{seq}.part", std::process::id())
-}
-
-pub(super) fn quota_error() -> ArkxError {
-    ArkxError::Corrupted(format!(
-        "decompressed data exceeds the {:.0} GiB safety quota; refusing to continue (possible zip bomb)",
-        MAX_EXTRACTED_BYTES as f64 / (1024.0 * 1024.0 * 1024.0)
-    ))
 }
 
 pub struct NativeBackend {
@@ -539,12 +528,6 @@ impl NativeBackend {
                     continue;
                 }
             }
-            // Declared size over the quota alone is enough to refuse up front:
-            // no point streaming gigabytes into a sink just to abort later.
-            let declared = f.size();
-            if processed_bytes.saturating_add(declared) > MAX_EXTRACTED_BYTES {
-                return Err(quota_error());
-            }
             let out_path = match secure_join(dest, &base, &name) {
                 Some(p) => p,
                 None => {
@@ -590,11 +573,6 @@ impl NativeBackend {
                     }
                     out.write_all(&buf[..n]).map_err(ArkxError::Io)?;
                     processed_bytes = processed_bytes.saturating_add(n as u64);
-                    // Runtime guard: declared sizes in the central directory can
-                    // lie, the read loop catches what the header check missed.
-                    if processed_bytes > MAX_EXTRACTED_BYTES {
-                        return Err(quota_error());
-                    }
                     // Throttle: emit every 100ms, every 512KB, or on file completion
                     let elapsed = last_emit.elapsed().as_millis() > 100
                         || processed_bytes - last_bytes >= 524288;
@@ -2237,6 +2215,9 @@ impl NativeBackend {
         // Reused across entries to avoid one 64KB allocation per file.
         let mut buf = vec![0u8; COPY_CHUNK];
         for i in 0..z.len() {
+            if self.cancelled() {
+                return Err(ArkxError::Cancelled);
+            }
             let mut f = z
                 .by_index(i)
                 .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
@@ -2258,6 +2239,11 @@ impl NativeBackend {
             } else {
                 let mut hasher = crc32fast::Hasher::new();
                 loop {
+                    // Also inside the read loop: one entry of a big archive can
+                    // be gigabytes, a per-entry check alone would never fire.
+                    if self.cancelled() {
+                        return Err(ArkxError::Cancelled);
+                    }
                     let n = f.read(&mut buf).map_err(ArkxError::Io)?;
                     if n == 0 {
                         break;
@@ -2448,6 +2434,27 @@ mod tests {
         assert!(!zip_entry_large(0));
         assert!(!zip_entry_large(zip::ZIP64_BYTES_THR));
         assert!(zip_entry_large(zip::ZIP64_BYTES_THR + 1));
+    }
+
+    #[test]
+    fn test_zip_stops_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.zip");
+        {
+            let mut w = zip::ZipWriter::new(File::create(&archive).unwrap());
+            w.start_file("a.txt", zip::write::FileOptions::<()>::default())
+                .unwrap();
+            std::io::Write::write_all(&mut w, b"hello").unwrap();
+            w.finish().unwrap();
+        }
+        let cancelled = NativeBackend::with_cancel(Arc::new(AtomicBool::new(true)));
+        let err = cancelled
+            .test(&archive, None, None)
+            .expect_err("a pre-cancelled test must not run");
+        assert!(matches!(err, ArkxError::Cancelled), "got {err:?}");
+        // Same archive, flag clear: the check completes.
+        let ok = backend().test(&archive, None, None).unwrap();
+        assert_eq!((ok.passed, ok.failed), (1, 0));
     }
 
     #[test]

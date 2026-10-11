@@ -85,6 +85,9 @@ pub enum JobKind {
 #[derive(Debug, Clone)]
 pub struct Job {
     pub kind: JobKind,
+    /// `WorkerPool::cancel_all` generation this job was submitted in: the
+    /// dispatcher drops every job older than the last cancel (and only those).
+    pub epoch: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -96,8 +99,7 @@ pub enum JobResult {
     Remove,
     Rename,
     Test(crate::core::archive::TestReport),
-    /// The background integrity check could not run for this format
-    /// (UnsupportedFormat): a quiet outcome, never an error dialog.
+    /// The background integrity check could not run: a quiet outcome.
     TestSkipped,
     OpenWith(std::path::PathBuf),
     Paste,

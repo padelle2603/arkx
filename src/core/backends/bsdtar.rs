@@ -266,9 +266,8 @@ impl BsdtarBackend {
         let cb = progress.unwrap();
 
         // Entry-based progress: total = non-directory entry count from the
-        // listing (or the caller's known value); the byte total is only used
-        // for the zip-bomb quota. Computed BEFORE spawn so a declared zip bomb
-        // is refused before the decompressor child starts pumping bytes.
+        // listing (or the caller's known value); the byte total drives the
+        // byte-based progress bar.
         let (pre_total, pre_entries) = match known {
             Some((t, n)) => (t, n),
             None => match self.list(archive) {
@@ -277,13 +276,10 @@ impl BsdtarBackend {
                     crate::core::util::count_selected(&info, entries),
                 ),
                 // Listing unavailable (e.g. headers encrypted): byte total
-                // vanishes (pulse path with the quota unknown), entries too.
+                // vanishes (pulse path), entries too.
                 Err(_) => (0, 0),
             },
         };
-        if pre_total > super::native::MAX_EXTRACTED_BYTES {
-            return Err(super::native::quota_error());
-        }
         cb(ProgressInfo::preparing(pre_total));
 
         let mut child = cmd

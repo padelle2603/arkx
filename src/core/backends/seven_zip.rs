@@ -161,15 +161,41 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             }
         }
         cmd.arg(&archive);
-        let output = cmd
-            .output()
+        // `7z t` on a big archive runs for minutes: spawn it and poll the
+        // cancel flag so the UI's Cancel actually kills the child instead of
+        // blocking in `output()` until it finishes on its own.
+        let mut child = cmd
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| ArkxError::Backend(format!("Cannot run 7z: {}", e)))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let (stderr, stderr_handle) = drain_stderr(child.stderr.take());
+        let mut stdout = String::new();
+        if let Some(out) = child.stdout.take() {
+            crate::core::util::read_lines_until(out, |line| {
+                if self.cancelled() {
+                    let _ = child.kill();
+                    return true;
+                }
+                stdout.push_str(line);
+                stdout.push('\n');
+                false
+            });
+        }
+        if self.cancelled() {
+            let _ = child.kill();
+        }
+        let status = child.wait().map_err(ArkxError::Io)?;
+        let stderr = stderr.lock().unwrap_or_else(|e| e.into_inner());
+        let stderr = String::from_utf8_lossy(&stderr).to_string();
+        let _ = stderr_handle.join();
+        if self.cancelled() {
+            return Err(ArkxError::Cancelled);
+        }
         // Exit 1 = warning, not a failure (e.g. "Headers Error" on solid RAR);
         // the line scan below still flags real errors (CRC/Error/Cannot open).
-        let is_warning = output.status.code() == Some(1);
-        if !output.status.success() && !is_warning {
+        let is_warning = status.code() == Some(1);
+        if !status.success() && !is_warning {
             let msg = format!("{}{}", stdout, stderr);
             return Err(ArkxError::Backend(format!(
                 "7z test failed: {}",
@@ -430,11 +456,9 @@ impl SevenZipBackend {
             return Err(ArkxError::Cancelled);
         }
 
-        // Byte-based total for the zip-bomb quota and the progress bar. The
-        // listing pass is skipped when the caller already knows the totals
-        // (GUI), otherwise `7z l -slt` computes them. Computed BEFORE spawn so
-        // a declared zip bomb is refused while the child is not yet pumping
-        // bytes under `dest`.
+        // Byte-based total for the progress bar. The listing pass is skipped
+        // when the caller already knows the totals (GUI), otherwise
+        // `7z l -slt` computes them.
         let (pre_total, _pre_entries) = if progress.is_some() {
             match known {
                 Some((t, n)) => (t, n),
@@ -443,9 +467,6 @@ impl SevenZipBackend {
         } else {
             (0, 0)
         };
-        if pre_total > super::native::MAX_EXTRACTED_BYTES {
-            return Err(super::native::quota_error());
-        }
 
         let threads = sz_threads();
         let mut cmd = Command::new(&self.bin);
@@ -653,8 +674,8 @@ impl SevenZipBackend {
 
     /// Expected (total bytes, non-directory entry count) for the bar: summed Size
     /// and count from `7z l -slt`, filtered to the subset when requested. Bytes
-    /// drive the zip-bomb quota and the (byte-based) progress bar; the count is
-    /// kept for API symmetry but is no longer shown to the user.
+    /// drive the (byte-based) progress bar; the count is kept for API symmetry
+    /// but is no longer shown to the user.
     /// 0/0 when listing fails or headers are encrypted (→ pulsing UI).
     fn extract_totals(&self, archive: &Path, filter: Option<&[String]>) -> (u64, u64) {
         let info = match self.list(archive) {

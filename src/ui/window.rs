@@ -73,6 +73,13 @@ struct Ui {
     /// Set when an archive is opened; the next successful List runs the
     /// background integrity check once.
     auto_test: Rc<RefCell<bool>>,
+    /// The background integrity check is running. It must never set `is_busy`:
+    /// on a huge archive the CRC pass takes minutes and would otherwise lock
+    /// every action ("An operation is already in progress…") with no way out.
+    test_running: Rc<Cell<bool>>,
+    /// The background check's own window, in a slot of its own: its late
+    /// outcome must never close or repaint a foreground job's window.
+    test_window: Rc<RefCell<Option<Rc<RefCell<ProgressWindow>>>>>,
     /// Single selected file awaiting its background SHA-256/MD5 computation
     /// (properties window), and the live labels to fill in.
     entry_hash_target: Rc<RefCell<Option<String>>>,
@@ -724,6 +731,8 @@ pub fn build_ui(app: &adw::Application) {
         open: open_btn.clone(),
         window: window.clone(),
         auto_test: Rc::new(RefCell::new(false)),
+        test_running: Rc::new(Cell::new(false)),
+        test_window: Rc::new(RefCell::new(None)),
         entry_hash_target: Rc::new(RefCell::new(None)),
         entry_hash_sha: Rc::new(RefCell::new(None)),
         entry_hash_md5: Rc::new(RefCell::new(None)),
@@ -1950,16 +1959,16 @@ pub fn build_ui(app: &adw::Application) {
         for evt in events {
             match evt {
                 WorkerEvent::Started { kind } => {
+                    if kind == "test" {
+                        start_background_test(&ui_poll);
+                        continue;
+                    }
                     *ui_poll.is_busy.borrow_mut() = true;
                     *ui_poll.last_progress.borrow_mut() = (0.0, Instant::now());
                     ui_poll.extract_all.set_sensitive(false);
                     ui_poll.extract_sel.set_sensitive(false);
                     ui_poll.props.set_sensitive(false);
-                    status_left.set_text(if kind == "test" {
-                        "Checking archive integrity…"
-                    } else {
-                        "Working…"
-                    });
+                    status_left.set_text("Working…");
                     if kind == "extract" || kind == "add" || kind == "remove" {
                         let (title, verb) = match kind.as_str() {
                             "add" => ("Adding to archive", "Adding"),
@@ -2114,16 +2123,25 @@ pub fn build_ui(app: &adw::Application) {
                             set_idle_sensitivity(&ui_poll);
                         }
                         _ => {
-                            // For List, close any leftover window. Clone first so the
-                            // borrow is released before `borrow_mut()` below (a live
-                            // `Ref` here panics with `RefCell already borrowed`).
-                            let stale = ui_poll.progress_window.borrow().as_ref().cloned();
-                            if let Some(pw) = stale {
-                                pw.borrow().close();
+                            // The background check owns no progress slot: a late test outcome must not
+                            // close the window of a foreground job the user started
+                            // meanwhile. Fall through either way — the match below
+                            // reports the integrity failures.
+                            if matches!(result, Ok(JobResult::Test(_)) | Ok(JobResult::TestSkipped))
+                            {
+                                end_background_test(&ui_poll);
+                            } else {
+                                // For List, close any leftover window. Clone first so the
+                                // borrow is released before `borrow_mut()` below (a live
+                                // `Ref` here panics with `RefCell already borrowed`).
+                                let stale = ui_poll.progress_window.borrow().as_ref().cloned();
+                                if let Some(pw) = stale {
+                                    pw.borrow().close();
+                                }
+                                *ui_poll.progress_window.borrow_mut() = None;
+                                *ui_poll.is_busy.borrow_mut() = false;
+                                set_idle_sensitivity(&ui_poll);
                             }
-                            *ui_poll.progress_window.borrow_mut() = None;
-                            *ui_poll.is_busy.borrow_mut() = false;
-                            set_idle_sensitivity(&ui_poll);
                         }
                     }
                     match result {
@@ -2395,7 +2413,16 @@ pub fn build_ui(app: &adw::Application) {
                         }
                     }
                 }
-                WorkerEvent::Error { err } => {
+                WorkerEvent::Error { kind, err } => {
+                    // A superseded background check is not an error outcome:
+                    // drop its window quietly and leave the UI to the
+                    // foreground job that replaced it. `kind` (not a timing
+                    // guess) decides: a cancelled extract reports the same
+                    // `Cancelled` error and must keep clearing `is_busy`.
+                    if kind == "test" {
+                        end_background_test(&ui_poll);
+                        continue;
+                    }
                     // Permanent error outcome; the user dismisses it.
                     let msg = err.to_string();
                     *ui_poll.pending_password.borrow_mut() = false;
@@ -2463,6 +2490,61 @@ fn dismiss_context_menu(menu: &Rc<RefCell<Option<gtk::PopoverMenu>>>) {
         m.popdown();
         m.unparent();
     }
+}
+
+/// The open-time integrity check runs in the background: it never takes
+/// `is_busy`, so the archive stays browsable and extractable while it reads
+/// the whole file. Small archives finish in milliseconds and stay silent;
+/// a long one gets a pulsing window with a working Cancel after a short
+/// delay — the only way to stop a multi-minute CRC pass is to offer it.
+fn start_background_test(ui: &Ui) {
+    ui.test_running.set(true);
+    ui.status_left.set_text("Checking archive integrity…");
+    let ui_late = ui.clone();
+    glib::timeout_add_local(Duration::from_secs(2), move || {
+        if !ui_late.test_running.get() {
+            return glib::ControlFlow::Break;
+        }
+        show_test_window(&ui_late);
+        let ui_tick = ui_late.clone();
+        glib::timeout_add_local(Duration::from_millis(500), move || {
+            if !ui_tick.test_running.get() {
+                return glib::ControlFlow::Break;
+            }
+            if let Some(pw) = ui_tick.test_window.borrow().as_ref() {
+                pw.borrow().pulse("Verifying entries…");
+            }
+            glib::ControlFlow::Continue
+        });
+        glib::ControlFlow::Break
+    });
+}
+
+/// Put up the cancellable window for the still-running background check.
+fn show_test_window(ui: &Ui) {
+    if ui.test_window.borrow().is_some() {
+        return;
+    }
+    let w = ProgressWindow::new(
+        &ui.window,
+        "Checking archive integrity",
+        "Verifying entries…",
+    );
+    w.borrow().pulse("Verifying entries…");
+    let worker = ui.worker.clone();
+    w.borrow()
+        .on_cancel(move || worker.borrow().cancel_background());
+    *ui.test_window.borrow_mut() = Some(w);
+}
+
+fn end_background_test(ui: &Ui) {
+    ui.test_running.set(false);
+    let stale = ui.test_window.borrow().as_ref().cloned();
+    if let Some(pw) = stale {
+        pw.borrow().close();
+    }
+    *ui.test_window.borrow_mut() = None;
+    ui.status_left.set_text("");
 }
 
 /// Dismiss the contextual menu and, if an operation is already running,

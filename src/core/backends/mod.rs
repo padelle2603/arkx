@@ -505,7 +505,11 @@ impl BackendManager {
     ) -> Result<crate::core::archive::TestReport> {
         let fmt = super::detector::detect_format(archive);
         match fmt {
-            ArchiveFormat::Zip => self.native.test(archive, entries, password),
+            ArchiveFormat::Zip => match self.native.test(archive, entries, password) {
+                Ok(report) => Ok(report),
+                Err(ArkxError::Corrupted(_)) => self.seven.test(archive, entries, password),
+                Err(error) => Err(error),
+            },
             // RAR: 7-Zip is already the list/extract backend and `7z t` can
             // verify rar contents, so the open-time background check works
             // instead of surfacing "integrity not supported".

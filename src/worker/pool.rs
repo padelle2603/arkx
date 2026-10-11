@@ -5,7 +5,7 @@ use crate::worker::{Job, JobKind, JobResult};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc, Mutex,
 };
 use std::thread;
@@ -26,6 +26,10 @@ pub enum WorkerEvent {
         result: Result<JobResult, ArkxError>,
     },
     Error {
+        /// Job kind that failed, same labels as `Started`. The GUI needs it:
+        /// a cancelled job and a superseded background check both arrive here,
+        /// and only the kind tells them apart.
+        kind: String,
         err: ArkxError,
     },
 }
@@ -36,9 +40,14 @@ pub struct WorkerPool {
     /// Live cancel flags, one per running job: cancelling must not reset the
     /// flag of a sibling job when this one finishes.
     cancel_flags: Arc<Mutex<Vec<Arc<AtomicBool>>>>,
-    /// Pool-wide cancel: set by `cancel_all` so queued (not yet running) jobs
-    /// are dropped instead of still executing after the user cancels.
-    cancelled: Arc<AtomicBool>,
+    /// Cancel generation, bumped by `cancel_all`. Jobs carry the generation
+    /// they were submitted in, so a cancel drops the jobs already queued
+    /// without poisoning the ones submitted afterwards (a plain latch would).
+    epoch: Arc<AtomicU64>,
+    /// Cancel flag of the running background job (the open-time integrity
+    /// check), so a foreground job can supersede it without touching anything
+    /// else — two full passes over one archive only fight for the same disk.
+    background: Arc<Mutex<Option<Arc<AtomicBool>>>>,
 }
 
 impl WorkerPool {
@@ -46,21 +55,17 @@ impl WorkerPool {
         let (job_tx, job_rx) = mpsc::channel::<Job>();
         let (evt_tx, evt_rx) = mpsc::channel::<WorkerEvent>();
         let cancel_flags = Arc::new(Mutex::new(Vec::<Arc<AtomicBool>>::new()));
-        let cancelled = Arc::new(AtomicBool::new(false));
+        let epoch = Arc::new(AtomicU64::new(0));
+        let background = Arc::new(Mutex::new(None::<Arc<AtomicBool>>));
 
         // Dispatcher thread — per-job threads so a pipe deadlock (7z) never
         // blocks dispatch. Progress stays byte-based (see backends).
         let flags = cancel_flags.clone();
-        let cancelled_dispatch = cancelled.clone();
+        let current_epoch = epoch.clone();
+        let bg_track = background.clone();
         thread::spawn(move || {
-            while let Ok(job) = job_rx.recv() {
-                if cancelled_dispatch.load(Ordering::Relaxed) {
-                    let _ = evt_tx.send(WorkerEvent::Error {
-                        err: ArkxError::Cancelled,
-                    });
-                    continue;
-                }
-                let kind_str = match &job.kind {
+            while let Ok(Job { kind: job, epoch }) = job_rx.recv() {
+                let kind_str = match &job {
                     JobKind::List { .. } => "list",
                     JobKind::Extract { .. } => "extract",
                     JobKind::Add { .. } => "add",
@@ -75,15 +80,31 @@ impl WorkerPool {
                     JobKind::EntryHash { .. } => "hash",
                 }
                 .to_string();
+                if epoch < current_epoch.load(Ordering::Relaxed) {
+                    let _ = evt_tx.send(WorkerEvent::Error {
+                        kind: kind_str,
+                        err: ArkxError::Cancelled,
+                    });
+                    continue;
+                }
                 let cancel_flag = Arc::new(AtomicBool::new(false));
                 flags
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push(cancel_flag.clone());
-                let _ = evt_tx.send(WorkerEvent::Started { kind: kind_str });
+                // Only the open-time integrity check runs in the background;
+                // everything else is foreground and may supersede it.
+                let is_background = kind_str == "test";
+                if is_background {
+                    *bg_track.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_flag.clone());
+                }
+                let _ = evt_tx.send(WorkerEvent::Started {
+                    kind: kind_str.clone(),
+                });
                 let evt_tx_clone = evt_tx.clone();
                 let evt_tx_inner = evt_tx.clone();
                 let job_flags = flags.clone();
+                let job_bg = bg_track.clone();
                 // Run the job on its own thread so dispatch never blocks.
                 thread::spawn(move || {
                     // Share the job's cancel flag with the backend so `Cancel`
@@ -93,7 +114,7 @@ impl WorkerPool {
                     let cancel_for_job = cancel_flag.clone();
                     let result = Self::execute_job(
                         &backend,
-                        job,
+                        Job { kind: job, epoch },
                         move |info| {
                             if cancel_for_job.load(Ordering::Relaxed) {
                                 return;
@@ -114,6 +135,7 @@ impl WorkerPool {
                                 || cancel_flag.load(Ordering::Relaxed);
                             if was_cancelled {
                                 let _ = evt_tx_inner.send(WorkerEvent::Error {
+                                    kind: kind_str,
                                     err: ArkxError::Cancelled,
                                 });
                             } else {
@@ -125,6 +147,12 @@ impl WorkerPool {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .retain(|f| !Arc::ptr_eq(f, &cancel_flag));
+                    if is_background {
+                        let mut bg = job_bg.lock().unwrap_or_else(|e| e.into_inner());
+                        if bg.as_ref().is_some_and(|f| Arc::ptr_eq(f, &cancel_flag)) {
+                            *bg = None;
+                        }
+                    }
                 });
             }
         });
@@ -133,7 +161,8 @@ impl WorkerPool {
             tx: job_tx,
             rx: evt_rx,
             cancel_flags,
-            cancelled,
+            epoch,
+            background,
         }
     }
 
@@ -233,15 +262,11 @@ impl WorkerPool {
                 archive,
                 entries,
                 password,
-            } => {
-                match backend.test(&archive, entries.as_deref(), password.as_deref()) {
-                    Ok(report) => Ok(JobResult::Test(report)),
-                    // The open-time auto-test is best-effort: a format the
-                    // backend cannot verify must not surface an error dialog.
-                    Err(ArkxError::UnsupportedFormat(_)) => Ok(JobResult::TestSkipped),
-                    Err(e) => Err(e),
-                }
-            }
+            } => match backend.test(&archive, entries.as_deref(), password.as_deref()) {
+                Ok(report) => Ok(JobResult::Test(report)),
+                Err(ArkxError::Cancelled) => Err(ArkxError::Cancelled),
+                Err(_) => Ok(JobResult::TestSkipped),
+            },
             JobKind::OpenWith {
                 archive,
                 entry,
@@ -351,16 +376,34 @@ impl WorkerPool {
     }
 
     pub fn submit(&mut self, kind: JobKind) {
-        let job = Job { kind };
-        let _ = self.tx.send(job);
+        // A foreground job supersedes the background integrity check: it would
+        // read the very archive this one is about to read or rewrite.
+        self.cancel_background();
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        let _ = self.tx.send(Job { kind, epoch });
     }
 
     pub fn try_recv(&self) -> Option<WorkerEvent> {
         self.rx.try_recv().ok()
     }
 
+    /// Stop the background job (the open-time integrity check) only. No-op
+    /// when none is running: the flag is cleared by its own job thread.
+    pub fn cancel_background(&self) {
+        if let Some(f) = self
+            .background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            f.store(true, Ordering::Relaxed);
+        }
+    }
+
     pub fn cancel_all(&self) {
-        self.cancelled.store(true, Ordering::Relaxed);
+        // Generation bump, not a latch: jobs submitted after this cancel must
+        // still run, and the ones already queued must not.
+        self.epoch.fetch_add(1, Ordering::Relaxed);
         for f in self
             .cancel_flags
             .lock()
@@ -381,5 +424,58 @@ impl Default for WorkerPool {
 impl Drop for WorkerPool {
     fn drop(&mut self) {
         self.cancel_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_test_skips_unreadable_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("broken.zip");
+        std::fs::write(&archive, b"not a zip").unwrap();
+        let result = WorkerPool::execute_job(
+            &BackendManager::new(),
+            Job {
+                kind: JobKind::Test {
+                    archive,
+                    entries: None,
+                    password: None,
+                },
+                epoch: 0,
+            },
+            |_| {},
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
+        assert!(matches!(result, JobResult::TestSkipped));
+    }
+
+    #[test]
+    fn a_cancel_does_not_poison_the_pool() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("plain.txt");
+        std::fs::write(&archive, b"x").unwrap();
+        let mut pool = WorkerPool::new();
+        pool.cancel_all();
+        pool.submit(JobKind::SetComment {
+            archive,
+            comment: "after a cancel".to_string(),
+        });
+        // A latch would drop this job: Started is only sent for accepted jobs.
+        let started = std::thread::spawn(move || {
+            for _ in 0..200 {
+                if let Some(WorkerEvent::Started { .. }) = pool.try_recv() {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            false
+        })
+        .join()
+        .unwrap();
+        assert!(started, "job submitted after cancel_all never ran");
     }
 }

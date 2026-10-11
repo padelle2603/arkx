@@ -1,5 +1,7 @@
+use arkx::core::archive::ArchiveBackend;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 fn backend() -> arkx::core::backends::BackendManager {
@@ -42,6 +44,66 @@ fn create_src_dir(base: &std::path::Path) -> (PathBuf, Vec<PathBuf>) {
     (src.clone(), vec![src])
 }
 
+fn zip_with_stale_unicode_extra() -> Vec<u8> {
+    const NAME: &[u8] = b"hello.txt";
+    const DATA: &[u8] = b"hello\n";
+    let crc = crc32fast::hash(DATA);
+    let unicode_len = 5 + NAME.len();
+    let extra_len = 4 + unicode_len;
+    let central_offset = 30 + NAME.len() + DATA.len();
+    let central_size = 46 + NAME.len() + extra_len;
+    let mut zip = Vec::new();
+
+    zip.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+    zip.extend_from_slice(&20u16.to_le_bytes());
+    zip.extend_from_slice(&0x0800u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0x21u16.to_le_bytes());
+    zip.extend_from_slice(&crc.to_le_bytes());
+    zip.extend_from_slice(&(DATA.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(DATA.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(NAME);
+    zip.extend_from_slice(DATA);
+
+    zip.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+    zip.extend_from_slice(&0x031eu16.to_le_bytes());
+    zip.extend_from_slice(&20u16.to_le_bytes());
+    zip.extend_from_slice(&0x0800u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0x21u16.to_le_bytes());
+    zip.extend_from_slice(&crc.to_le_bytes());
+    zip.extend_from_slice(&(DATA.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(DATA.len() as u32).to_le_bytes());
+    zip.extend_from_slice(&(NAME.len() as u16).to_le_bytes());
+    zip.extend_from_slice(&(extra_len as u16).to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&(0o100644u32 << 16).to_le_bytes());
+    zip.extend_from_slice(&0u32.to_le_bytes());
+    zip.extend_from_slice(NAME);
+    zip.extend_from_slice(&0x7075u16.to_le_bytes());
+    zip.extend_from_slice(&(unicode_len as u16).to_le_bytes());
+    zip.push(1);
+    zip.extend_from_slice(&0u32.to_le_bytes());
+    zip.extend_from_slice(NAME);
+
+    zip.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+    zip.extend_from_slice(&1u16.to_le_bytes());
+    zip.extend_from_slice(&1u16.to_le_bytes());
+    zip.extend_from_slice(&(central_size as u32).to_le_bytes());
+    zip.extend_from_slice(&(central_offset as u32).to_le_bytes());
+    zip.extend_from_slice(&0u16.to_le_bytes());
+
+    zip
+}
+
 #[test]
 fn zip_roundtrip() {
     let tmp = tempfile::tempdir().unwrap();
@@ -73,6 +135,27 @@ fn zip_roundtrip() {
         b"nested content"
     );
     assert!(extract_dir.join("src/empty_folder").is_dir());
+}
+
+#[test]
+fn zip_integrity_falls_back_for_stale_unicode_extra() {
+    let cancel = Arc::new(AtomicBool::new(false));
+    let seven = arkx::core::backends::seven_zip::SevenZipBackend::with_cancel(cancel.clone());
+    if !seven.is_available() {
+        eprintln!("7-Zip not found: skipping ZIP fallback test");
+        return;
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let archive = tmp.path().join("unicode.zip");
+    fs::write(&archive, zip_with_stale_unicode_extra()).unwrap();
+
+    let native = arkx::core::backends::native::NativeBackend::with_cancel(cancel);
+    assert!(native.test(&archive, None, None).is_err());
+
+    let report = backend().test(&archive, None, None).unwrap();
+    assert_eq!(report.failed, 0);
+    assert!(report.passed > 0);
 }
 
 #[test]
