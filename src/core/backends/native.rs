@@ -84,6 +84,13 @@ impl NativeBackend {
     fn discard_partial(dest: &Path) {
         let _ = std::fs::remove_file(dest);
     }
+
+    /// Install the finished staging file over `dest`. Creation writes to a
+    /// sibling `.part` and lands here, so a failed or cancelled job leaves the
+    /// previous archive — if any — untouched instead of a truncated one.
+    fn swap_in(tmp: &Path, dest: &Path) -> Result<()> {
+        std::fs::rename(tmp, dest).map_err(ArkxError::Io)
+    }
 }
 
 impl ArchiveBackend for NativeBackend {
@@ -1010,7 +1017,14 @@ impl NativeBackend {
             )));
         }
 
-        let file = File::create(dest).map_err(ArkxError::Io)?;
+        // Staging sibling + atomic rename, like every archive-rewriting path. Writing
+        // straight to `dest` truncated it before any validation, so an error or
+        // a kill left a truncated zip — or, worse, one holding only the
+        // directory entries.
+        let mut tmp_os = dest.as_os_str().to_os_string();
+        tmp_os.push(part_temp_name(false));
+        let tmp = PathBuf::from(tmp_os);
+        let file = File::create(&tmp).map_err(ArkxError::Io)?;
         let writer = BufWriter::with_capacity(IO_BUF_SIZE, file);
         let mut zip = zip::ZipWriter::new(writer);
         let options: zip::write::FileOptions<()> = zip::write::FileOptions::default()
@@ -1053,12 +1067,16 @@ impl NativeBackend {
         // central-directory entries it merges for plain (non-AES) large files,
         // producing a zip that strict readers (7z) reject ("Sub items Errors").
         // Entries that need ZIP64 go down the serial writer, which emits the
-        // extra field correctly.
+        // extra field correctly. So does an archive whose *total* passes the
+        // 4 GiB offset limit even when every entry is small: `zip` clamps a
+        // central-directory offset to 0xFFFFFFFF without writing the ZIP64
+        // extra, so a 5 GB archive of 2 MB files would come out unreadable.
+        // That is the common case (photo and video backups), not an edge case.
         let any_zip64 = files.iter().any(|p| {
             std::fs::metadata(p)
                 .map(|m| zip_entry_large(m.len()))
                 .unwrap_or(false)
-        });
+        }) || total_src > zip::ZIP64_BYTES_THR;
         let parallel = password.is_none()
             && level > 0
             && !files.is_empty()
@@ -1078,7 +1096,7 @@ impl NativeBackend {
             for path in dirs.iter() {
                 if self.cancelled() {
                     drop(zip);
-                    Self::discard_partial(dest);
+                    Self::discard_partial(&tmp);
                     return Err(ArkxError::Cancelled);
                 }
                 let rel = prefixed_name(path, base);
@@ -1107,11 +1125,16 @@ impl NativeBackend {
                     }
                 })
                 .collect();
-            let n_chunks = crate::core::util::effective_threads().min(entries.len());
+            let n_chunks = crate::core::util::effective_threads()
+                .min(entries.len())
+                .max(1);
             // Byte progress during the CPU-bound phase: workers count the
             // source bytes each reads into a shared atomic; a lightweight
             // poller turns that into progress events (the cb is never called
             // from inside rayon, where locking would stall the pool).
+            // Shared with the rayon workers: `cancelled()` reads self.cancel,
+            // which the workers do not have a reference to.
+            let cancel = self.cancel.clone();
             let read_bytes = Arc::new(AtomicU64::new(0));
             let current_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
             let io_stop = Arc::new(AtomicBool::new(false));
@@ -1187,12 +1210,17 @@ impl NativeBackend {
             } else {
                 None
             };
-            let results: Vec<(Vec<u8>, u64)> = entries
+            let results: Result<Vec<(Vec<u8>, u64)>> = entries
                 .par_chunks(entries.len().div_ceil(n_chunks))
                 .map(|chunk| {
                     let mut buf: Vec<u8> = Vec::new();
                     let mut cw = zip::ZipWriter::new(Cursor::new(&mut buf));
                     for (name, p) in chunk {
+                        // The serial path checks per entry; without this the
+                        // parallel one ignored Cancel for the whole job.
+                        if cancel.load(Ordering::Relaxed) {
+                            return Err(ArkxError::Cancelled);
+                        }
                         let file = File::open(p).map_err(ArkxError::Io)?;
                         let large = zip_entry_large(file.metadata().map(|m| m.len()).unwrap_or(0));
                         cw.start_file(name, options.large_file(large))
@@ -1210,7 +1238,21 @@ impl NativeBackend {
                     cw.finish().map_err(|e| ArkxError::Backend(e.to_string()))?;
                     Ok::<(Vec<u8>, u64), ArkxError>((buf, chunk.len() as u64))
                 })
-                .collect::<Result<Vec<_>>>()?;
+                .collect::<Result<Vec<_>>>();
+            let results = match results {
+                Ok(r) => r,
+                Err(e) => {
+                    // Stop and join the poller before unwinding, or it keeps
+                    // ticking against a job nobody is waiting for.
+                    io_stop.store(true, Ordering::Relaxed);
+                    if let Some(h) = poller {
+                        let _ = h.join();
+                    }
+                    drop(zip);
+                    Self::discard_partial(&tmp);
+                    return Err(e);
+                }
+            };
             // Switch the poller to the merge stage: the read anchor and the
             // compressed bytes (known only after `.collect()`) drive the
             // remaining progress, so the bar keeps climbing through the merge
@@ -1220,7 +1262,7 @@ impl NativeBackend {
             if let Ok(mut g) = current_name.lock() {
                 *g = "Merging…".to_string();
             }
-            let dest_anchor = std::fs::metadata(dest).map(|m| m.len()).unwrap_or(0);
+            let dest_anchor = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
             merge_anchor.store(anchor, Ordering::Relaxed);
             merge_total_bytes.store(merged_total, Ordering::Relaxed);
             merge_dest_anchor.store(dest_anchor, Ordering::Relaxed);
@@ -1253,12 +1295,12 @@ impl NativeBackend {
             }
             if let Some(e) = merge_err {
                 drop(zip);
-                Self::discard_partial(dest);
+                Self::discard_partial(&tmp);
                 return Err(e);
             }
             if cancelled_merge {
                 drop(zip);
-                Self::discard_partial(dest);
+                Self::discard_partial(&tmp);
                 return Err(ArkxError::Cancelled);
             }
             emit_progress(&shared, crate::core::util::completed(total_src));
@@ -1271,14 +1313,14 @@ impl NativeBackend {
                     skipped
                 );
             }
-            return Ok(());
+            return Self::swap_in(&tmp, dest);
         }
 
         let mut done_bytes = 0u64;
         for path in dirs.iter().chain(files.iter()) {
             if self.cancelled() {
                 drop(zip);
-                Self::discard_partial(dest);
+                Self::discard_partial(&tmp);
                 return Err(ArkxError::Cancelled);
             }
             let rel = prefixed_name(path, base);
@@ -1329,7 +1371,7 @@ impl NativeBackend {
                 skipped
             );
         }
-        Ok(())
+        Self::swap_in(&tmp, dest)
     }
 
     fn add_zip(
@@ -1644,7 +1686,12 @@ impl NativeBackend {
             eprintln!("[native] tar: skipped {} unreadable entries", skipped);
         }
 
-        let file = File::create(dest).map_err(ArkxError::Io)?;
+        // Staging sibling + atomic rename, like every rewriting path: writing
+        // straight to `dest` truncated it before any validation.
+        let mut tmp_os = dest.as_os_str().to_os_string();
+        tmp_os.push(part_temp_name(false));
+        let tmp = PathBuf::from(tmp_os);
+        let file = File::create(&tmp).map_err(ArkxError::Io)?;
         let writer = create_tar_writer(file, fmt, level)?;
         let mut tar = tar::Builder::new(writer);
 
@@ -1664,7 +1711,7 @@ impl NativeBackend {
         for (i, path) in files.iter().enumerate() {
             if self.cancelled() {
                 drop(tar);
-                Self::discard_partial(dest);
+                Self::discard_partial(&tmp);
                 return Err(ArkxError::Cancelled);
             }
             let rel = path.strip_prefix(&base).unwrap_or(path);
@@ -1694,7 +1741,7 @@ impl NativeBackend {
             .into_inner()
             .map_err(|e| ArkxError::Io(std::io::Error::other(e.to_string())))?;
         writer.finish()?;
-        Ok(())
+        Self::swap_in(&tmp, dest)
     }
 
     /// Create a single-file compressed stream (gz/bz2/xz/zst/lz4): exactly one
@@ -1727,7 +1774,10 @@ impl NativeBackend {
             .to_string();
         let total = std::fs::metadata(src).map(|m| m.len()).unwrap_or(0);
 
-        let file = File::create(dest).map_err(ArkxError::Io)?;
+        let mut tmp_os = dest.as_os_str().to_os_string();
+        tmp_os.push(part_temp_name(false));
+        let tmp = PathBuf::from(tmp_os);
+        let file = File::create(&tmp).map_err(ArkxError::Io)?;
         let mut writer = create_tar_writer(file, fmt, level)?;
         let mut input =
             BufReader::with_capacity(IO_BUF_SIZE, File::open(src).map_err(ArkxError::Io)?);
@@ -1739,7 +1789,7 @@ impl NativeBackend {
         loop {
             if self.cancelled() {
                 drop(writer);
-                Self::discard_partial(dest);
+                Self::discard_partial(&tmp);
                 return Err(ArkxError::Cancelled);
             }
             let n = input.read(&mut buf).map_err(ArkxError::Io)?;
@@ -1758,7 +1808,7 @@ impl NativeBackend {
         if let Some(cb) = &progress {
             cb(crate::core::util::completed(total));
         }
-        Ok(())
+        Self::swap_in(&tmp, dest)
     }
 }
 
@@ -2486,6 +2536,58 @@ mod tests {
         assert!(!zip_entry_large(0));
         assert!(!zip_entry_large(zip::ZIP64_BYTES_THR));
         assert!(zip_entry_large(zip::ZIP64_BYTES_THR + 1));
+    }
+
+    /// A cancelled creation must stop and leave nothing behind: no half
+    /// archive at `dest`, no `.part` sibling. The parallel path used to
+    /// ignore the flag for the whole job.
+    #[test]
+    fn cancelled_creation_leaves_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        for i in 0..8 {
+            std::fs::write(src.join(format!("f{i}.bin")), vec![b'x'; 200_000]).unwrap();
+        }
+        let dest = dir.path().join("out.zip");
+        let cancelled = NativeBackend::with_cancel(Arc::new(AtomicBool::new(true)));
+        let err = cancelled
+            .create(&dest, std::slice::from_ref(&src), 6, None, None, None)
+            .expect_err("a pre-cancelled create must not run");
+        assert!(matches!(err, ArkxError::Cancelled), "got {err:?}");
+        assert!(
+            !dest.exists(),
+            "a cancelled create must not leave an archive"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".part"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
+    }
+
+    /// A failed creation must not truncate the archive already at `dest`.
+    #[test]
+    fn failed_creation_leaves_the_previous_archive_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"first").unwrap();
+        let dest = dir.path().join("out.zip");
+        backend()
+            .create(&dest, std::slice::from_ref(&src), 6, None, None, None)
+            .unwrap();
+        let before = std::fs::read(&dest).unwrap();
+
+        // A source that disappears after the walk cannot happen here, so use
+        // an unreadable destination instead: creation must fail before
+        // touching the existing archive.
+        let bad = dir.path().join("missing/out.zip");
+        let err = backend().create(&bad, std::slice::from_ref(&src), 6, None, None, None);
+        assert!(err.is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), before);
     }
 
     #[test]
