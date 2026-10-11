@@ -90,6 +90,43 @@ pub struct Job {
     pub epoch: u64,
 }
 
+/// What a running job *is*, as a type the GUI can match on. Jobs used to be
+/// routed by their debug string, so adding a `JobKind` variant compiled fine
+/// and silently broke the UI. `NewFolder` deliberately shares `Add`'s tag:
+/// both rewrite the archive and show the same progress window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobTag {
+    List,
+    Extract,
+    Add,
+    Remove,
+    Rename,
+    Test,
+    Paste,
+    OpenWith,
+    SecureDelete,
+    Comment,
+    Hash,
+}
+
+impl JobKind {
+    pub fn tag(&self) -> JobTag {
+        match self {
+            JobKind::List { .. } => JobTag::List,
+            JobKind::Extract { .. } => JobTag::Extract,
+            JobKind::Add { .. } | JobKind::NewFolder { .. } => JobTag::Add,
+            JobKind::Remove { .. } => JobTag::Remove,
+            JobKind::Rename { .. } => JobTag::Rename,
+            JobKind::Test { .. } => JobTag::Test,
+            JobKind::Paste { .. } => JobTag::Paste,
+            JobKind::OpenWith { .. } => JobTag::OpenWith,
+            JobKind::SecureDelete { .. } => JobTag::SecureDelete,
+            JobKind::SetComment { .. } => JobTag::Comment,
+            JobKind::EntryHash { .. } => JobTag::Hash,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum JobResult {
     List(crate::core::archive::ArchiveInfo),

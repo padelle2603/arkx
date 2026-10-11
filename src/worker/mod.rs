@@ -6,5 +6,5 @@
 pub mod job;
 pub mod pool;
 
-pub use job::{Job, JobKind, JobResult};
+pub use job::{Job, JobKind, JobResult, JobTag};
 pub use pool::{WorkerEvent, WorkerPool};

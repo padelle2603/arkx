@@ -18,7 +18,7 @@ use crate::ui::browser::{
 };
 use crate::ui::dialogs;
 use crate::ui::progress_window::ProgressWindow;
-use crate::worker::{JobKind, JobResult, WorkerEvent, WorkerPool};
+use crate::worker::{JobKind, JobResult, JobTag, WorkerEvent, WorkerPool};
 
 /// Path queued by the file-manager `GApplication::open` handler. `build_ui`
 /// drains it when it constructs the window (a `gio open` path is NOT in argv).
@@ -1959,7 +1959,7 @@ pub fn build_ui(app: &adw::Application) {
         for evt in events {
             match evt {
                 WorkerEvent::Started { kind } => {
-                    if kind == "test" {
+                    if kind == JobTag::Test {
                         start_background_test(&ui_poll);
                         continue;
                     }
@@ -1969,15 +1969,15 @@ pub fn build_ui(app: &adw::Application) {
                     ui_poll.extract_sel.set_sensitive(false);
                     ui_poll.props.set_sensitive(false);
                     status_left.set_text("Working…");
-                    if kind == "extract" || kind == "add" || kind == "remove" {
-                        let (title, verb) = match kind.as_str() {
-                            "add" => ("Adding to archive", "Adding"),
-                            "remove" => ("Removing from archive", "Removing"),
+                    if matches!(kind, JobTag::Extract | JobTag::Add | JobTag::Remove) {
+                        let (title, verb) = match kind {
+                            JobTag::Add => ("Adding to archive", "Adding"),
+                            JobTag::Remove => ("Removing from archive", "Removing"),
                             _ => ("Extraction in progress", "Extracting"),
                         };
                         // Password-first flow: no progress bar yet, the unlock
                         // reopens on a wrong password (window beats error flash).
-                        if kind == "extract" && *ui_poll.pending_password.borrow() {
+                        if kind == JobTag::Extract && *ui_poll.pending_password.borrow() {
                             status_left.set_text("Verifying password…");
                             continue;
                         }
@@ -2420,7 +2420,7 @@ pub fn build_ui(app: &adw::Application) {
                     // foreground job that replaced it. `kind` (not a timing
                     // guess) decides: a cancelled extract reports the same
                     // `Cancelled` error and must keep clearing `is_busy`.
-                    if kind == "test" {
+                    if kind == JobTag::Test {
                         end_background_test(&ui_poll);
                         continue;
                     }

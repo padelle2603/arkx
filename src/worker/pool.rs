@@ -1,7 +1,7 @@
 use crate::core::archive::ProgressInfo;
 use crate::core::backends::BackendManager;
 use crate::core::error::ArkxError;
-use crate::worker::{Job, JobKind, JobResult};
+use crate::worker::{Job, JobKind, JobResult, JobTag};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{
@@ -17,7 +17,7 @@ use std::thread;
 #[derive(Debug)]
 pub enum WorkerEvent {
     Started {
-        kind: String,
+        kind: JobTag,
     },
     Progress {
         info: ProgressInfo,
@@ -26,10 +26,10 @@ pub enum WorkerEvent {
         result: Result<JobResult, ArkxError>,
     },
     Error {
-        /// Job kind that failed, same labels as `Started`. The GUI needs it:
-        /// a cancelled job and a superseded background check both arrive here,
+        /// Job kind that failed, same value as `Started`. The GUI needs it: a
+        /// cancelled job and a superseded background check both arrive here,
         /// and only the kind tells them apart.
-        kind: String,
+        kind: JobTag,
         err: ArkxError,
     },
 }
@@ -65,24 +65,10 @@ impl WorkerPool {
         let bg_track = background.clone();
         thread::spawn(move || {
             while let Ok(Job { kind: job, epoch }) = job_rx.recv() {
-                let kind_str = match &job {
-                    JobKind::List { .. } => "list",
-                    JobKind::Extract { .. } => "extract",
-                    JobKind::Add { .. } => "add",
-                    JobKind::NewFolder { .. } => "add",
-                    JobKind::Remove { .. } => "remove",
-                    JobKind::Rename { .. } => "rename",
-                    JobKind::Test { .. } => "test",
-                    JobKind::Paste { .. } => "paste",
-                    JobKind::OpenWith { .. } => "open-with",
-                    JobKind::SecureDelete { .. } => "secure-delete",
-                    JobKind::SetComment { .. } => "comment",
-                    JobKind::EntryHash { .. } => "hash",
-                }
-                .to_string();
+                let kind = job.tag();
                 if epoch < current_epoch.load(Ordering::Relaxed) {
                     let _ = evt_tx.send(WorkerEvent::Error {
-                        kind: kind_str,
+                        kind,
                         err: ArkxError::Cancelled,
                     });
                     continue;
@@ -94,13 +80,11 @@ impl WorkerPool {
                     .push(cancel_flag.clone());
                 // Only the open-time integrity check runs in the background;
                 // everything else is foreground and may supersede it.
-                let is_background = kind_str == "test";
+                let is_background = kind == JobTag::Test;
                 if is_background {
                     *bg_track.lock().unwrap_or_else(|e| e.into_inner()) = Some(cancel_flag.clone());
                 }
-                let _ = evt_tx.send(WorkerEvent::Started {
-                    kind: kind_str.clone(),
-                });
+                let _ = evt_tx.send(WorkerEvent::Started { kind });
                 let evt_tx_clone = evt_tx.clone();
                 let evt_tx_inner = evt_tx.clone();
                 let job_flags = flags.clone();
@@ -135,7 +119,7 @@ impl WorkerPool {
                                 || cancel_flag.load(Ordering::Relaxed);
                             if was_cancelled {
                                 let _ = evt_tx_inner.send(WorkerEvent::Error {
-                                    kind: kind_str,
+                                    kind,
                                     err: ArkxError::Cancelled,
                                 });
                             } else {
@@ -481,6 +465,99 @@ mod tests {
             result.is_err(),
             "a corrupt archive must surface, not vanish into a skip"
         );
+    }
+
+    /// Every `JobKind` must reach the GUI under a tag it can match on: a
+    /// new variant that forgot `JobKind::tag` would not compile, and one that
+    /// forgot to be handled in the UI would silently get no progress window.
+    #[test]
+    fn every_job_kind_has_a_distinct_tag() {
+        let p = PathBuf::from("a");
+        let kinds = [
+            JobKind::List {
+                path: p.clone(),
+                password: None,
+            },
+            JobKind::Extract {
+                archive: p.clone(),
+                dest: p.clone(),
+                entries: None,
+                password: None,
+                total_bytes: None,
+                total_entries: None,
+            },
+            JobKind::Add {
+                archive: p.clone(),
+                sources: Vec::new(),
+                password: None,
+            },
+            JobKind::NewFolder {
+                archive: p.clone(),
+                name: "d".into(),
+                password: None,
+            },
+            JobKind::Remove {
+                archive: p.clone(),
+                entries: Vec::new(),
+                password: None,
+            },
+            JobKind::Rename {
+                archive: p.clone(),
+                old_name: "a".into(),
+                new_name: "b".into(),
+                password: None,
+            },
+            JobKind::Test {
+                archive: p.clone(),
+                entries: None,
+                password: None,
+            },
+            JobKind::Paste {
+                archive: p.clone(),
+                dest: String::new(),
+                source_archive: p.clone(),
+                entries: Vec::new(),
+                cut: false,
+                password: None,
+            },
+            JobKind::OpenWith {
+                archive: p.clone(),
+                entry: "a".into(),
+                password: None,
+            },
+            JobKind::SecureDelete {
+                archive: p.clone(),
+                entries: Vec::new(),
+                passes: 1,
+                password: None,
+            },
+            JobKind::SetComment {
+                archive: p.clone(),
+                comment: String::new(),
+            },
+            JobKind::EntryHash {
+                archive: p,
+                entry: "a".into(),
+                password: None,
+            },
+        ];
+        // `NewFolder` shares `Add`'s tag on purpose: both rewrite the archive.
+        let expected = [
+            JobTag::List,
+            JobTag::Extract,
+            JobTag::Add,
+            JobTag::Add,
+            JobTag::Remove,
+            JobTag::Rename,
+            JobTag::Test,
+            JobTag::Paste,
+            JobTag::OpenWith,
+            JobTag::SecureDelete,
+            JobTag::Comment,
+            JobTag::Hash,
+        ];
+        let tags: Vec<JobTag> = kinds.iter().map(JobKind::tag).collect();
+        assert_eq!(tags, expected);
     }
 
     #[test]
