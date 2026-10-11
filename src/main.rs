@@ -106,7 +106,8 @@ Commands:
                [--to <dest>] [--dialog] [--progress] <file...>
                                    Compress files/folders Dolphin-style:
                                    default creates <name>.<fmt> next to
-                                   the sources without overwriting.
+                                   the sources without overwriting
+                                   (--here is accepted, it is the default).
                                    --progress shows the in-app progress
                                    window (auto-closes, then notifies).
                                     (Ark parity: Compress to zip.../tar.gz.../7zip...)
@@ -1168,7 +1169,6 @@ fn parse_extract_args(args: &[String]) -> anyhow::Result<ExtractArgs> {
 ///   arkx compress --to out.7z <file...> [-l 9] [-p pwd]
 fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> anyhow::Result<()> {
     let mut format = "zip".to_string();
-    let mut here = false;
     let mut dialog = false;
     let mut to: Option<PathBuf> = None;
     let mut level = crate::core::config::compression_level();
@@ -1185,7 +1185,9 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             continue;
         }
         match args[i].as_str() {
-            "--here" => here = true,
+            // Accepted for compatibility: it has always been the default here, and the
+            // file-manager service menus pass it explicitly.
+            "--here" => {}
             "--dialog" => dialog = true,
             "--progress" | "--gui" => progress = true,
             "--no-progress" | "--text" => no_progress = true,
@@ -1272,8 +1274,7 @@ fn run_compress(backend: &core::backends::BackendManager, args: &[String]) -> an
             crate::core::fm::uniquify(&ensure_archive_extension(t, &format))
         }
     } else {
-        // --here or default: next to sources, without overwriting (like Ark)
-        let _ = here; // default is equivalent to --here
+        // Default: next to sources, without overwriting (like Ark).
         crate::core::fm::default_archive_path(&sources, &format)
     };
 

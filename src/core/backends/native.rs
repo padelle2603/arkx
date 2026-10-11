@@ -2387,34 +2387,36 @@ impl NativeBackend {
             let _ = std::fs::remove_file(&tmp);
             return result;
         }
-        // Overwrite the original archive's inode data before replacing
-        // it with the clean archive. The original inode contained the
-        // entries-to-delete data; after overwrite it's unrecoverable.
-        for _ in 0..passes {
-            let mut f = File::create(archive).map_err(ArkxError::Io)?;
+        // Swap the clean archive in atomically BEFORE wiping. Holding the original
+        // inode open first means it is reachable only through our own descriptor, so
+        // a crash leaves a usable archive instead of a wiped one.
+        let mut original = File::options()
+            .write(true)
+            .open(archive)
+            .map_err(ArkxError::Io)?;
+        use std::io::{Seek as _WriteSeek, Write as _Write};
+        std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
+        // Overwrite the original inode's data: the deleted entries are unrecoverable
+        // from it, and the archive sitting at `archive` is the clean one.
+        for pass in 0..=passes {
+            original
+                .seek(std::io::SeekFrom::Start(0))
+                .map_err(ArkxError::Io)?;
             let mut urandom = File::open("/dev/urandom").map_err(ArkxError::Io)?;
             let mut buf = vec![0u8; COPY_CHUNK];
             let mut written = 0u64;
             while written < archive_len {
                 let n = std::cmp::min(buf.len() as u64, archive_len - written) as usize;
-                urandom.read_exact(&mut buf[..n]).map_err(ArkxError::Io)?;
-                f.write_all(&buf[..n]).map_err(ArkxError::Io)?;
+                if pass == 0 {
+                    urandom.read_exact(&mut buf[..n]).map_err(ArkxError::Io)?;
+                } else {
+                    buf[..n].fill(0);
+                }
+                original.write_all(&buf[..n]).map_err(ArkxError::Io)?;
                 written += n as u64;
             }
-            f.flush().map_err(ArkxError::Io)?;
+            original.flush().map_err(ArkxError::Io)?;
         }
-        {
-            let mut f = File::create(archive).map_err(ArkxError::Io)?;
-            let zeros = vec![0u8; COPY_CHUNK];
-            let mut written = 0u64;
-            while written < archive_len {
-                let n = std::cmp::min(zeros.len() as u64, archive_len - written) as usize;
-                f.write_all(&zeros[..n]).map_err(ArkxError::Io)?;
-                written += n as u64;
-            }
-            f.flush().map_err(ArkxError::Io)?;
-        }
-        std::fs::rename(&tmp, archive).map_err(ArkxError::Io)?;
         Ok(())
     }
 }
@@ -2434,6 +2436,34 @@ mod tests {
         assert!(!zip_entry_large(0));
         assert!(!zip_entry_large(zip::ZIP64_BYTES_THR));
         assert!(zip_entry_large(zip::ZIP64_BYTES_THR + 1));
+    }
+
+    #[test]
+    fn secure_delete_keeps_a_readable_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("a.zip");
+        let keep = dir.path().join("keep.txt");
+        let drop = dir.path().join("drop.txt");
+        std::fs::write(&keep, b"keep").unwrap();
+        std::fs::write(&drop, b"secret").unwrap();
+        backend()
+            .create(&archive, &[keep.clone(), drop], 6, None, None, None)
+            .unwrap();
+        backend()
+            .secure_delete(&archive, &["drop.txt".to_string()], 1, None, None)
+            .unwrap();
+        // The archive in place must still be a valid zip with the survivor.
+        let info = backend().list(&archive).unwrap();
+        let names: Vec<&str> = info.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(names, vec!["keep.txt"]);
+        // No staging leftovers.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".part"))
+            .collect();
+        assert!(leftovers.is_empty(), "staging left behind: {leftovers:?}");
     }
 
     #[test]

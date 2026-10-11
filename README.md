@@ -60,6 +60,18 @@ Right-click files inside an archive to extract just what you selected. Wrong pas
 - **Hybrid backends**: native Rust streaming for ZIP/TAR plus multithreaded `7z` for RAR/7Z/ISO/CAB and friends, with automatic fallback
 - **File-manager feel**: breadcrumb navigation, live filter, dark responsive layout, drag & drop
 - **Resilient**: corrupt archives warn instead of crashing; long/emoji/CJK names display fine
+- **Checks before it writes**: an extraction that won't fit is confirmed up front, and entry names are refused if they would escape the destination
+
+### Known limits
+
+- **A 16 GiB decompression quota was removed.** Earlier versions refused to
+  decompress past 16 GiB to stop zip bombs, which also blocked legitimate large
+  games. Extraction now only checks free space up front — a small archive that
+  expands to hundreds of GB will fill your disk.
+- **Passwords passed to `7z`, `zip` and `rar` are visible in the process list**
+  (`/proc/<pid>/cmdline` is world-readable). 7-Zip cannot read a password from
+  stdin in non-interactive mode, so there is no way around this for the formats
+  that route through it. ZIP and TAR extraction stay fully native.
 
 ## Build from source
 

@@ -1,5 +1,37 @@
 # Changelog
 
+## Unreleased
+
+- **Fixed**: the open-time integrity check no longer locks the application. It
+  runs in the background without taking the busy flag, so a huge archive stays
+  browsable and extractable while the CRC pass reads it; it honours cancellation
+  (previously `test_zip` ignored the cancel flag entirely) and shows a
+  cancellable window only after a short delay, so small archives stay silent.
+- **Fixed**: cancelling a job no longer poisons the worker pool. `cancel_all`
+  set a latch that was never cleared, so every job submitted afterwards was
+  dropped before it could start. Jobs now carry the cancel generation they were
+  submitted in.
+- **Fixed**: temp staging directories (open-with, paste, hashing, 7z add) were
+  created world-readable (`0755`) with a name derived from the pid, so any
+  local user could read the staged files or pre-create the path as a symlink.
+  They are now `0700` with an unpredictable name.
+- **Fixed**: entries handled one at a time (open-with, hashing, paste) joined
+  the entry name onto the staging directory without a traversal check —
+  `normalize` strips `./` but not `..`. They now go through the same
+  `secure_join` the extraction path uses.
+- **Fixed**: the integrity check reported every error as "skipped", so a corrupt
+  archive produced no report at all and read as healthy. Only a format the
+  backend cannot verify is silent now.
+- **Fixed**: `secure_delete` overwrote the original archive before installing
+  the clean one, losing the archive on a crash or a full disk. The clean archive
+  is now swapped in atomically first and the original inode is wiped through a
+  descriptor it holds open.
+- **Added**: a free-space preflight warns before an extraction that does not fit
+  the destination, which creation already did. The user chooses.
+- **Changed**: the 16 GiB decompression quota is **removed** from all three
+  backends. It stopped zip bombs but also refused legitimate large archives
+  (a 60 GiB game could not be extracted). See README "Known limits".
+
 ## v1.6.3 — parallel zip creation, per-entry extract progress, MT xz
 
 - **Perf**: zip creation now compresses files in parallel (each worker emits an
