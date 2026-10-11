@@ -28,6 +28,8 @@
   descriptor it holds open.
 - **Added**: a free-space preflight warns before an extraction that does not fit
   the destination, which creation already did. The user chooses.
+- **Added**: the properties window shows the unix permission bits of a selected
+  entry, for the formats that record them (tar, zip on unix, bsdtar).
 - **Changed**: the 16 GiB decompression quota is **removed** from all three
   backends. It stopped zip bombs but also refused legitimate large archives
   (a 60 GiB game could not be extracted). See README "Known limits".
