@@ -506,9 +506,12 @@ impl NativeBackend {
         // Real total bytes (may be 0 for empty archives: no fake max(1)).
         // The central-directory pass is cheap (never decompresses) and doubles
         // as a first-pass entropy check, so it runs unless the caller already
-        // provided the byte total from the listing.
+        // provided the byte total from the listing. With no progress to show
+        // it — open-with, hashing, paste — the total has no consumer, so skip
+        // it: the other three backends already gate it on `progress`.
         let total_bytes: u64 = match known_total {
             Some(t) => t,
+            None if progress.is_none() => 0,
             None => match &sels {
                 Some(sels) => {
                     let mut sum = 0u64;
@@ -713,10 +716,26 @@ impl NativeBackend {
         let mut processed_bytes = 0u64;
         // Reused across entries to avoid one 64KB allocation per file.
         let mut buf = vec![0u8; COPY_CHUNK];
+        // Selectors still to satisfy, so a filtered extraction can stop once
+        // it has everything instead of walking a tar to the end. A tar stream
+        // has no index and our reader is not seekable (`Box<dyn Read>`), so a
+        // non-matching entry costs a read+discard.
+        //
+        // Only for selections without a trailing slash: a directory selector
+        // ("dir/") matches its own entry *and* every file under it, so one
+        // match does not mean "done". Compressed tars gain nothing here (the
+        // reader decompresses everything up to that point regardless).
+        let mut pending: Option<Vec<String>> = filter
+            .as_ref()
+            .filter(|f| f.iter().all(|s| !s.ends_with('/')))
+            .and_then(|_| sels.clone());
         for entry in ar
             .entries()
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?
         {
+            if pending.as_ref().is_some_and(|p| p.is_empty()) {
+                break;
+            }
             if self.cancelled() {
                 return Err(ArkxError::Cancelled);
             }
@@ -734,6 +753,9 @@ impl NativeBackend {
                     .any(|f| crate::core::paths::entry_matches_norm(&path_norm, f))
                 {
                     continue;
+                }
+                if let Some(p) = pending.as_mut() {
+                    p.retain(|sel| !crate::core::paths::entry_matches_norm(&path_norm, sel));
                 }
             }
             // Regular files: chunked copy with throttled progress (not per-file)
@@ -2262,8 +2284,11 @@ impl NativeBackend {
         let file = File::open(archive).map_err(ArkxError::Io)?;
         let mut z = zip::ZipArchive::new(BufReader::with_capacity(ZIP_READ_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
-        let idx = (0..z.len())
-            .find(|&i| z.by_index(i).ok().map(|f| f.name().to_string()) == Some(entry.to_string()))
+        // `index_for_name` is a hash lookup on the archive's own name index; the
+        // linear `find` this replaced did one lseek and two allocations per
+        // entry examined, so "open this one file" cost O(n) seeks.
+        let idx = z
+            .index_for_name(entry)
             .ok_or_else(|| ArkxError::Corrupted(format!("entry not found: {}", entry)))?;
         let mut f = z
             .by_index(idx)
@@ -2411,6 +2436,49 @@ mod tests {
 
     fn backend() -> NativeBackend {
         NativeBackend::with_cancel(Arc::new(AtomicBool::new(false)))
+    }
+
+    /// A filtered tar extraction must produce exactly the selection. The loop
+    /// stops early once every selector is satisfied, and that early exit must
+    /// not cut a directory selector short of the files under it.
+    #[test]
+    fn tar_filtered_extract_yields_exactly_the_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("keep")).unwrap();
+        std::fs::create_dir_all(src.join("skip")).unwrap();
+        std::fs::write(src.join("keep/a.txt"), b"a").unwrap();
+        std::fs::write(src.join("keep/b.txt"), b"b").unwrap();
+        std::fs::write(src.join("skip/c.txt"), b"c").unwrap();
+        let archive = dir.path().join("a.tar");
+        backend()
+            .create(&archive, std::slice::from_ref(&src), 6, None, None, None)
+            .unwrap();
+
+        // Single file selection: only that file, nothing else.
+        let out = dir.path().join("out1");
+        backend()
+            .extract(
+                &archive,
+                &out,
+                Some(&["src/keep/a.txt".to_string()]),
+                None,
+                None,
+            )
+            .unwrap();
+        assert!(out.join("src/keep/a.txt").exists());
+        assert!(!out.join("src/keep/b.txt").exists());
+        assert!(!out.join("src/skip/c.txt").exists());
+
+        // Directory selection: the files under it must all come out, which is
+        // the case an early exit would silently truncate.
+        let out = dir.path().join("out2");
+        backend()
+            .extract(&archive, &out, Some(&["src/keep/".to_string()]), None, None)
+            .unwrap();
+        assert!(out.join("src/keep/a.txt").exists());
+        assert!(out.join("src/keep/b.txt").exists());
+        assert!(!out.join("src/skip/c.txt").exists());
     }
 
     #[test]
