@@ -49,7 +49,11 @@ type ClipboardItem = (PathBuf, Vec<String>);
 struct Ui {
     state: Rc<RefCell<AppState>>,
     worker: Rc<RefCell<WorkerPool>>,
-    is_busy: Rc<RefCell<bool>>,
+    /// Foreground jobs in flight. A counter, not a flag: every terminal event
+    /// decrements it in one place, so a new outcome can no longer forget to
+    /// clear the UI and leave it locked forever. The background integrity
+    /// check never counts.
+    busy_jobs: Rc<Cell<usize>>,
     last_extract: Rc<RefCell<Option<(PathBuf, PathBuf, Instant)>>>,
     last_progress: Rc<RefCell<(f32, Instant)>>,
     progress_window: Rc<RefCell<Option<Rc<RefCell<ProgressWindow>>>>>,
@@ -73,7 +77,7 @@ struct Ui {
     /// Set when an archive is opened; the next successful List runs the
     /// background integrity check once.
     auto_test: Rc<RefCell<bool>>,
-    /// The background integrity check is running. It must never set `is_busy`:
+    /// The background integrity check is running. It must never count as busy:
     /// on a huge archive the CRC pass takes minutes and would otherwise lock
     /// every action ("An operation is already in progress…") with no way out.
     test_running: Rc<Cell<bool>>,
@@ -284,7 +288,7 @@ pub fn build_ui(app: &adw::Application) {
     }));
 
     let worker = Rc::new(RefCell::new(WorkerPool::new()));
-    let is_busy = Rc::new(RefCell::new(false));
+    let busy_jobs = Rc::new(Cell::new(0));
     let last_extract = Rc::new(RefCell::new(None::<(PathBuf, PathBuf, Instant)>));
     let last_progress = Rc::new(RefCell::new((0.0f32, Instant::now())));
 
@@ -709,7 +713,7 @@ pub fn build_ui(app: &adw::Application) {
     let ui = Ui {
         state: state.clone(),
         worker: worker.clone(),
-        is_busy: is_busy.clone(),
+        busy_jobs: busy_jobs.clone(),
         last_extract: last_extract.clone(),
         last_progress: last_progress.clone(),
         progress_window: progress_window.clone(),
@@ -762,7 +766,7 @@ pub fn build_ui(app: &adw::Application) {
             }
             return true;
         }
-        if *ui.is_busy.borrow() {
+        if busy(&ui) {
             ui.status_left
                 .set_text("Busy: wait for the current operation to finish");
             return true;
@@ -945,7 +949,7 @@ pub fn build_ui(app: &adw::Application) {
     // Extract all
     let ui_all = ui.clone();
     extract_all_btn.connect_clicked(move |_| {
-        if *ui_all.is_busy.borrow() {
+        if busy(&ui_all) {
             ui_all
                 .status_left
                 .set_text("An operation is already in progress…");
@@ -974,7 +978,7 @@ pub fn build_ui(app: &adw::Application) {
     // Extract selected (header button)
     let ui_sel = ui.clone();
     extract_sel_btn.connect_clicked(move |_| {
-        if *ui_sel.is_busy.borrow() {
+        if busy(&ui_sel) {
             ui_sel
                 .status_left
                 .set_text("An operation is already in progress…");
@@ -1874,7 +1878,7 @@ pub fn build_ui(app: &adw::Application) {
                         start_background_test(&ui_poll);
                         continue;
                     }
-                    *ui_poll.is_busy.borrow_mut() = true;
+                    ui_poll.busy_jobs.set(ui_poll.busy_jobs.get() + 1);
                     *ui_poll.last_progress.borrow_mut() = (0.0, Instant::now());
                     ui_poll.extract_all.set_sensitive(false);
                     ui_poll.extract_sel.set_sensitive(false);
@@ -2014,8 +2018,7 @@ pub fn build_ui(app: &adw::Application) {
                                     *holder.borrow_mut() = None;
                                 });
                             }
-                            *ui_poll.is_busy.borrow_mut() = false;
-                            set_idle_sensitivity(&ui_poll);
+                            job_finished(&ui_poll);
                         }
                         Ok(JobResult::EntryHash { entry, sha256, md5 }) => {
                             // Fill the properties-dialog hash rows when this is
@@ -2030,8 +2033,7 @@ pub fn build_ui(app: &adw::Application) {
                                     l.set_text(md5);
                                 }
                             }
-                            *ui_poll.is_busy.borrow_mut() = false;
-                            set_idle_sensitivity(&ui_poll);
+                            job_finished(&ui_poll);
                         }
                         _ => {
                             // The background check owns no progress slot: a late test outcome must not
@@ -2050,8 +2052,7 @@ pub fn build_ui(app: &adw::Application) {
                                     pw.borrow().close();
                                 }
                                 *ui_poll.progress_window.borrow_mut() = None;
-                                *ui_poll.is_busy.borrow_mut() = false;
-                                set_idle_sensitivity(&ui_poll);
+                                job_finished(&ui_poll);
                             }
                         }
                     }
@@ -2227,8 +2228,6 @@ pub fn build_ui(app: &adw::Application) {
                                 if let Some(l) = ui_poll.entry_hash_md5.borrow().as_ref() {
                                     l.set_text("—");
                                 }
-                                *ui_poll.is_busy.borrow_mut() = false;
-                                set_idle_sensitivity(&ui_poll);
                                 continue;
                             }
                             let pwd_err = matches!(err, ArkxError::WrongPassword);
@@ -2239,8 +2238,6 @@ pub fn build_ui(app: &adw::Application) {
                                     pw.borrow().close();
                                     *ui_poll.progress_window.borrow_mut() = None;
                                 }
-                                *ui_poll.is_busy.borrow_mut() = false;
-                                set_idle_sensitivity(&ui_poll);
                                 let retry = ui_poll.pending_extract.borrow().clone();
                                 if let Some((archive, dest, entries, total, total_entries)) = retry
                                 {
@@ -2302,7 +2299,6 @@ pub fn build_ui(app: &adw::Application) {
                                     // show the full error in a dismissible window
                                     // instead of only the truncated statusbar line.
                                     *ui_poll.pending_password.borrow_mut() = false;
-                                    *ui_poll.is_busy.borrow_mut() = false;
                                     let w = ProgressWindow::new(
                                         &ui_poll.window,
                                         "Error",
@@ -2330,7 +2326,7 @@ pub fn build_ui(app: &adw::Application) {
                     // drop its window quietly and leave the UI to the
                     // foreground job that replaced it. `kind` (not a timing
                     // guess) decides: a cancelled extract reports the same
-                    // `Cancelled` error and must keep clearing `is_busy`.
+                    // `Cancelled` error and must still free the UI.
                     if kind == JobTag::Test {
                         end_background_test(&ui_poll);
                         continue;
@@ -2345,8 +2341,7 @@ pub fn build_ui(app: &adw::Application) {
                             *holder.borrow_mut() = None;
                         });
                     }
-                    *ui_poll.is_busy.borrow_mut() = false;
-                    set_idle_sensitivity(&ui_poll);
+                    job_finished(&ui_poll);
                     status_left.set_text(&format!("Error: {}", msg));
                 }
             }
@@ -2405,7 +2400,7 @@ fn dismiss_context_menu(menu: &Rc<RefCell<Option<gtk::PopoverMenu>>>) {
 }
 
 /// The open-time integrity check runs in the background: it never takes
-/// `is_busy`, so the archive stays browsable and extractable while it reads
+/// a busy slot, so the archive stays browsable and extractable while it reads
 /// the whole file. Small archives finish in milliseconds and stay silent;
 /// a long one gets a pulsing window with a working Cancel after a short
 /// delay — the only way to stop a multi-minute CRC pass is to offer it.
@@ -2463,7 +2458,7 @@ fn end_background_test(ui: &Ui) {
 /// surface it in the status bar. Returns `true` when busy (caller aborts).
 fn dismiss_and_check_idle(ui: &Ui, menu: &Rc<RefCell<Option<gtk::PopoverMenu>>>) -> bool {
     dismiss_context_menu(menu);
-    if *ui.is_busy.borrow() {
+    if busy(ui) {
         ui.status_left
             .set_text("An operation is already in progress…");
         return true;
@@ -2517,6 +2512,19 @@ fn defer_rebuild(ui: Ui) {
     glib::timeout_add_local_once(std::time::Duration::from_millis(0), move || {
         rebuild_list(ui.clone());
     });
+}
+
+/// True while a foreground job owns the UI.
+fn busy(ui: &Ui) -> bool {
+    ui.busy_jobs.get() > 0
+}
+
+/// A foreground job reached a terminal state (success, error or cancel).
+/// Every such event goes through here, so the count can never drift upwards
+/// and strand the toolbar in a disabled state.
+fn job_finished(ui: &Ui) {
+    ui.busy_jobs.set(ui.busy_jobs.get().saturating_sub(1));
+    set_idle_sensitivity(ui);
 }
 
 /// Restore the toolbar sensitivity from the current state (busy → done).
