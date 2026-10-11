@@ -14,6 +14,22 @@ use std::sync::{
 use std::time::Instant;
 
 const IO_BUF_SIZE: usize = 1024 * 1024;
+/// Buffer around a zip file being *read*. `ZipArchive::new` seeks to every
+/// entry's local header and reads 30 bytes to validate it; a `seek` discards
+/// the BufReader, so the next 30-byte read refills the whole buffer. Measured
+/// on a 5000-entry zip (99 MB), `arkx l` read:
+///
+/// | buffer | time | bytes read |
+/// |--------|------|------------|
+/// | 1 MiB  | 292ms| 5728 MiB   |
+/// | 32 KiB |  67ms|  286 MiB   |
+/// |  8 KiB |  67ms|   78 MiB   |
+///
+/// 8 KiB buys nothing more and costs more: the deflate decoder reads the
+/// compressed stream through this buffer, so shrinking it adds syscalls.
+/// 32 KiB costs ~7% on deflate extraction (224ms -> 239ms for 125 MB) and is
+/// paid on every extraction; the listing win is paid on every archive open.
+const ZIP_READ_BUF_SIZE: usize = 32 * 1024;
 const COPY_CHUNK: usize = 65536;
 
 /// Unique staging-file suffix: the pid alone collides when two add/remove
@@ -259,7 +275,7 @@ impl NativeBackend {
 
     fn list_zip(&self, path: &Path) -> Result<ArchiveInfo> {
         let file = File::open(path).map_err(ArkxError::Io)?;
-        let reader = BufReader::with_capacity(IO_BUF_SIZE, file);
+        let reader = BufReader::with_capacity(ZIP_READ_BUF_SIZE, file);
         let mut zip =
             zip::ZipArchive::new(reader).map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let mut entries = Vec::with_capacity(zip.len());
@@ -476,7 +492,7 @@ impl NativeBackend {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let reader = BufReader::with_capacity(IO_BUF_SIZE, file);
+        let reader = BufReader::with_capacity(ZIP_READ_BUF_SIZE, file);
         let mut zip =
             zip::ZipArchive::new(reader).map_err(|e| ArkxError::Corrupted(e.to_string()))?;
 
@@ -1309,7 +1325,7 @@ impl NativeBackend {
         };
         let mut old = {
             let file = File::open(archive).map_err(ArkxError::Io)?;
-            let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
+            let mut z = zip::ZipArchive::new(BufReader::with_capacity(ZIP_READ_BUF_SIZE, file))
                 .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
             for i in 0..z.len() {
                 match z.by_index(i) {
@@ -1489,7 +1505,7 @@ impl NativeBackend {
         };
         let mut old = {
             let file = File::open(archive).map_err(ArkxError::Io)?;
-            let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
+            let mut z = zip::ZipArchive::new(BufReader::with_capacity(ZIP_READ_BUF_SIZE, file))
                 .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
             for i in 0..z.len() {
                 match z.by_index(i) {
@@ -2076,7 +2092,7 @@ impl NativeBackend {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(ZIP_READ_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let old_name_norm = crate::core::paths::normalize(old_name);
         let new_name_norm = crate::core::paths::normalize(new_name);
@@ -2178,7 +2194,7 @@ impl NativeBackend {
         entries: Option<&[String]>,
     ) -> Result<crate::core::archive::TestReport> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(ZIP_READ_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let mut results = Vec::new();
         let mut passed = 0usize;
@@ -2244,7 +2260,7 @@ impl NativeBackend {
 
     fn open_with_zip(&self, archive: &Path, entry: &str, temp_dir: &Path) -> Result<PathBuf> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(ZIP_READ_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let idx = (0..z.len())
             .find(|&i| z.by_index(i).ok().map(|f| f.name().to_string()) == Some(entry.to_string()))
@@ -2288,7 +2304,7 @@ impl NativeBackend {
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
         let file = File::open(archive).map_err(ArkxError::Io)?;
-        let mut z = zip::ZipArchive::new(BufReader::with_capacity(IO_BUF_SIZE, file))
+        let mut z = zip::ZipArchive::new(BufReader::with_capacity(ZIP_READ_BUF_SIZE, file))
             .map_err(|e| ArkxError::Corrupted(e.to_string()))?;
         let archive_len = archive.metadata().map(|m| m.len()).unwrap_or(0);
         let mut tmp = archive.as_os_str().to_os_string();
