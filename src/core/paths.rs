@@ -57,6 +57,32 @@ pub fn entry_arg(e: &str) -> String {
     }
 }
 
+/// True when `name` carries a glob metacharacter.
+pub fn has_wildcard(name: &str) -> bool {
+    name.contains(['*', '?', '['])
+}
+
+/// Guard for the backends that hand archive entry names to `7z` or `tar` as
+/// command-line selectors.
+///
+/// Those tools expand globs in the names they are given: deleting `s/*.txt`
+/// from an archive that contains one entry literally named `*.txt` plus
+/// `a.txt` and `b.txt` removes all three, and the user selected one. The zip
+/// backend matches names exactly and is not affected.
+///
+/// ponytail: rejecting is the only safe answer. 7-Zip has no documented way
+/// to pass a wildcard literally, so the alternatives (extract-everything to
+/// staging, then pick) would make one hostile name cost a full extraction.
+pub fn ensure_literal_selectors(entries: &[String]) -> crate::core::error::Result<()> {
+    if let Some(bad) = entries.iter().find(|e| has_wildcard(e)) {
+        return Err(crate::core::error::ArkxError::InvalidInput(format!(
+            "entry name contains a wildcard and cannot be selected in this \
+             archive format: {bad}"
+        )));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

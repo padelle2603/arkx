@@ -118,6 +118,10 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         password: Option<&str>,
         _progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        crate::core::paths::ensure_literal_selectors(&[
+            old_name.to_string(),
+            new_name.to_string(),
+        ])?;
         let archive = super::native::absolutize(archive);
         let threads = sz_threads();
         let mut cmd = Command::new(&self.bin);
@@ -149,6 +153,9 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
         entries: Option<&[String]>,
         password: Option<&str>,
     ) -> Result<crate::core::archive::TestReport> {
+        if let Some(sel) = entries {
+            crate::core::paths::ensure_literal_selectors(sel)?;
+        }
         let archive = super::native::absolutize(archive);
         let mut cmd = Command::new(&self.bin);
         cmd.arg("t").arg("-y").arg("-bsp0").arg("-bso0");
@@ -447,6 +454,9 @@ impl SevenZipBackend {
         known: Option<(u64, u64)>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        if let Some(sel) = entries {
+            crate::core::paths::ensure_literal_selectors(sel)?;
+        }
         std::fs::create_dir_all(dest).map_err(ArkxError::Io)?;
         if self.cancelled() {
             return Err(ArkxError::Cancelled);
@@ -1051,6 +1061,7 @@ impl SevenZipBackend {
         password: Option<&str>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        crate::core::paths::ensure_literal_selectors(entries)?;
         if !archive.exists() {
             return Err(ArkxError::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
@@ -1947,6 +1958,56 @@ mod tests {
             "entries missing after unlock: {:?}",
             info.entries
         );
+    }
+
+    #[test]
+    /// A hostile archive can name an entry `*.txt`. Handed to `7z d` as a
+    /// selector it matches every .txt in the archive, so deleting the one entry
+    /// the user picked would delete the others too. Refuse instead, and leave the
+    /// archive untouched.
+    fn wildcard_entry_names_are_refused_not_expanded() {
+        use crate::core::archive::ArchiveBackend as _;
+        use std::sync::{atomic::AtomicBool, Arc};
+        let b = super::SevenZipBackend::with_cancel(Arc::new(AtomicBool::new(false)));
+        if !b.is_available() {
+            eprintln!("(7z unavailable, skipping)");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("a.7z");
+        let src = dir.path().join("s");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.txt"), b"a").unwrap();
+        std::fs::write(src.join("b.txt"), b"b").unwrap();
+        std::fs::write(src.join("*.txt"), b"star").unwrap();
+        b.create(&dest, std::slice::from_ref(&src), 6, None, None, None)
+            .unwrap();
+        let before: Vec<String> = b
+            .list(&dest)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        assert!(before.contains(&"s/*.txt".to_string()));
+
+        for bad in ["s/*.txt", "s/?.txt", "s/[ab].txt"] {
+            let err = b
+                .remove(&dest, &[bad.to_string()], None, None)
+                .expect_err("a wildcard selector must be refused");
+            assert!(
+                matches!(err, ArkxError::InvalidInput(_)),
+                "{bad} gave {err:?}"
+            );
+        }
+        let after: Vec<String> = b
+            .list(&dest)
+            .unwrap()
+            .entries
+            .iter()
+            .map(|e| e.path.clone())
+            .collect();
+        assert_eq!(before, after, "a refused remove must not touch the archive");
     }
 
     #[test]

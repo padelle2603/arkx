@@ -227,6 +227,9 @@ impl BsdtarBackend {
         known: Option<(u64, u64)>,
         progress: Option<Box<dyn Fn(ProgressInfo) + Send>>,
     ) -> Result<()> {
+        if let Some(sel) = entries {
+            crate::core::paths::ensure_literal_selectors(sel)?;
+        }
         if !self.is_available() {
             return Err(ArkxError::Backend(
                 "neither bsdtar nor tar found: install libarchive-tools to extract this format"
