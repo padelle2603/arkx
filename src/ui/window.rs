@@ -2860,6 +2860,11 @@ fn properties_rows(info: &ArchiveInfo, selected: &[String]) -> Vec<(String, Stri
             if let Some(d) = e.modified {
                 rows.push(("Modified".to_string(), d.to_string()));
             }
+            // Unix permission bits, when the format records them (tar, zip on
+            // unix, bsdtar). Setuid/setgid bits are never restored on extract.
+            if let Some(mode) = e.mode {
+                rows.push(("Mode".to_string(), format!("{:04o}", mode & 0o7777)));
+            }
             rows.push((
                 "Encrypted".to_string(),
                 if e.encrypted {
@@ -3077,5 +3082,19 @@ mod tests {
         let dir = properties_rows(&i, &["sub/".into()]);
         assert!(dir.iter().any(|(k, v)| k == "Type" && v == "Folder"));
         assert!(dir.iter().all(|(k, _)| k != "Method"));
+    }
+
+    #[test]
+    fn properties_show_permissions_when_the_format_records_them() {
+        let mut i = info(true);
+        assert!(properties_rows(&i, &["open.txt".into()])
+            .iter()
+            .all(|(k, _)| k != "Mode"));
+        i.entries[0].mode = Some(0o100_644);
+        i.entries[2].mode = Some(0o40_755);
+        let rows = properties_rows(&i, &["open.txt".into()]);
+        assert!(rows.iter().any(|(k, v)| k == "Mode" && v == "0644"));
+        let dir = properties_rows(&i, &["sub/".into()]);
+        assert!(dir.iter().any(|(k, v)| k == "Mode" && v == "0755"));
     }
 }

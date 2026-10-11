@@ -2232,12 +2232,10 @@ impl NativeBackend {
             }
             results.push(crate::core::archive::TestResult {
                 entry: name,
-                is_dir,
                 passed: passed_entry,
             });
         }
         Ok(crate::core::archive::TestReport {
-            archive: archive.to_string_lossy().to_string(),
             results,
             passed,
             failed,

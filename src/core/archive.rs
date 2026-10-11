@@ -87,10 +87,9 @@ pub struct EntryHashes {
     pub md5: String,
 }
 
-/// Result of an integrity test.
+/// Result of an integrity test. No archive path: both callers already have it.
 #[derive(Debug, Clone)]
 pub struct TestReport {
-    pub archive: String,
     pub results: Vec<TestResult>,
     pub passed: usize,
     pub failed: usize,
@@ -100,7 +99,6 @@ pub struct TestReport {
 #[derive(Debug, Clone)]
 pub struct TestResult {
     pub entry: String,
-    pub is_dir: bool,
     pub passed: bool,
 }
 

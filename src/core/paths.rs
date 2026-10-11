@@ -30,12 +30,6 @@ pub fn with_trailing_slash(s: &str) -> String {
     }
 }
 
-/// True if archive entry `entry` is the selected path `sel` or lives under it
-/// (both sides normalized; `sel` may name a file or a directory).
-pub fn entry_matches(entry: &str, sel: &str) -> bool {
-    entry_matches_norm(&normalize(entry), &normalize_sel_one(sel))
-}
-
 /// Pre-normalized (dir-form, no trailing slash) single selection.
 fn normalize_sel_one(s: &str) -> String {
     normalize(s).trim_end_matches('/').to_string()
@@ -79,31 +73,32 @@ mod tests {
 
     #[test]
     fn matches_files_and_dirs() {
-        assert!(entry_matches("a/b.txt", "a/b.txt"));
-        assert!(entry_matches("a/b.txt", "a/"));
-        assert!(entry_matches("a/b/c.txt", "a"));
-        assert!(!entry_matches("ab.txt", "a"));
+        let sels = normalize_sel(&["a/b.txt".to_string()]);
+        assert!(entry_matches_norm("a/b.txt", &sels[0]));
+        let sels = normalize_sel(&["a/".to_string()]);
+        assert!(entry_matches_norm("a/b.txt", &sels[0]));
+        let sels = normalize_sel(&["a".to_string()]);
+        assert!(entry_matches_norm("a/b/c.txt", &sels[0]));
+        assert!(!entry_matches_norm("ab.txt", &sels[0]));
     }
 
     #[test]
-    fn normalized_matching_agrees_with_legacy() {
-        let cases: &[(&str, &str)] = &[
-            ("a/b.txt", "a/b.txt"),
-            ("a/b.txt", "a/"),
-            ("a/b/c.txt", "a"),
-            ("ab.txt", "a"),
-            ("a", "a"),
-            ("a/", "a"),
-            ("a/b/", "a"),
-            ("./a/b.txt", "a"),
-            ("/x/y", "x/"),
+    fn matching_survives_dir_form() {
+        let cases: &[(&str, &str, bool)] = &[
+            ("a/b.txt", "a/b.txt", true),
+            ("a/b.txt", "a/", true),
+            ("a/b/c.txt", "a", true),
+            ("ab.txt", "a", false),
+            ("a", "a", true),
+            ("a/b/", "a", true),
+            ("./a/b.txt", "a", true),
+            ("/x/y", "x/", true),
         ];
-        for (entry, sel) in cases {
+        for (entry, sel, expected) in cases {
             let sels = normalize_sel(&[sel.to_string()]);
-            let norm = normalize(entry);
             assert_eq!(
-                entry_matches_norm(&norm, &sels[0]),
-                entry_matches(entry, sel),
+                entry_matches_norm(&normalize(entry), &sels[0]),
+                *expected,
                 "mismatch for {:?} vs {:?}",
                 entry,
                 sel

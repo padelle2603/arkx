@@ -202,7 +202,6 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
                 msg.trim()
             )));
         }
-        let archive_path = archive.to_string_lossy().to_string();
         // Parse results from 7z output
         let mut results = Vec::new();
         let mut passed = 0usize;
@@ -225,7 +224,6 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
                 failed += 1;
                 results.push(crate::core::archive::TestResult {
                     entry: line.to_string(),
-                    is_dir: false,
                     passed: false,
                 });
             }
@@ -234,12 +232,10 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             passed = 1; // All OK
             results.push(crate::core::archive::TestResult {
                 entry: "(all entries)".to_string(),
-                is_dir: false,
                 passed: true,
             });
         }
         Ok(crate::core::archive::TestReport {
-            archive: archive_path,
             results,
             passed,
             failed,
