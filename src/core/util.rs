@@ -298,7 +298,12 @@ fn input_sizes_walk(
         Err(_) => return,
     };
     if meta.is_file() {
-        let abs = p.to_string_lossy().to_string();
+        // Must be absolute: `total_input_size` sums only absolute keys, and
+        // a relative source used to make it return 0, which silently disabled
+        // both the disk-space preflight and the zip->7z routing.
+        let abs = crate::core::backends::native::absolutize(p)
+            .to_string_lossy()
+            .to_string();
         map.insert(abs, meta.len());
         if let Some(b) = base {
             if let Ok(rel) = p.strip_prefix(b) {
@@ -903,6 +908,22 @@ mod tests {
         // Dual keys (absolute + parent-relative) per file.
         assert_eq!(map.len(), 4);
         assert_eq!(total_input_size(&[dir.path().to_path_buf()]), 1500);
+    }
+
+    #[test]
+    fn relative_sources_still_yield_a_size() {
+        // The usual CLI shape is `arkx c out.zip cartella/`. `total_input_size`
+        // sums only absolute keys, so a relative source used to make it return
+        // 0 — silently disabling the disk-space preflight and the zip->7z
+        // routing, which is why absolute paths behaved differently.
+        let cwd = std::env::current_dir().unwrap();
+        // tempdir_in(cwd) gives a real relative path without chdir (which
+        // would race every other test in this binary).
+        let dir = tempfile::tempdir_in(&cwd).unwrap();
+        std::fs::write(dir.path().join("a.bin"), vec![7u8; 1000]).unwrap();
+        let rel = std::path::PathBuf::from(dir.path().file_name().unwrap());
+        assert!(!rel.is_absolute(), "probe must stay relative");
+        assert_eq!(total_input_size(&[rel]), 1000);
     }
 
     #[test]

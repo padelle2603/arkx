@@ -327,22 +327,20 @@ impl BackendManager {
                 "cannot create encrypted {fmt:?}: single-file formats have no password support"
             )));
         }
-        // Disk-space preflight: a 68GB failing halfway with ENOSPC after
-        // hours is worse than an immediate error. Worst-case estimate (total input,
-        // incompressible data); if `df` does not respond the check is skipped.
+        // Disk-space preflight. Advisory, like the extraction one: the estimate is
+        // the worst case (incompressible input), and sources on the same
+        // filesystem always have `free < source size`, so refusing would turn
+        // every legitimate `arkx c backup.zip ~/photos/` into an error. Warn
+        // and let the job fail with ENOSPC if the estimate was simply wrong.
         let total = crate::core::util::total_input_size(sources);
-        if total > 0 {
-            if let Some(free) = crate::core::util::filesystem_free_bytes(dest) {
-                if total > free {
-                    return Err(ArkxError::Backend(format!(
-                        "not enough disk space for {}: need {} free, have {} on {}",
-                        dest.display(),
-                        humansize::format_size(total, humansize::BINARY),
-                        humansize::format_size(free, humansize::BINARY),
-                        dest.parent().unwrap_or(std::path::Path::new(".")).display()
-                    )));
-                }
-            }
+        if let Some((need, free)) = crate::core::util::insufficient_space(dest, total) {
+            eprintln!(
+                "[core] warning: {} needs up to {} but {} has {} free",
+                dest.display(),
+                humansize::format_size(need, humansize::BINARY),
+                dest.parent().unwrap_or(std::path::Path::new(".")).display(),
+                humansize::format_size(free, humansize::BINARY)
+            );
         }
         if self.native.supports(&fmt) {
             if matches!(fmt, ArchiveFormat::Zip) && password.is_some() {
