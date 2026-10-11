@@ -844,85 +844,97 @@ pub fn build_ui(app: &adw::Application) {
         dialog.set_title("Open archive");
         let filter = gtk::FileFilter::new();
         filter.set_name(Some("Archives"));
-        filter.add_mime_type("application/zip");
-        filter.add_mime_type("application/x-7z-compressed");
-        filter.add_mime_type("application/vnd.rar");
-        filter.add_mime_type("application/x-rar");
-        filter.add_mime_type("application/x-tar");
-        filter.add_mime_type("application/x-compressed-tar");
-        filter.add_mime_type("application/x-bzip-compressed-tar");
-        filter.add_mime_type("application/x-tarz");
-        filter.add_mime_type("application/x-xz-compressed-tar");
-        filter.add_mime_type("application/x-lzma-compressed-tar");
-        filter.add_mime_type("application/x-lzip-compressed-tar");
-        filter.add_mime_type("application/x-tzo");
-        filter.add_mime_type("application/x-lrzip-compressed-tar");
-        filter.add_mime_type("application/x-lz4-compressed-tar");
-        filter.add_mime_type("application/x-zstd-compressed-tar");
-        filter.add_mime_type("application/gzip");
-        filter.add_mime_type("application/x-bzip");
-        filter.add_mime_type("application/x-bzip2");
-        filter.add_mime_type("application/x-xz");
-        filter.add_mime_type("application/x-lzma");
-        filter.add_mime_type("application/x-compress");
-        filter.add_mime_type("application/zstd");
-        filter.add_mime_type("application/x-lz4");
-        filter.add_mime_type("application/x-iso9660-image");
-        filter.add_mime_type("application/x-cd-image");
-        filter.add_mime_type("application/x-iso9660-appimage");
-        filter.add_mime_type("application/vnd.ms-cab-compressed");
-        filter.add_mime_type("application/x-bcpio");
-        filter.add_mime_type("application/x-cpio");
-        filter.add_mime_type("application/x-cpio-compressed");
-        filter.add_mime_type("application/x-sv4cpio");
-        filter.add_mime_type("application/x-sv4crc");
-        filter.add_mime_type("application/x-xar");
-        filter.add_mime_type("application/x-archive");
-        filter.add_mime_type("application/x-source-rpm");
-        filter.add_mime_type("application/x-rpm");
-        filter.add_mime_type("application/x-lha");
-        filter.add_pattern("*.zip");
-        filter.add_pattern("*.7z");
-        filter.add_pattern("*.rar");
-        filter.add_pattern("*.tar");
-        filter.add_pattern("*.tar.gz");
-        filter.add_pattern("*.tgz");
-        filter.add_pattern("*.tar.bz2");
-        filter.add_pattern("*.tbz2");
-        filter.add_pattern("*.tar.xz");
-        filter.add_pattern("*.txz");
-        filter.add_pattern("*.tar.zst");
-        filter.add_pattern("*.tzst");
-        filter.add_pattern("*.tar.lz4");
-        filter.add_pattern("*.tar.Z");
-        filter.add_pattern("*.taz");
-        filter.add_pattern("*.tar.lzma");
-        filter.add_pattern("*.tlz");
-        filter.add_pattern("*.tar.lz");
-        filter.add_pattern("*.tzo");
-        filter.add_pattern("*.tar.lzo");
-        filter.add_pattern("*.tar.lrz");
-        filter.add_pattern("*.gz");
-        filter.add_pattern("*.bz2");
-        filter.add_pattern("*.xz");
-        filter.add_pattern("*.lzma");
-        filter.add_pattern("*.Z");
-        filter.add_pattern("*.zst");
-        filter.add_pattern("*.lz4");
-        filter.add_pattern("*.iso");
-        filter.add_pattern("*.img");
-        filter.add_pattern("*.AppImage");
-        filter.add_pattern("*.appimage");
-        filter.add_pattern("*.cab");
-        filter.add_pattern("*.cpio");
-        filter.add_pattern("*.bcpio");
-        filter.add_pattern("*.xar");
-        filter.add_pattern("*.xip");
-        filter.add_pattern("*.a");
-        filter.add_pattern("*.ar");
-        filter.add_pattern("*.lha");
-        filter.add_pattern("*.lzh");
-        filter.add_pattern("*.rpm");
+        // Same list as `MimeType=` in arkx.desktop and the formats the detector
+        // recognises, so the chooser never hides something we can open.
+        for m in [
+            "application/zip",
+            "application/x-7z-compressed",
+            "application/vnd.rar",
+            "application/x-rar",
+            "application/x-tar",
+            "application/x-compressed-tar",
+            "application/x-bzip-compressed-tar",
+            "application/x-tarz",
+            "application/x-xz-compressed-tar",
+            "application/x-lzma-compressed-tar",
+            "application/x-lzip-compressed-tar",
+            "application/x-tzo",
+            "application/x-lrzip-compressed-tar",
+            "application/x-lz4-compressed-tar",
+            "application/x-zstd-compressed-tar",
+            "application/gzip",
+            "application/x-bzip",
+            "application/x-bzip2",
+            "application/x-xz",
+            "application/x-lzma",
+            "application/x-compress",
+            "application/zstd",
+            "application/x-lz4",
+            "application/x-iso9660-image",
+            "application/x-cd-image",
+            "application/x-iso9660-appimage",
+            "application/vnd.ms-cab-compressed",
+            "application/x-bcpio",
+            "application/x-cpio",
+            "application/x-cpio-compressed",
+            "application/x-sv4cpio",
+            "application/x-sv4crc",
+            "application/x-xar",
+            "application/x-archive",
+            "application/x-source-rpm",
+            "application/x-rpm",
+            "application/x-lha",
+        ] {
+            filter.add_mime_type(m);
+        }
+        // Extensions too: `MimeType=` is advisory and many .tar.* variants are
+        // registered under one generic type or none at all.
+        for pat in [
+            "*.zip",
+            "*.7z",
+            "*.rar",
+            "*.tar",
+            "*.tar.gz",
+            "*.tgz",
+            "*.tar.bz2",
+            "*.tbz2",
+            "*.tar.xz",
+            "*.txz",
+            "*.tar.zst",
+            "*.tzst",
+            "*.tar.lz4",
+            "*.tar.Z",
+            "*.taz",
+            "*.tar.lzma",
+            "*.tlz",
+            "*.tar.lz",
+            "*.tzo",
+            "*.tar.lzo",
+            "*.tar.lrz",
+            "*.gz",
+            "*.bz2",
+            "*.xz",
+            "*.lzma",
+            "*.Z",
+            "*.zst",
+            "*.lz4",
+            "*.iso",
+            "*.img",
+            "*.AppImage",
+            "*.appimage",
+            "*.cab",
+            "*.cpio",
+            "*.bcpio",
+            "*.xar",
+            "*.xip",
+            "*.a",
+            "*.ar",
+            "*.lha",
+            "*.lzh",
+            "*.rpm",
+        ] {
+            filter.add_pattern(pat);
+        }
         let filters = gio::ListStore::new::<gtk::FileFilter>();
         filters.append(&filter);
         dialog.set_filters(Some(&filters));
@@ -1754,109 +1766,48 @@ pub fn build_ui(app: &adw::Application) {
     });
     window.add_action(&action_open);
     let ui_ctrl_o = ui.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("<Control>o").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            ui_ctrl_o.open.emit_clicked();
-            glib::Propagation::Stop
-        })),
-    ));
-    // Back with Alt+Left
+    bind(&shortcut_controller, "<Control>o", move || {
+        ui_ctrl_o.open.emit_clicked()
+    });
     let ui_keys = ui.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("<Alt>Left").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            ui_keys.back.emit_clicked();
-            glib::Propagation::Stop
-        })),
-    ));
+    bind(&shortcut_controller, "<Alt>Left", move || {
+        ui_keys.back.emit_clicked()
+    });
     // Rename with F2 or Alt+F2
-    let action_rename_sc = action_rename.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("F2").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            action_rename_sc.activate(None);
-            glib::Propagation::Stop
-        })),
-    ));
-    let action_rename_sc2 = action_rename.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("<Alt>F2").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            action_rename_sc2.activate(None);
-            glib::Propagation::Stop
-        })),
-    ));
-    // Paste with Ctrl+V
-    let action_paste_sc = action_paste.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("<Control>v").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            action_paste_sc.activate(None);
-            glib::Propagation::Stop
-        })),
-    ));
-    // Copy with Ctrl+C
-    let action_copy_sc = action_copy_entry.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("<Control>c").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            action_copy_sc.activate(None);
-            glib::Propagation::Stop
-        })),
-    ));
-    // Cut with Ctrl+X
-    let action_cut_sc = action_cut_entry.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("<Control>x").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            action_cut_sc.activate(None);
-            glib::Propagation::Stop
-        })),
-    ));
-    // Delete selected entries
-    let action_remove_sc = action_remove.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("Delete").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            action_remove_sc.activate(None);
-            glib::Propagation::Stop
-        })),
-    ));
+    for accel in ["F2", "<Alt>F2"] {
+        let a = action_rename.clone();
+        bind(&shortcut_controller, accel, move || a.activate(None));
+    }
+    let a = action_paste.clone();
+    bind(&shortcut_controller, "<Control>v", move || a.activate(None));
+    let a = action_copy_entry.clone();
+    bind(&shortcut_controller, "<Control>c", move || a.activate(None));
+    let a = action_cut_entry.clone();
+    bind(&shortcut_controller, "<Control>x", move || a.activate(None));
+    let a = action_remove.clone();
+    bind(&shortcut_controller, "Delete", move || a.activate(None));
     // Enter opens an archive
     let ui_enter = ui.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("Return").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            ui_enter.open.emit_clicked();
-            glib::Propagation::Stop
-        })),
-    ));
+    bind(&shortcut_controller, "Return", move || {
+        ui_enter.open.emit_clicked()
+    });
     // Select all rows in the current view (Ctrl+A)
     let ui_sel_all = ui.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("<Control>a").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            let lb = &ui_sel_all.list;
-            lb.select_all();
-            // Never select the fake ".. (go back)" row.
-            for row in lb.selected_rows() {
-                if row.tooltip_text().as_deref() == Some("__UP__") {
-                    lb.unselect_row(&row);
-                }
+    bind(&shortcut_controller, "<Control>a", move || {
+        let lb = &ui_sel_all.list;
+        lb.select_all();
+        // Never select the fake ".. (go back)" row.
+        for row in lb.selected_rows() {
+            if row.tooltip_text().as_deref() == Some("__UP__") {
+                lb.unselect_row(&row);
             }
-            glib::Propagation::Stop
-        })),
-    ));
+        }
+    });
     // New folder inside the archive (Ctrl+Shift+N)
-    let action_new_folder_sc = action_new_folder.clone();
-    shortcut_controller.add_shortcut(gtk::Shortcut::new(
-        Some(gtk::ShortcutTrigger::parse_string("<Control><Shift>n").unwrap()),
-        Some(gtk::CallbackAction::new(move |_, _| {
-            action_new_folder_sc.activate(None);
-            glib::Propagation::Stop
-        })),
-    ));
+    let a = action_new_folder.clone();
+    bind(&shortcut_controller, "<Control><Shift>n", move || {
+        a.activate(None)
+    });
     window.add_controller(shortcut_controller);
 
     window.present();
@@ -2452,6 +2403,18 @@ fn end_background_test(ui: &Ui) {
     }
     *ui.test_window.borrow_mut() = None;
     ui.status_left.set_text("");
+}
+
+/// Bind `accel` on `controller` to `run`, swallowing the key so it never
+/// reaches the focused widget. Ten of these read identically inline.
+fn bind<F: Fn() + 'static>(controller: &gtk::ShortcutController, accel: &str, run: F) {
+    controller.add_shortcut(gtk::Shortcut::new(
+        Some(gtk::ShortcutTrigger::parse_string(accel).expect("built-in accelerator")),
+        Some(gtk::CallbackAction::new(move |_, _| {
+            run();
+            glib::Propagation::Stop
+        })),
+    ));
 }
 
 /// Dismiss the contextual menu and, if an operation is already running,
