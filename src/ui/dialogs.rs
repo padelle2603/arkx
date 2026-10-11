@@ -143,3 +143,35 @@ pub(crate) fn prompt_password(
         on_cancel,
     );
 }
+
+/// "Extracting needs more space than the destination has" — runs `on_confirm`
+/// when the user insists, so an oversized extraction is their call, not ours.
+pub(crate) fn confirm_large_extract<F: Fn() + 'static>(
+    parent: &impl IsA<gtk::Widget>,
+    dest: &Path,
+    need: u64,
+    free: u64,
+    on_confirm: F,
+) {
+    let body = format!(
+        "This extraction needs {} but {} has only {} free. Continue anyway?",
+        humansize::format_size(need, humansize::BINARY),
+        dest.display(),
+        humansize::format_size(free, humansize::BINARY),
+    );
+    let dialog = adw::AlertDialog::new(Some("Not enough disk space"), Some(&body));
+    dialog.add_response("cancel", "Cancel");
+    dialog.add_response("extract", "Extract anyway");
+    dialog.set_response_appearance("extract", adw::ResponseAppearance::Destructive);
+    dialog.set_default_response(Some("cancel"));
+    dialog.set_close_response("cancel");
+    let on_confirm = Rc::new(on_confirm);
+    dialog.connect_response(None, move |d, response| {
+        if response == "extract" {
+            on_confirm();
+        } else {
+            d.close();
+        }
+    });
+    dialog.present(Some(parent));
+}

@@ -1101,19 +1101,15 @@ impl SevenZipBackend {
 
 /// Temp dir used to stage added files at their archive-relative paths.
 /// Self-cleaning: removed on drop, so cleanup happens on every path
-/// (success, error, cancel). No extra crate (tempfile is test-only).
+/// (success, error, cancel). `tempfile` creates it 0700 with an unpredictable
+/// name (O_EXCL), so no other local user can read the staged files or
+/// pre-create the directory as a symlink.
 struct Staging(PathBuf);
 
 impl Staging {
     fn new() -> Result<Self> {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let base =
-            std::env::temp_dir().join(format!("arkx-add-{}-{:09}", std::process::id(), nanos));
-        std::fs::create_dir_all(&base).map_err(ArkxError::Io)?;
-        Ok(Staging(base))
+        let dir = tempfile::Builder::new().prefix("arkx-add-").tempdir()?;
+        Ok(Staging(dir.keep()))
     }
 
     fn path(&self) -> &Path {

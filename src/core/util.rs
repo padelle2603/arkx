@@ -180,6 +180,19 @@ pub fn parse_df_avail(s: &str) -> Option<u64> {
     s.lines().nth(1)?.split_whitespace().next()?.parse().ok()
 }
 
+/// Free-space preflight for an extraction of `need` decompressed bytes into
+/// `dest`: `Some((need, free))` when the destination filesystem cannot hold it.
+/// Advisory, not a refusal — the caller decides (GUI asks, CLI warns), because
+/// a 100 GiB game and a decompression bomb look identical from here.
+/// `None` when `df` is unavailable or the total is unknown.
+pub fn insufficient_space(dest: &std::path::Path, need: u64) -> Option<(u64, u64)> {
+    if need == 0 {
+        return None;
+    }
+    let free = filesystem_free_bytes(dest)?;
+    (need > free).then_some((need, free))
+}
+
 /// Format a percentage with adaptive decimals and locale separator:
 /// `<1%` → 2 decimals (`0.42%`), `1–99%` → 1 decimal, `100%` whole.
 /// Never early "100%": if `current < total` the cap is `99.99%`.
@@ -463,15 +476,15 @@ pub fn read_lines_until(reader: impl Read, mut on_line: impl FnMut(&str) -> bool
 }
 
 /// Unique per-invocation temp dir for "open with", auto-removed after a delay
-/// so the launched app has time to read the extracted entry. The unique name
-/// also stops concurrent CLI/GUI opens from colliding in one shared dir.
+/// so the launched app has time to read the extracted entry. Created 0700 with
+/// an unpredictable name, so a second local user cannot read the extracted
+/// file nor pre-create the path as a symlink.
 pub fn open_with_dir() -> Result<std::path::PathBuf, crate::core::error::ArkxError> {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let dir = std::env::temp_dir().join(format!("arkx-open-{}-{}", std::process::id(), nanos));
-    std::fs::create_dir_all(&dir).map_err(crate::core::error::ArkxError::Io)?;
+    let dir = tempfile::Builder::new()
+        .prefix("arkx-open-")
+        .tempdir()
+        .map_err(crate::core::error::ArkxError::Io)?
+        .keep();
     let cleanup = dir.clone();
     std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(60));
@@ -481,19 +494,19 @@ pub fn open_with_dir() -> Result<std::path::PathBuf, crate::core::error::ArkxErr
 }
 
 /// Named staging dir under the system temp dir, removed on drop (best-effort)
-/// so early `?` returns cannot leak it. A leftover from a previous crash with
-/// the same pid is wiped on creation. Used by convert, paste and new-folder.
+/// so early `?` returns cannot leak it. Created 0700 with an unpredictable
+/// name, so no other local user can read the staged files or pre-create the
+/// path as a symlink. Used by convert, paste, hashing and new-folder.
 #[derive(Debug)]
 pub struct TaskTempDir(std::path::PathBuf);
 
 impl TaskTempDir {
     pub fn new(prefix: &str) -> Result<Self, crate::core::error::ArkxError> {
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}", std::process::id()));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).ok();
-        }
-        std::fs::create_dir_all(&dir).map_err(crate::core::error::ArkxError::Io)?;
-        Ok(Self(dir))
+        let dir = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .map_err(crate::core::error::ArkxError::Io)?;
+        Ok(Self(dir.keep()))
     }
 }
 
@@ -897,6 +910,18 @@ mod tests {
         assert_eq!(parse_df_avail("Avail\n123456789\n"), Some(123456789));
         assert_eq!(parse_df_avail("Avail\n"), None);
         assert_eq!(parse_df_avail(""), None);
+    }
+
+    #[test]
+    fn insufficient_space_only_fires_when_it_must() {
+        let dir = tempfile::tempdir().unwrap();
+        // Unknown total: never guess.
+        assert!(insufficient_space(dir.path(), 0).is_none());
+        // Absurd total: the destination cannot possibly hold it.
+        let huge = u64::MAX / 4;
+        let (need, free) = insufficient_space(dir.path(), huge).expect("df must answer");
+        assert_eq!(need, huge);
+        assert!(free < huge, "free space must be below the absurd total");
     }
 
     #[test]

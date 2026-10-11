@@ -264,8 +264,11 @@ impl WorkerPool {
                 password,
             } => match backend.test(&archive, entries.as_deref(), password.as_deref()) {
                 Ok(report) => Ok(JobResult::Test(report)),
-                Err(ArkxError::Cancelled) => Err(ArkxError::Cancelled),
-                Err(_) => Ok(JobResult::TestSkipped),
+                // Only a format the backend cannot verify is a quiet skip: a
+                // corrupt archive must surface, or the user reads "no report"
+                // as "the archive is fine".
+                Err(ArkxError::UnsupportedFormat(_)) => Ok(JobResult::TestSkipped),
+                Err(e) => Err(e),
             },
             JobKind::OpenWith {
                 archive,
@@ -342,7 +345,10 @@ impl WorkerPool {
                     let mut sources: Vec<(PathBuf, String)> = Vec::new();
                     for e in &entries {
                         let leaf: &str = e.rsplit('/').next().unwrap_or(e);
-                        let tmp_path = temp_dir.join(e);
+                        // `e` comes from the untrusted archive: refuse it before
+                        // it becomes a staging path.
+                        let tmp_path = BackendManager::extracted_entry_path(&temp_dir, e)
+                            .ok_or_else(|| ArkxError::InvalidInput(e.clone()))?;
                         let new_name = if cut {
                             leaf.to_string()
                         } else {
@@ -432,10 +438,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn automatic_test_skips_unreadable_archive() {
+    fn automatic_test_skips_an_unverifiable_format() {
         let tmp = tempfile::tempdir().unwrap();
-        let archive = tmp.path().join("broken.zip");
-        std::fs::write(&archive, b"not a zip").unwrap();
+        let archive = tmp.path().join("disc.iso");
+        std::fs::write(&archive, b"payload").unwrap();
         let result = WorkerPool::execute_job(
             &BackendManager::new(),
             Job {
@@ -451,6 +457,30 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(result, JobResult::TestSkipped));
+    }
+
+    #[test]
+    fn automatic_test_reports_a_corrupt_archive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = tmp.path().join("broken.zip");
+        std::fs::write(&archive, b"not a zip").unwrap();
+        let result = WorkerPool::execute_job(
+            &BackendManager::new(),
+            Job {
+                kind: JobKind::Test {
+                    archive,
+                    entries: None,
+                    password: None,
+                },
+                epoch: 0,
+            },
+            |_| {},
+            Arc::new(AtomicBool::new(false)),
+        );
+        assert!(
+            result.is_err(),
+            "a corrupt archive must surface, not vanish into a skip"
+        );
     }
 
     #[test]

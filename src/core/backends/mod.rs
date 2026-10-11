@@ -496,6 +496,15 @@ impl BackendManager {
         matches!(label, "ZIP" | "7Z" | "TAR")
     }
 
+    /// Where a single entry landed after `extract(dest, [entry])`, or `None`
+    /// when it escaped `dest` (traversal or symlink). The native backend
+    /// refuses such entries up front; callers handling one entry at a time
+    /// (open-with, hashing, paste) re-check the external backends here,
+    /// because `7z`/`bsdtar` are trusted to sanitize their own output.
+    pub fn extracted_entry_path(dest: &Path, entry: &str) -> Option<PathBuf> {
+        native::secure_join(dest, &native::resolved_base(dest), entry)
+    }
+
     /// Test integrity of archive entries.
     pub fn test(
         &self,
@@ -532,6 +541,7 @@ impl BackendManager {
     ) -> Result<PathBuf> {
         let fmt = super::detector::detect_format(archive);
         match fmt {
+            // `native.open_with` already validates through `secure_join`.
             ArchiveFormat::Zip => self.native.open_with(archive, entry, password, temp_dir),
             ArchiveFormat::SevenZip | ArchiveFormat::Tar => {
                 // Reuse the format's own extraction for a single entry (works
@@ -544,7 +554,8 @@ impl BackendManager {
                     password,
                     None,
                 )?;
-                Ok(temp_dir.join(crate::core::paths::normalize(entry.as_str())))
+                Self::extracted_entry_path(temp_dir, &entry)
+                    .ok_or_else(|| ArkxError::InvalidInput(entry.clone()))
             }
             _ => Err(ArkxError::UnsupportedFormat(format!(
                 "cannot open entries of {fmt:?} with an external app"
@@ -575,7 +586,10 @@ impl BackendManager {
             password,
             None,
         )?;
-        crate::core::util::hash_file(&tmp.join(crate::core::paths::normalize(&entry)))
+        crate::core::util::hash_file(
+            &Self::extracted_entry_path(&tmp, &entry)
+                .ok_or_else(|| ArkxError::InvalidInput(entry.clone()))?,
+        )
     }
 
     /// Securely delete entries by overwriting them before removal.

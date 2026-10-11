@@ -1938,14 +1938,14 @@ fn zstd_level(user: u8) -> i32 {
 /// Resolve `dest` once per extraction: `dest` may be reached through a
 /// symlink (e.g. a symlinked `~/Downloads`); all entry checks compare against
 /// this resolved form, otherwise every entry would be discarded.
-fn resolved_base(dest: &Path) -> PathBuf {
+pub(crate) fn resolved_base(dest: &Path) -> PathBuf {
     std::fs::canonicalize(dest).unwrap_or_else(|_| absolutize(dest))
 }
 
 /// Secure join of archive `name` into `dest`: `base` is the precomputed
 /// resolved form of `dest` (see [`resolved_base`]); `name` must be
 /// normalized to a relative path without `..`.
-fn secure_join(dest: &Path, base: &Path, name: &str) -> Option<PathBuf> {
+pub(crate) fn secure_join(dest: &Path, base: &Path, name: &str) -> Option<PathBuf> {
     let norm = crate::core::paths::normalize(name);
     if norm.is_empty() {
         return None;

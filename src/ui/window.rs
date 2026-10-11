@@ -2747,6 +2747,46 @@ fn start_extract(
         );
         return;
     }
+    // Free-space preflight: failing at 90% with ENOSPC after an hour is worse
+    // than one confirmation up front. Advisory, so the user can still choose.
+    if let Some((need, free)) = crate::core::util::insufficient_space(&dest, total.unwrap_or(0)) {
+        let (a, d, e, p, t, te, ui_c) = (
+            archive.clone(),
+            dest.clone(),
+            entries_opt.clone(),
+            effective.clone(),
+            total,
+            total_entries,
+            ui.clone(),
+        );
+        dialogs::confirm_large_extract(&ui.window, &dest, need, free, move || {
+            submit_extract(&ui_c, a.clone(), d.clone(), e.clone(), p.clone(), t, te);
+        });
+        return;
+    }
+    submit_extract(
+        &ui,
+        archive,
+        dest,
+        entries_opt,
+        effective,
+        total,
+        total_entries,
+    );
+}
+
+/// Hand the extraction to the worker. Separate from `start_extract` so the
+/// "extract anyway" confirmation can bypass the preflight that raised it.
+#[allow(clippy::too_many_arguments)]
+fn submit_extract(
+    ui: &Ui,
+    archive: PathBuf,
+    dest: PathBuf,
+    entries_opt: Option<Vec<String>>,
+    effective: Option<String>,
+    total: Option<u64>,
+    total_entries: Option<u64>,
+) {
     if let Some(ref sel) = entries_opt {
         ui.status_left.set_text(&format!(
             "Extracting {} items to {}…",
