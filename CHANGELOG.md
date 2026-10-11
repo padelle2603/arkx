@@ -30,6 +30,20 @@
   the destination, which creation already did. The user chooses.
 - **Added**: the properties window shows the unix permission bits of a selected
   entry, for the formats that record them (tar, zip on unix, bsdtar).
+- **Perf**: opening a zip no longer reads ~1 MiB of disk per entry. Building the
+  archive index seeks to each entry's local header and reads 30 bytes to
+  validate it, and the 1 MiB read buffer around the archive turned each of
+  those into a full refill. On a 5000-entry archive, `arkx l` went from 5728 MiB
+  read in 292 ms to 286 MiB in 67 ms, at the cost of ~7% on deflate extraction.
+- **Perf**: extracting selected entries from an uncompressed tar stops once
+  they are all seen, instead of walking the archive to the end. Extracting the
+  first entry of a 76 MB tar now reads 1% of it.
+- **Perf**: "open with" on a zip entry is a hash lookup on the archive index
+  instead of a linear scan that seeked once per entry examined.
+- **Fixed**: entry names containing a glob character (`*`, `?`, `[`) are refused
+  instead of being passed to 7-Zip or tar, which would expand them. An archive
+  containing one entry named `*.txt` could otherwise make a single-entry delete
+  remove every matching entry, and a single-entry extract write extra files.
 - **Changed**: the 16 GiB decompression quota is **removed** from all three
   backends. It stopped zip bombs but also refused legitimate large archives
   (a 60 GiB game could not be extracted). See README "Known limits".
