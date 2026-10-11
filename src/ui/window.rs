@@ -2149,6 +2149,7 @@ pub fn build_ui(app: &adw::Application) {
                             *ui_poll.pending_password.borrow_mut() = false;
                             dismiss_context_menu(&open_menu_poll);
                             let archive_path = PathBuf::from(&info.path);
+                            let info = std::rc::Rc::new(info);
                             let mut st = ui_poll.state.borrow_mut();
                             st.current_info = Some(info.clone());
                             st.selected_entries.clear();

@@ -82,7 +82,9 @@ impl SortCol {
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
     pub(crate) current_archive: Option<PathBuf>,
-    pub(crate) current_info: Option<ArchiveInfo>,
+    /// Shared: cloning the full listing on every sort/click/back used to be the
+    /// single biggest allocation source in the UI. Read-only — never mutate.
+    pub(crate) current_info: Option<Rc<ArchiveInfo>>,
     /// "" = root, otherwise "src/", "src/subdir/", ...
     pub(crate) current_path: String,
     pub(crate) selected_entries: Vec<String>,
@@ -233,26 +235,19 @@ pub(crate) fn sort_children(children: &mut [ArchiveEntry], sort_col: SortCol, so
 }
 
 /// Expand selected folders to every descendant entry (by prefix).
-/// Every selection acts as a folder prefix (a synthetic dir carries its
-/// slash, and `with_trailing_slash` normalizes the rest), so one pass over
-/// the entries covers all selections; exact matches are excluded and
-/// re-added at the end.
+/// Exact matches are excluded here and re-added at the end. Matching reuses
+/// [`paths::entry_matches_norm`]: the previous inline `with_trailing_slash`
+/// comparison allocated a `String` per entry **per selection**, which is what
+/// made Ctrl+A on a large archive stall the UI.
 pub(crate) fn get_all_descendants(info: &ArchiveInfo, selected_paths: &[String]) -> Vec<String> {
-    let sels: Vec<(String, String)> = selected_paths
-        .iter()
-        .map(|s| {
-            let n = paths::normalize(s);
-            (n.clone(), paths::with_trailing_slash(&n))
-        })
-        .collect();
+    let sels = paths::normalize_sel(selected_paths);
     let mut expanded = HashSet::new();
     for e in &info.entries {
         let ep = paths::normalize(&e.path);
-        let hit = sels.iter().any(|(sel_norm, prefix)| {
-            ep != *sel_norm
-                && (ep.starts_with(prefix) || paths::with_trailing_slash(&ep).starts_with(prefix))
-        });
-        if hit {
+        if sels
+            .iter()
+            .any(|sel| ep != *sel && paths::entry_matches_norm(&ep, sel))
+        {
             expanded.insert(e.path.clone());
         }
     }
@@ -308,11 +303,13 @@ pub(crate) fn rename_path(old_name: &str, new_base: &str) -> String {
 // Widgets
 // ---------------------------------------------------------------------------
 
-/// Refresh the clickable file-manager-style breadcrumb.
+/// Refresh the clickable file-manager-style breadcrumb. Takes the listing by
+/// `Rc`: this runs once per segment of the trail, and the click handlers below
+/// capture it for the recursive refresh.
 pub(crate) fn update_breadcrumb(
     breadcrumb_box: &gtk::Box,
     current_path: &str,
-    info: &ArchiveInfo,
+    info: &Rc<ArchiveInfo>,
     state: Rc<RefCell<AppState>>,
     list_box: gtk::ListBox,
     status_left: gtk::Label,

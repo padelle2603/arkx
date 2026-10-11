@@ -4,15 +4,18 @@
 //! backend and the browser normalize the same way through these helpers.
 
 /// Strip `./` prefixes and leading `/` (e.g. `./a/b` → `a/b`).
+/// Single allocation: the prefixes are cut from the trimmed slice, not by
+/// rebuilding the string on every iteration. Called once per entry inside
+/// every backend hot loop.
 pub fn normalize(p: &str) -> String {
-    let mut s = p.trim().to_string();
-    while s.starts_with("./") {
-        s = s[2..].to_string();
+    // Every leading slash, not just one: `//etc/passwd` must not survive as an
+    // absolute path, or `dest.join(entry)` would escape the destination.
+    let s = p.trim().trim_start_matches('/');
+    let mut s = s;
+    while let Some(rest) = s.strip_prefix("./") {
+        s = rest;
     }
-    while s.starts_with('/') {
-        s = s[1..].to_string();
-    }
-    s
+    s.to_string()
 }
 
 /// Ensure a trailing `/` for directory paths (`""` stays `""`).
@@ -69,6 +72,9 @@ mod tests {
         assert_eq!(normalize("./a/b"), "a/b");
         assert_eq!(normalize("/a/b"), "a/b");
         assert_eq!(normalize("a/b"), "a/b");
+        assert_eq!(normalize("././a/b"), "a/b");
+        // A doubled slash must not survive as an absolute path.
+        assert_eq!(normalize("//etc/passwd"), "etc/passwd");
     }
 
     #[test]
