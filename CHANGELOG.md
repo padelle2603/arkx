@@ -7,11 +7,24 @@
   is remembered and nothing is downloaded: Arkx never replaces its own binary.
 - **Feature**: `arkx --check-update` for scripts. Exit `0` current, `10` a newer
   release exists, `1` GitHub unreachable.
+- **Feature**: the AppImage registers its own Dolphin **Compress / Extract**
+  menus on first launch, user-locally and without sudo. Dolphin cannot see
+  inside a bundle, so until now the entries only existed for people with a git
+  checkout and `scripts/install-menus.sh`, which no release downloader had. The
+  templates are embedded in the binary. `arkx --appmenu-extract` and
+  `--appmenu-remove` do the same by hand after moving the AppImage.
+- **Fixed**: the generated service menus no longer carry `TryExec`, which
+  `desktop-file-validate` rejects in a `Type=Service` file.
 - **Feature**: AppImage builds published from GitHub Actions on every `v*` tag.
   The workflow carries every packaging step (linuxdeploy, 7z sidecar, icons,
   service menus, docs, bake) — there is no build script in the repo.
-  `scripts/install.sh` and `scripts/uninstall.sh` are no longer part of it
-  either: the AppImage is the install method.
+  `scripts/install.sh`, `scripts/uninstall.sh` and `scripts/install-menus.sh`
+  are no longer part of it either: the AppImage is the install method, and the
+  menus the script registered are registered by the binary itself.
+- **Fixed**: the bundled 7z actually works. It was copied by hand, so it never
+  got its libraries resolved, and 7-Zip dlopen()s its codecs from a module
+  next to the executable that no dependency resolver looks for: the binary
+  started and answered "not implemented" for every format.
 - **Fixed**: the release check is one anonymous `HEAD` against
   `github.com/padelle2603/arkx/releases/latest`, not a GitHub API call: no
   token, no cookies, no JSON, no rate-limit budget shared with other apps, and

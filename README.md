@@ -51,21 +51,27 @@ From the context menu Arkx shows the same progress window as the app
 it stays open with the message. `arkx compress --no-progress` forces
 text mode (scripts, ssh).
 
-### AppImage-only setup (upkeep workflow)
+### AppImage and Dolphin
 
-If you run Arkx as an AppImage managed by upkeep (no system install),
-Dolphin can't see inside the AppImage — register the menus user-locally:
+Dolphin cannot see inside an AppImage, so the **Compress** and **Extract**
+entries do not appear on the first run. Arkx registers them itself on the next
+launch, user-locally and without sudo — nothing is installed outside your home
+and nothing is registered system-wide. You should see a one-line confirmation:
 
-```bash
-upkeep update arkx                       # needs a release with --progress support
-./scripts/install-menus.sh               # reads the path from upkeep's .desktop, no sudo
-./scripts/install-menus.sh --uninstall   # remove them again
+```
+registered ~/.local/share/kio/servicemenus/arkx-compress.desktop for Dolphin
 ```
 
-The script points the menus at the upkeep AppImage path (stable across
-updates) with its real icon. Re-run it after every `upkeep update arkx`
-(the update can drop the executable bit) and if you move the AppImage —
-otherwise Dolphin denies the launch ("not authorized to run the application").
+If you moved the AppImage or ran `upkeep update arkx` (which can drop the
+executable bit) and the menus stopped working, register them again:
+
+```bash
+arkx --appmenu-extract     # or: ./Arkx-*.AppImage --appmenu-extract
+arkx --appmenu-remove      # remove them again
+```
+
+Restart Dolphin afterwards if it was open — it rescans the menu on KIO's
+behalf when one of these runs, but only on the next start.
 Right-click files inside an archive to extract just what you selected. Wrong password? Arkx asks again instead of failing.
 
 ## Features

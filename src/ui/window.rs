@@ -1816,6 +1816,10 @@ pub fn build_ui(app: &adw::Application) {
 
     window.present();
 
+    // Register the Dolphin Compress/Extract menus on first launch. A no-op for
+    // a system install and once the flag is set; never blocks the window.
+    std::thread::spawn(crate::core::menus::auto_install);
+
     // Release check: one anonymous HEAD request, off the UI thread, silent on
     // every failure (offline, blocked network, repo with no release). The
     // version comes back through the mutex and the poll opens the notice

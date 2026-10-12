@@ -1,6 +1,5 @@
 [Desktop Entry]
 Type=Service
-TryExec=arkx
 X-KDE-ServiceTypes=KonqPopupMenu/Plugin
 MimeType=all/allfiles;inode/directory;
 Actions=compressZip;compressTarGz;compress7z;

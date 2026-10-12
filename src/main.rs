@@ -125,6 +125,8 @@ Options:
   -h, --help                       Show this help
   -V, --version                    Show version
   --check-update                   Ask GitHub for the newest release and report it
+  --appmenu-extract                Register the Dolphin Compress/Extract menus
+  --appmenu-remove                 Remove them again
   -p <password>                    Password
   --threads <N>                    Cap worker threads (default: auto from CPU/RAM;
                                    also ARKX_THREADS=N)
@@ -183,6 +185,53 @@ fn check_update() -> ! {
     });
 }
 
+/// `arkx --appmenu-extract` / `--appmenu-remove`: the manual form of what the
+/// AppImage does on first launch, for when the menus moved or were deleted.
+fn appmenu(extract: bool) -> ! {
+    use crate::core::menus;
+
+    if extract {
+        let Some(exe) = menus::appimage_path() else {
+            eprintln!("error: not running from an AppImage; the menus already point at `arkx`");
+            std::process::exit(EXIT_ERROR);
+        };
+        match menus::install(&exe, menus::icon_path().as_deref()) {
+            Ok(paths) => {
+                for path in &paths {
+                    println!("{}", path.display());
+                }
+                println!("Right-click a folder in Dolphin -> Compress.");
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(EXIT_ERROR);
+            }
+        }
+    }
+    match menus::uninstall() {
+        Ok(paths) if paths.is_empty() => {
+            if !extract {
+                println!(
+                    "No Arkx service menus found in {}",
+                    menus::dest_dir().display()
+                );
+            }
+            std::process::exit(0);
+        }
+        Ok(paths) => {
+            for path in &paths {
+                println!("removed {}", path.display());
+            }
+            std::process::exit(0);
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(EXIT_ERROR);
+        }
+    }
+}
+
 fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
     // Usage: arkx x archive.7z [dest]  | arkx l archive.zip
     // Uses all threads and the optimized backend
@@ -203,6 +252,12 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
     }
     if args.len() >= 2 && args[1] == "--check-update" {
         check_update();
+    }
+    if args.len() >= 2 && args[1] == "--appmenu-extract" {
+        appmenu(true);
+    }
+    if args.len() >= 2 && args[1] == "--appmenu-remove" {
+        appmenu(false);
     }
 
     if args.len() < 2 {

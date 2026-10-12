@@ -50,8 +50,14 @@ was unreachable **or the repository has no published release yet**.
 - **Settings**: Arkx stores one configuration file, `config.json` in
   `$XDG_CONFIG_HOME/arkx/` (`~/.config/arkx/config.json` by default). It holds
   only the two speed profiles you pick — one of three levels for extraction,
-  one of three for compression. No personal data, no history. The file manager
+  one of three for compression — and one boolean recording that the Dolphin
+  menus were already registered. No personal data, no history. The file manager
   may remember that Arkx opens archives (standard MIME association).
+- **Dolphin service menus**: when you launch an AppImage, Arkx writes two
+  desktop entries to `$XDG_DATA_HOME/kio/servicemenus/` (~/.local/share by
+  default) so that Dolphin can offer **Compress** and **Extract** on your files.
+  They contain the path of your AppImage and nothing else, and they are only
+  written once, on that first launch. `arkx --appmenu-remove` deletes them.
 
 ## Permissions
 
@@ -59,7 +65,8 @@ Arkx needs only what the job requires:
 
 - read the archives you select, write the files you ask to extract;
 - spawn the bundled or system `7z` helper for formats the native backend
-  does not cover.
+  does not cover;
+- write the two Dolphin menu entries described above, in your home directory.
 
 No camera, microphone, location, contacts or background services are used.
 

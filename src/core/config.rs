@@ -54,6 +54,11 @@ pub struct Config {
     pub extraction: ExtractTier,
     #[serde(default)]
     pub compression: CompressTier,
+    /// Whether the Dolphin service menus were already registered by the
+    /// AppImage on first launch (`core::menus`). Set once, never read for
+    /// anything else.
+    #[serde(default)]
+    pub appmenus_installed: bool,
 }
 
 /// Runtime mirror of the persisted config. Written on `init()`/`set_…()`;
@@ -128,6 +133,7 @@ pub fn apply(extraction: ExtractTier, compression: CompressTier) {
     *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = Config {
         extraction,
         compression,
+        appmenus_installed: appmenus_installed(),
     };
 }
 
@@ -135,6 +141,22 @@ pub fn apply(extraction: ExtractTier, compression: CompressTier) {
 pub fn set_extraction(tier: ExtractTier) {
     let compression = compression();
     apply(tier, compression);
+    save_current();
+}
+
+/// Whether the Dolphin service menus have already been registered.
+pub fn appmenus_installed() -> bool {
+    CURRENT
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .appmenus_installed
+}
+
+/// Remember that the service menus are in place and persist immediately.
+pub fn set_appmenus_installed(done: bool) {
+    let mut cfg = *CURRENT.read().unwrap_or_else(|e| e.into_inner());
+    cfg.appmenus_installed = done;
+    *CURRENT.write().unwrap_or_else(|e| e.into_inner()) = cfg;
     save_current();
 }
 
@@ -187,9 +209,20 @@ mod tests {
         let cfg = Config {
             extraction: ExtractTier::Conservative,
             compression: CompressTier::Small,
+            appmenus_installed: true,
         };
         save_to(&cfg, &path);
         assert_eq!(load_from(&path), cfg);
+    }
+
+    #[test]
+    fn a_config_without_the_flag_still_loads() {
+        // Written by any version before the flag existed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.json");
+        std::fs::write(&path, r#"{"extraction":"fast","compression":"small"}"#).unwrap();
+        let cfg = load_from(&path);
+        assert!(!cfg.appmenus_installed);
     }
 
     #[test]
