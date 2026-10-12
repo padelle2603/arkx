@@ -605,12 +605,24 @@ fn zip_volume_split_uses_info_zip_when_installed() {
     }
     let tmp = tempfile::tempdir().unwrap();
     let src = tmp.path().join("data.bin");
-    fs::write(&src, vec![0x5A; 128 * 1024]).unwrap();
+    // Incompressible and deterministic: a repeated byte deflates to nothing,
+    // so 64k volumes would never appear. A plain LCG is plenty to keep the
+    // compressed archive over the 64k floor, and keeps the test hermetic.
+    let mut state: u32 = 0x5DEECE66;
+    let mut data = Vec::with_capacity(512 * 1024);
+    for _ in 0..(512 * 1024) {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        data.push((state >> 16) as u8);
+    }
+    fs::write(&src, &data).unwrap();
     let archive = tmp.path().join("vol.zip");
 
     let bm = backend();
-    // 10k volumes on a 128k file force several parts.
-    bm.create(&archive, &[src], 6, None, Some("10k"), None)
+    // Info-ZIP rejects anything below 64k with "minimum split size is 64 KB",
+    // so a smaller value made this test fail on any machine that had `zip`
+    // installed while it silently skipped everywhere else. 512k of random
+    // bytes over 64k volumes force several parts.
+    bm.create(&archive, &[src], 6, None, Some("64k"), None)
         .unwrap();
 
     // Info-ZIP naming: vol.z01, vol.z02, …, vol.zip (last part).

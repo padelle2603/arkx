@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.6.3 — parallel zip creation, per-entry extract progress, MT xz
 
 - **Feature**: the GUI tells you when a newer Arkx exists. One small window at
   startup, "Download" hands over to your browser, "Not now" closes it. Nothing
@@ -16,7 +16,6 @@
   `github.com/padelle2603/arkx/releases/latest`, not a GitHub API call: no
   token, no cookies, no JSON, no rate-limit budget shared with other apps, and
   nothing written to disk. Every failure is silent.
-
 - **Fixed**: the open-time integrity check no longer locks the application. It
   runs in the background without taking the busy flag, so a huge archive stays
   browsable and extractable while the CRC pass reads it; it honours cancellation
@@ -79,7 +78,6 @@
   backends. It stopped zip bombs but also refused legitimate large archives
   (a 60 GiB game could not be extracted). See README "Known limits".
 
-## v1.6.3 — parallel zip creation, per-entry extract progress, MT xz
 
 - **Perf**: zip creation now compresses files in parallel (each worker emits an
   in-memory chunk that is merged verbatim into the final archive, no
