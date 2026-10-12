@@ -61,18 +61,49 @@ jobs:
       # the AppImage, so it lives here and not in a script the repo carries.
       - name: Deploy into AppDir
         run: |
+          # `7z` is a shell wrapper on most distributions and the real binary
+          # moved between releases; linuxdeploy only accepts an ELF, so pick
+          # the first one that actually is one.
+          SEVEN=""
+          for cand in "$(command -v 7z)" /usr/bin/7zz /usr/lib/7zip/7z \
+                      /usr/bin/7za /usr/bin/7zr; do
+            [ -x "$cand" ] || continue
+            case "$(file -b "$cand")" in *ELF*) SEVEN="$cand"; break ;; esac
+          done
+          [ -n "$SEVEN" ] || { echo "no ELF 7z binary found"; exit 1; }
+          echo "7z binary: $SEVEN"
+
+          # Every binary goes through linuxdeploy so its shared libraries get
+          # resolved. Copying 7z by hand left it without its codecs: on Ubuntu
+          # 24.04 p7zip-full is transitional and 7zip 23.01 does not ship
+          # /usr/lib/p7zip, so RAR/ISO/CAB extraction would silently fail.
           ./linuxdeploy --appdir AppDir \
             -e target/release/arkx \
+            -e "$SEVEN" \
             -e "$(command -v bsdtar)" \
             -d data/arkx.desktop \
             -i data/icons/hicolor/256x256/apps/arkx.png \
             --plugin gtk
 
-          # p7zip keeps its codecs in a sibling directory: ship them too or
-          # RAR/7Z/ISO/CAB extraction breaks in the bundle.
-          mkdir -p AppDir/usr/lib
-          cp "$(command -v 7z)" AppDir/usr/bin/
-          cp -r /usr/lib/p7zip AppDir/usr/lib/
+          # 7-Zip dlopen()s its codecs and looks for "7z.so" next to its own
+          # executable, so no dependency resolver finds it and a copy in
+          # usr/lib is not enough. Without it the binary starts and answers
+          # "not implemented" for every format. Some builds (Debian's 7zip
+          # 23.01) link the codecs in instead, so this is copy-if-present —
+          # the round-trip below is what actually proves it works.
+          CODEC=""
+          for dir in "$(dirname "$SEVEN")" /usr/lib/p7zip /usr/lib/7zip; do
+            for m in "$dir/7z.so" "$dir/Codecs/7z.so"; do
+              if [ -f "$m" ]; then CODEC="$m"; break; fi
+            done
+            [ -n "$CODEC" ] && break
+          done
+          if [ -n "$CODEC" ]; then
+            echo "7z codecs: $CODEC"
+            cp "$CODEC" AppDir/usr/bin/7z.so
+          else
+            echo "no separate 7z codec module; assuming it is linked in"
+          fi
 
           mkdir -p AppDir/usr/share/icons AppDir/usr/share/doc/arkx \
                    AppDir/usr/share/kio/servicemenus
@@ -80,8 +111,9 @@ jobs:
           cp data/arkx.desktop AppDir/
           cp data/icons/hicolor/256x256/apps/arkx.png AppDir/arkx.png
           cp LEGAL.md PRIVACY.md README.md AppDir/usr/share/doc/arkx/
-          # Service menus ship as reference: an AppImage cannot register them
-          # itself. ./scripts/install-menus.sh points Dolphin at the AppImage.
+          # Templates also ship inside the binary (include_str!), so the menus
+          # work from any install method. This copy just keeps them in the
+          # bundle for anyone who extracts it.
           cp data/servicemenus/*.desktop AppDir/usr/share/kio/servicemenus/
 
       - name: Smoke test inside AppDir
@@ -89,6 +121,15 @@ jobs:
           AppDir/usr/bin/arkx --version
           test -x AppDir/usr/bin/7z || { echo "7z missing from AppDir!"; exit 1; }
           test -x AppDir/usr/bin/bsdtar || { echo "bsdtar missing from AppDir!"; exit 1; }
+          # `test -x` only proves the file is there. Round-trip a real archive
+          # so a bundle without the 7z codecs fails here instead of on a
+          # user's desktop the first time they open a RAR.
+          mkdir -p /tmp/smoke && head -c 200000 /dev/urandom > /tmp/smoke/blob
+          AppDir/usr/bin/7z a /tmp/smoke/out.7z /tmp/smoke/blob >/dev/null
+          AppDir/usr/bin/7z l /tmp/smoke/out.7z | grep -q blob
+          AppDir/usr/bin/bsdtar -cf /tmp/smoke/out.tar /tmp/smoke/blob
+          AppDir/usr/bin/bsdtar -tf /tmp/smoke/out.tar | grep -q blob
+          rm -rf /tmp/smoke
 
       - name: Bake
         run: OUTPUT="$ARKX_APPIMAGE" ./linuxdeploy --appdir AppDir --output appimage
