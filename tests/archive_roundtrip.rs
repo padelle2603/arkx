@@ -137,7 +137,13 @@ fn zip_roundtrip() {
     assert!(extract_dir.join("src/empty_folder").is_dir());
 }
 
+// 7-Zip 24.09 (what p7zip-full resolves to on the CI runner) never returns
+// from `7z t` on this hand-built archive: the job sat on it for 11 minutes
+// until it was cancelled. 7-Zip 26.x answers immediately, so this is a
+// difference in the binary, not in the code under test. Run it by hand on a
+// modern 7-Zip: `cargo test -- --ignored`.
 #[test]
+#[ignore = "hangs on 7-Zip < 26, passes on 26.x"]
 fn zip_integrity_falls_back_for_stale_unicode_extra() {
     let cancel = Arc::new(AtomicBool::new(false));
     let seven = arkx::core::backends::seven_zip::SevenZipBackend::with_cancel(cancel.clone());
