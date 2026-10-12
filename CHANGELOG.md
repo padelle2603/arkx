@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.6.4 — the AppImage stops forcing X11 and a theme
+
+- **Fixed**: parts of the bundled GUI were translucent: popovers, dialogs and the
+  edge around the window frame. Only the AppImage did it, because
+  `linuxdeploy-plugin-gtk` makes the bundle run with `GDK_BACKEND=x11`, with
+  `GTK_THEME=Adwaita` forced, and with the system GSettings schemas replaced by
+  the ones inside the bundle. Arkx now undoes all three in an AppRun hook of its
+  own, so the bundle runs on the same backend, theme and colour scheme as the
+  installed binary.
+- **Fixed**: the window colours no longer follow the system light/dark
+  preference. The palette has always been hardcoded dark while the framework was
+  free to paint its own header, popovers and dialogs light on top of it; inside
+  the bundle it was worse, because the bundled schemas hid the system
+  colour-scheme entirely.
+- **Fixed**: every surface the stylesheet paints now sets `background-color`
+  instead of the `background` shorthand, which also resets `background-image`,
+  and the surfaces the theme owns — popover, menu, tooltip, dialog — are listed
+  explicitly with an opaque colour. libadwaita paints its dialogs with
+  `background: none` on purpose and leaves the colour to an inner sheet, which a
+  thinner GTK leaves unfilled.
+- **Fixed**: the window carries no `box-shadow` of its own. That is the
+  client-side-decorations shadow GTK draws itself, and on X11 it came back as an
+  alpha ring around the opaque frame.
+- **Fixed**: the stylesheet uses nothing newer than GTK 4.14, the version inside
+  the bundle. `opacity` and the `border-color` shorthand need 4.16, where GTK
+  drops those declarations without a word.
+- **Fixed**: a stylesheet GTK cannot parse now says so on stderr, with the line
+  and column, instead of the declaration quietly disappearing. That silence is
+  what hid the two properties above.
+
 ## v1.6.3 — parallel zip creation, per-entry extract progress, MT xz
 
 - **Feature**: the GUI tells you when a newer Arkx exists. One small window at

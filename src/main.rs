@@ -40,6 +40,16 @@ fn main() -> anyhow::Result<()> {
         .application_id("io.github.padelle.arkx")
         .build();
 
+    // The palette is hardcoded dark (see ui::window), so the framework has to
+    // agree: left on "default" it follows the system and paints its own header,
+    // popovers and dialogs light on top of dark surfaces. Inside the AppImage it
+    // was worse, because the bundled schemas hid the system colour-scheme
+    // entirely. Startup, not before it: building the app does not initialise
+    // GTK, and AdwStyleManager asserts that it already is.
+    app.connect_startup(|_| {
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+    });
+
     app.connect_activate(|app| {
         // A second launch (e.g. double-click while the primary instance is
         // alive) forwards `activate` without argv: focus the existing window

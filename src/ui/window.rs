@@ -213,47 +213,67 @@ fn profile_choice_row(
 // Builds the main UI
 pub fn build_ui(app: &adw::Application) {
     // CSS distintivo — responsive + frame + non generico
+    //
+    // Four rules the AppImage taught us, all of them about not trusting the
+    // GTK inside the bundle (4.14) to match the one we develop against:
+    //  - `background-color`, never the `background` shorthand: it resets
+    //    background-image too, and a theme tint or backdrop must not survive
+    //    into a surface we own.
+    //  - the surfaces the theme owns (popover, menu, tooltip, dialog) are listed
+    //    explicitly instead of inherited: libadwaita paints its dialogs with
+    //    `background: none` on purpose and leaves the colour to an inner sheet,
+    //    so a thinner stack hands back a panel you can see the desktop through.
+    //  - the window carries no `box-shadow`: that is the CSD shadow GTK draws
+    //    itself, and on X11 it is an alpha ring around our opaque frame.
+    //  - nothing newer than GTK 4.14 (`opacity`, the `border-color` shorthand):
+    //    on older GTK the declaration is dropped, silently.
     let css = r#"
-        window { background: #09090b; }
-        .app-frame { margin: 12px; border: 1px solid #27272a; border-radius: 12px; background: #0f0f0f; box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.3); }
-        .app-header { background: #1e1e1e; border-bottom: 1px solid #2a2a2a; padding: 6px 8px; }
+        window { background-color: #09090b; box-shadow: none; }
+        .app-frame { margin: 12px; border: 1px solid #27272a; border-radius: 12px; background-color: #0f0f0f; box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.3); }
+        .app-header { background-color: #1e1e1e; border-bottom: 1px solid #2a2a2a; padding: 6px 8px; }
         .header-btn { padding: 6px 10px; border-radius: 8px; }
-        .header-btn.suggested-action { background: #2563eb; color: white; }
-        .header-btn.suggested-action:hover { background: #1d4ed8; }
-        .file-table { background: #0f0f0f; }
+        .header-btn.suggested-action { background-color: #2563eb; color: white; }
+        .header-btn.suggested-action:hover { background-color: #1d4ed8; }
+        .file-table { background-color: #0f0f0f; }
         .file-row { padding: 8px 12px; border-bottom: 1px solid #1f1f23; min-height: 44px; }
-        .file-row:hover { background: #1e1e2e; }
-        .file-row:selected { background: #2563eb; color: white; }
+        .file-row:hover { background-color: #1e1e2e; }
+        .file-row:selected { background-color: #2563eb; color: white; }
         .file-row:selected label { color: white; }
-        .status-bar { background: #1e1e1e; border-top: 1px solid #27272a; padding: 6px 12px; font-size: 12px; color: #a1a1aa; }
-        .progress-bar trough { min-height: 6px; background: #27272a; border-radius: 3px; }
-        .progress-bar progress { background: #3b82f6; border-radius: 3px; transition: width 100ms ease; }
+        .status-bar { background-color: #1e1e1e; border-top: 1px solid #27272a; padding: 6px 12px; font-size: 12px; color: #a1a1aa; }
+        .progress-bar trough { min-height: 6px; background-color: #27272a; border-radius: 3px; }
+        .progress-bar progress { background-color: #3b82f6; border-radius: 3px; transition: width 100ms ease; }
         .empty-state { padding: 48px; color: #71717a; }
         .empty-state title { font-size: 18px; font-weight: 600; color: #e4e4e7; margin-bottom: 8px; }
-        .search-entry { background: #27272a; border: 1px solid #3f3f46; border-radius: 8px; padding: 6px 12px; min-width: 140px; }
-        .search-entry:focus { border-color: #3b82f6; }
+        .search-entry { background-color: #27272a; border: 1px solid #3f3f46; border-radius: 8px; padding: 6px 12px; min-width: 140px; }
+        .search-entry:focus { border: 1px solid #3b82f6; }
         .icon-folder { color: #f59e0b; }
         .icon-file { color: #71717a; }
         .icon-archive { color: #3b82f6; }
-        .badge { background: #27272a; border-radius: 12px; padding: 2px 8px; font-size: 11px; color: #a1a1aa; }
-        .badge-encrypted { background: #dc2626; color: white; }
-        .breadcrumb { background: #18181b; border-bottom: 1px solid #27272a; padding: 6px 12px; }
+        .badge { background-color: #27272a; border-radius: 12px; padding: 2px 8px; font-size: 11px; color: #a1a1aa; }
+        .badge-encrypted { background-color: #dc2626; color: white; }
+        .breadcrumb { background-color: #18181b; border-bottom: 1px solid #27272a; padding: 6px 12px; }
         .breadcrumb-btn { padding: 4px 8px; border-radius: 6px; }
-        .breadcrumb-btn:hover { background: #27272a; }
+        .breadcrumb-btn:hover { background-color: #27272a; }
         .breadcrumb-sep { color: #52525b; margin: 0 2px; }
-        .table-header { background: #18181b; border-bottom: 1px solid #27272a; padding: 6px 12px; font-size: 11px; font-weight: 600; color: #a1a1aa; letter-spacing: 0.5px; }
+        .table-header { background-color: #18181b; border-bottom: 1px solid #27272a; padding: 6px 12px; font-size: 11px; font-weight: 600; color: #a1a1aa; letter-spacing: 0.5px; }
+        /* Surfaces the theme owns. Listed here because a transparent one reads
+           as a hole in the window: libadwaita paints its own dialogs with
+           `background: none` on purpose and delegates the colour to an inner
+           sheet, which a theme running on a GTK older than ours never fills. */
+        popover, menu, tooltip { background-color: #1e1e1e; color: #e4e4e7; }
+        dialog.background, dialog.background sheet { background-color: #1e1e1e; color: #e4e4e7; }
         /* Speed-profile popover */
         .profile-popover { padding: 4px; min-width: 350px; }
         .profile-heading { font-size: 11px; font-weight: 700; letter-spacing: 0.4px; color: #a1a1aa; padding: 6px 8px 2px; }
         .profile-name { font-weight: 600; }
         .profile-caption { font-size: 11px; color: #71717a; }
         .profile-tag { font-size: 10px; font-weight: 600; border-radius: 9px; padding: 2px 8px; }
-        .badge-recommended { color: #22c55e; background: rgba(34, 197, 94, 0.14); }
-        .badge-caution { color: #f59e0b; background: rgba(245, 158, 11, 0.15); }
-        /* Scrollbar sempre visibili quando serve */
-        scrollbar { opacity: 1; }
-        scrollbar slider { min-width: 8px; min-height: 8px; background: #3f3f46; border-radius: 4px; }
-        scrollbar slider:hover { background: #52525b; }
+        .badge-recommended { color: #22c55e; background-color: rgba(34, 197, 94, 0.14); }
+        .badge-caution { color: #f59e0b; background-color: rgba(245, 158, 11, 0.15); }
+        /* Scrollbar sempre visibili quando serve. No background here: these are
+           overlay scrollbars, and painting one turns it into a visible gutter. */
+        scrollbar slider { min-width: 8px; min-height: 8px; background-color: #3f3f46; border-radius: 4px; }
+        scrollbar slider:hover { background-color: #52525b; }
         scrolledwindow { border: none; }
         /* Responsive helpers */
         .narrow .header-btn label { font-size: 12px; }
@@ -265,6 +285,14 @@ pub fn build_ui(app: &adw::Application) {
         popover.context-menu scrolledwindow { border: none; }
     "#;
     let provider = gtk::CssProvider::new();
+    // A declaration GTK cannot parse is dropped and nothing is printed by
+    // default, which is how `opacity` and `border-color` used to vanish on the
+    // GTK 4.14 inside the AppImage. stderr names the line, so the next one is
+    // a five-second fix instead of a screenshot hunt.
+    provider.connect_parsing_error(|_, section, err| {
+        let at = section.start_location();
+        eprintln!("arkx css {}:{}: {err}", at.lines() + 1, at.line_chars() + 1);
+    });
     provider.load_from_string(css);
     if let Some(display) = gtk::gdk::Display::default() {
         gtk::style_context_add_provider_for_display(

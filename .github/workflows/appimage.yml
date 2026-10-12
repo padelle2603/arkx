@@ -105,6 +105,23 @@ jobs:
             echo "no separate 7z codec module; assuming it is linked in"
           fi
 
+          # linuxdeploy-plugin-gtk installs an AppRun hook that forces
+          # GDK_BACKEND=x11, GTK_THEME=Adwaita and REPLACES GSETTINGS_SCHEMA_DIR.
+          # Arkx carries its own palette: none of the three is needed, and all
+          # three make the bundled GUI render differently from the installed
+          # binary (popovers, dialogs and the frame edge came out translucent
+          # under XWayland). Hooks run in alphabetical order, so this one runs
+          # after the plugin's and undoes it.
+          cat > AppDir/apprun-hooks/99-arkx.sh <<'HOOK'
+          #!/usr/bin/env bash
+          unset GDK_BACKEND
+          unset GTK_THEME
+          if [ -d /usr/share/glib-2.0/schemas ]; then
+            export GSETTINGS_SCHEMA_DIR="${GSETTINGS_SCHEMA_DIR:+$GSETTINGS_SCHEMA_DIR:}/usr/share/glib-2.0/schemas"
+          fi
+          HOOK
+          chmod +x AppDir/apprun-hooks/99-arkx.sh
+
           mkdir -p AppDir/usr/share/icons AppDir/usr/share/doc/arkx \
                    AppDir/usr/share/kio/servicemenus
           cp -r data/icons/hicolor AppDir/usr/share/icons/
@@ -158,7 +175,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Notes are the section of this version in CHANGELOG.md, not GitHub's
+          # commit list: --generate-notes published v1.6.3 with a body that
+          # said nothing but "Full Changelog". A missing section is a changelog
+          # bug, so it fails the job instead of shipping a mute release.
+          notes="$(awk -v tag="## $GITHUB_REF_NAME" '
+            inside && substr($0, 1, 3) == "## " { exit }
+            !inside && substr($0, 1, length(tag)) == tag &&
+              (length($0) == length(tag) || substr($0, length(tag) + 1, 1) == " ") { inside = 1; next }
+            inside { print }
+          ' CHANGELOG.md | sed '/./,$!d')"
+          if [ -z "$notes" ]; then
+            echo "::error::CHANGELOG.md has no '## $GITHUB_REF_NAME' section"
+            exit 1
+          fi
           gh release create "$GITHUB_REF_NAME" \
             "$ARKX_APPIMAGE" \
             --title "Arkx $GITHUB_REF_NAME" \
-            --generate-notes
+            --notes "$notes"

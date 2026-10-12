@@ -45,7 +45,7 @@ dependencies = [
 
 [[package]]
 name = "arkx"
-version = "1.6.3"
+version = "1.6.4"
 dependencies = [
  "anyhow",
  "bzip2 0.4.4",
