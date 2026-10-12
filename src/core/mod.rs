@@ -3,7 +3,7 @@
 //! Format detection ([`detector`]), the backend chain that opens/creates
 //! archives ([`backends`]), typed errors ([`error`]), persisted compression
 //! profiles ([`config`]) and the filesystem helpers used across the app
-//! ([`fm`], [`paths`], [`util`]).
+//! ([`fm`], [`paths`], [`util`]) and the startup release check ([`update`]).
 
 pub mod archive;
 pub mod backends;
@@ -12,4 +12,5 @@ pub mod detector;
 pub mod error;
 pub mod fm;
 pub mod paths;
+pub mod update;
 pub mod util;

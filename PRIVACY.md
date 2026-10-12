@@ -7,8 +7,39 @@ there is almost nothing to disclose.
 
 - Arkx collects **no personal data**, no usage statistics, no telemetry and no
   crash reports.
-- Arkx makes **no network connections** — not for updates, not for anything.
-  (GitHub release downloads happen in your browser, outside the app.)
+- Arkx makes **exactly one kind of network connection**, described below. There
+  is no other.
+
+## The one network request
+
+When the GUI starts, Arkx sends a single `HEAD` request to
+
+```
+https://github.com/padelle2603/arkx/releases/latest
+```
+
+to find out whether a newer release exists. If one does, a small "Arkx *n.m.p*
+is available" window appears; closing it, or pressing **Not now**, changes
+nothing. **Download** simply opens the release page in your browser.
+
+What that request does **not** contain:
+
+- no account, no token, no API key, no cookie jar;
+- no GitHub API call, so it does not spend the API rate limit that other apps
+  on your IP share;
+- no version, distribution, hostname or machine identifier — the User-Agent is
+  the single word `arkx`;
+- no request body and no response body: GitHub answers with an empty redirect
+  that carries the release tag in a header;
+- nothing is written to disk as a result, and no timestamp is kept.
+
+What GitHub necessarily sees, like any website you visit: your IP address and
+the request time. If you would rather it did not, run Arkx offline, or set
+`--check-update` aside and take releases from the browser yourself.
+
+`arkx --check-update` runs the same request on demand and is scriptable: exit
+`0` means you are current, `10` means a newer release exists, `1` means GitHub
+was unreachable **or the repository has no published release yet**.
 
 ## What stays on your device
 

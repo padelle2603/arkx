@@ -6,9 +6,10 @@ use adw::prelude::*;
 use std::path::PathBuf;
 
 /// CLI exit codes (GNU/tar convention): 0 success, 1 operation error,
-/// 2 usage/argument error.
+/// 2 usage/argument error, 10 a newer release is available.
 const EXIT_ERROR: i32 = 1;
 const EXIT_USAGE: i32 = 2;
+const EXIT_UPDATE: i32 = 10;
 
 fn main() -> anyhow::Result<()> {
     // Load the persisted speed profiles (extraction/compression) once, so CLI
@@ -123,6 +124,7 @@ Commands:
 Options:
   -h, --help                       Show this help
   -V, --version                    Show version
+  --check-update                   Ask GitHub for the newest release and report it
   -p <password>                    Password
   --threads <N>                    Cap worker threads (default: auto from CPU/RAM;
                                    also ARKX_THREADS=N)
@@ -162,6 +164,25 @@ fn cli_progress() -> Option<Box<dyn Fn(crate::core::archive::ProgressInfo) + Sen
     }))
 }
 
+/// `arkx --check-update`: the scriptable half of the startup update window.
+/// Exit 0 = current, 10 = newer release available, 1 = GitHub unreachable.
+fn check_update() -> ! {
+    let current = env!("CARGO_PKG_VERSION");
+    let Some(remote) = core::update::latest_tag() else {
+        println!("arkx {current}");
+        eprintln!("error: no release published on GitHub yet, or github.com is unreachable");
+        std::process::exit(EXIT_ERROR);
+    };
+    println!("arkx {current} (current)");
+    println!("Latest release: v{remote}");
+    println!("https://github.com/padelle2603/arkx/releases/tag/v{remote}");
+    std::process::exit(if core::update::is_available(&remote) {
+        EXIT_UPDATE
+    } else {
+        0
+    });
+}
+
 fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
     // Usage: arkx x archive.7z [dest]  | arkx l archive.zip
     // Uses all threads and the optimized backend
@@ -179,6 +200,9 @@ fn run_cli(args: Vec<String>) -> anyhow::Result<()> {
             crate::core::util::effective_threads()
         );
         return Ok(());
+    }
+    if args.len() >= 2 && args[1] == "--check-update" {
+        check_update();
     }
 
     if args.len() < 2 {

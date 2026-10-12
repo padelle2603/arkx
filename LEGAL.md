@@ -21,6 +21,12 @@ Arkx bundles or invokes the following third-party software:
 | GTK 4, libadwaita, GLib, Pango, Cairo (system or AppImage bundle) | LGPL-2.1-or-later | © the GNOME project contributors. Dynamically linked. |
 | Rust crates (see `Cargo.lock`) | MIT / Apache-2.0 / various OSI-approved | Dependency licenses ship with the source distribution. |
 
+The release check pulls in one dependency tree beyond Arkx itself: `ureq` with
+`rustls` (Apache-2.0 / MIT), used over HTTPS against `github.com` only. It is
+built with `default-features = false`, which drops the cookie store, charset
+handling and the platform TLS verifier; certificate roots come from the
+`webpki-roots` bundle.
+
 Trademarks (ZIP, RAR, Windows, …) belong to their respective owners and are
 used here only to describe compatible file formats.
 

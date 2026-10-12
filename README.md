@@ -4,6 +4,20 @@ Fast, multi-threaded archive manager for Linux — open, browse and extract ZIP,
 
 ![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue) ![Rust](https://img.shields.io/badge/Rust-1.90-orange) ![GTK4](https://img.shields.io/badge/GTK4-blue)
 
+## Install
+
+Grab the **AppImage** from [Releases](https://github.com/padelle2603/arkx/releases),
+make it executable and run it:
+
+```bash
+chmod +x Arkx-*-x86_64.AppImage
+./Arkx-*-x86_64.AppImage
+```
+
+No installer, no `sudo`, nothing written outside your home. Keep the file
+wherever you like and re-download to update — or let [upkeep](https://github.com/padelle2603/upkeep)
+do it for you.
+
 ## Use
 
 ```bash
@@ -18,13 +32,14 @@ arkx x archive.rar . -p secret   # RAR with password
 arkx a archive.7z docs/ -l 9     # create an archive
 arkx a archive.tar.zst docs/ --threads 4  # cap worker threads (or ARKX_THREADS=4)
 arkx c --here --format=zip docs/ # compress (Dolphin-style, no overwrite)
+arkx --check-update              # is a newer release out? 0=no 10=yes 1=offline
 arkx --help                      # everything else
 ```
 
 ## Dolphin integration (replaces Ark's Compress menu)
 
 Uninstalling Ark removes its right-click **Compress** entry (it was an Ark
-plugin, not a Dolphin feature). `./scripts/install.sh` restores it with Arkx:
+plugin, not a Dolphin feature). Arkx restores it user-locally:
 
 * Right-click folder/file → **Compress** → Compress to zip... / tar.gz... / 7zip...
 * Right-click archive → **Extract** → Extract here / Extract to...
@@ -81,10 +96,17 @@ cargo build --release
 ./target/release/arkx
 ```
 
-Tests: `cargo test` · Lint: `cargo clippy` · Install: `./scripts/install.sh`
+Tests: `cargo test` · Lint: `cargo clippy`
+
+The AppImage is built by GitHub Actions on every `v*` tag — there is no build
+script in the repo. To try a packaging change before pushing, run
+`.github/workflows/appimage.yml` with **workflow_dispatch**.
 
 ## Privacy & Legal
 
-Arkx works **100% offline** — no accounts, no telemetry, no network calls. See [PRIVACY.md](PRIVACY.md). License and third-party notices: [LEGAL.md](LEGAL.md) (GPL-3.0).
+No accounts, no telemetry, no usage data. The only network call is one
+anonymous check for a newer release at startup — see
+[PRIVACY.md](PRIVACY.md) for exactly what it sends. License and third-party
+notices: [LEGAL.md](LEGAL.md) (GPL-3.0).
 
 *Developed with the assistance of [opencode](https://opencode.ai).*

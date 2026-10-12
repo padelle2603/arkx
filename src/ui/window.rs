@@ -20,6 +20,10 @@ use crate::ui::dialogs;
 use crate::ui::progress_window::ProgressWindow;
 use crate::worker::{JobKind, JobResult, JobTag, WorkerEvent, WorkerPool};
 
+/// Version offered by the startup release check, filled in by its worker
+/// thread and drained by the UI thread (same handshake as `PENDING_OPEN`).
+static AVAILABLE_UPDATE: Mutex<Option<String>> = Mutex::new(None);
+
 /// Path queued by the file-manager `GApplication::open` handler. `build_ui`
 /// drains it when it constructs the window (a `gio open` path is NOT in argv).
 static PENDING_OPEN: Mutex<Option<PathBuf>> = Mutex::new(None);
@@ -1812,6 +1816,30 @@ pub fn build_ui(app: &adw::Application) {
 
     window.present();
 
+    // Release check: one anonymous HEAD request, off the UI thread, silent on
+    // every failure (offline, blocked network, repo with no release). The
+    // version comes back through the mutex and the poll opens the notice
+    // window — same handshake as PENDING_OPEN.
+    std::thread::spawn(|| {
+        if let Ok(mut guard) = AVAILABLE_UPDATE.lock() {
+            *guard = crate::core::update::available_version();
+        }
+    });
+    let update_parent = window.clone();
+    let mut waited = 0u8;
+    glib::timeout_add_local(Duration::from_millis(400), move || {
+        waited += 1;
+        if let Some(version) = AVAILABLE_UPDATE.lock().ok().and_then(|mut g| g.take()) {
+            show_update(&version, &update_parent);
+            return glib::ControlFlow::Break;
+        }
+        // The request gives up on its own after 5s; stop watching after 15.
+        if waited >= 38 {
+            return glib::ControlFlow::Break;
+        }
+        glib::ControlFlow::Continue
+    });
+
     // Poll worker events every 50ms (throttled so the UI is not spammed).
     // The whole loop works off one shared `Ui` snapshot plus small locals.
     let ui_poll = ui.clone();
@@ -2438,6 +2466,72 @@ fn archive_editable(ui: &Ui) -> bool {
         None => true,
         Some(info) => crate::core::backends::BackendManager::modifiable_label(&info.format),
     }
+}
+
+/// "Arkx 1.7.0 is available" notice, shown once per launch as its own window.
+///
+/// "Download" hands over to the browser: Arkx never replaces its own binary.
+/// "Not now" just closes — nothing is remembered, so the check runs again on
+/// the next launch and the user is asked again.
+fn show_update(version: &str, parent: &adw::ApplicationWindow) {
+    let window: gtk::Window = gtk::Window::builder()
+        .title("Arkx update")
+        .default_width(460)
+        .transient_for(parent)
+        .build();
+
+    let header = adw::HeaderBar::new();
+    header.set_show_end_title_buttons(true);
+
+    let not_now = gtk::Button::with_label("Not now");
+    let win = window.clone();
+    not_now.connect_clicked(move |_| win.close());
+    header.pack_start(&not_now);
+
+    let download = gtk::Button::with_label("Download");
+    download.add_css_class("suggested-action");
+    let win = window.clone();
+    download.connect_clicked(move |_| {
+        let _ = std::process::Command::new("xdg-open")
+            .arg(crate::core::update::RELEASES_URL)
+            .spawn();
+        win.close();
+    });
+    header.pack_end(&download);
+
+    let body = gtk::Box::new(gtk::Orientation::Horizontal, 16);
+    body.set_margin_start(20);
+    body.set_margin_end(20);
+    body.set_margin_top(8);
+    body.set_margin_bottom(20);
+    let icon = gtk::Image::from_icon_name("software-update-available-symbolic");
+    icon.set_pixel_size(48);
+    icon.set_valign(gtk::Align::Start);
+    body.append(&icon);
+
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    text.set_hexpand(true);
+    let title = gtk::Label::new(Some(&format!("Arkx {version} is available")));
+    title.set_xalign(0.0);
+    title.add_css_class("title-4");
+    let detail = gtk::Label::new(Some(&format!(
+        "You are running {}. Arkx never updates itself — download the new \
+         version and replace the AppImage or the binary.",
+        env!("CARGO_PKG_VERSION")
+    )));
+    detail.set_xalign(0.0);
+    detail.set_wrap(true);
+    detail.set_max_width_chars(46);
+    detail.add_css_class("dim-label");
+    text.append(&title);
+    text.append(&detail);
+    body.append(&text);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    content.append(&header);
+    content.append(&body);
+    window.set_child(Some(&content));
+    window.present();
 }
 
 fn create_title_widget() -> gtk::Box {

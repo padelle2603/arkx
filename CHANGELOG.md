@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Feature**: the GUI tells you when a newer Arkx exists. One small window at
+  startup, "Download" hands over to your browser, "Not now" closes it. Nothing
+  is remembered and nothing is downloaded: Arkx never replaces its own binary.
+- **Feature**: `arkx --check-update` for scripts. Exit `0` current, `10` a newer
+  release exists, `1` GitHub unreachable.
+- **Feature**: AppImage builds published from GitHub Actions on every `v*` tag.
+  The workflow carries every packaging step (linuxdeploy, 7z sidecar, icons,
+  service menus, docs, bake) — there is no build script in the repo.
+  `scripts/install.sh` and `scripts/uninstall.sh` are no longer part of it
+  either: the AppImage is the install method.
+- **Fixed**: the release check is one anonymous `HEAD` against
+  `github.com/padelle2603/arkx/releases/latest`, not a GitHub API call: no
+  token, no cookies, no JSON, no rate-limit budget shared with other apps, and
+  nothing written to disk. Every failure is silent.
+
 - **Fixed**: the open-time integrity check no longer locks the application. It
   runs in the background without taking the busy flag, so a huge archive stays
   browsable and extractable while the CRC pass reads it; it honours cancellation

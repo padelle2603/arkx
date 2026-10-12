@@ -1,0 +1,122 @@
+name: AppImage
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  appimage:
+    # gtk4-rs 0.9 needs GTK >= 4.12; Ubuntu 22.04 ships 4.6. The runner also
+    # provides the glibc baseline the bundle is portable to.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-4-dev libadwaita-1-dev pkg-config \
+            p7zip-full libarchive-tools file desktop-file-utils zsync \
+            librsvg2-bin
+
+      - name: Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cargo.toml is canonical. A tag that disagrees would silently ship a
+      # release named after one version and containing another.
+      - name: Version
+        run: |
+          version="$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
+          echo "ARKX_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "ARKX_APPIMAGE=Arkx-${version}-x86_64.AppImage" >> "$GITHUB_ENV"
+          echo "building $ARKX_APPIMAGE"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml ${version}"
+            exit 1
+          fi
+
+      - name: Checks (fail before packaging)
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+          cargo test --locked
+          desktop-file-validate data/arkx.desktop
+
+      - name: Release notes from the changelog
+        run: |
+          awk -v want="## v${ARKX_VERSION}" '
+            $0 == want { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            echo "No '## v${ARKX_VERSION}' section in CHANGELOG.md" >> /tmp/notes.md
+          fi
+          cat /tmp/notes.md
+
+      - name: linuxdeploy + GTK plugin
+        run: |
+          curl -sSfL -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -sSfL -o linuxdeploy-plugin-gtk.sh https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
+          chmod +x linuxdeploy linuxdeploy-plugin-gtk.sh
+          echo "$PWD" >> "$GITHUB_PATH"
+
+      - name: Compile
+        run: cargo build --release --locked
+
+      # AppDir layout is the packaging: everything below is what ends up in
+      # the AppImage, so it lives here and not in a script the repo carries.
+      - name: Deploy into AppDir
+        run: |
+          ./linuxdeploy --appdir AppDir \
+            -e target/release/arkx \
+            -e "$(command -v bsdtar)" \
+            -d data/arkx.desktop \
+            -i data/icons/hicolor/256x256/apps/arkx.png \
+            --plugin gtk
+
+          # p7zip keeps its codecs in a sibling directory: ship them too or
+          # RAR/7Z/ISO/CAB extraction breaks in the bundle.
+          mkdir -p AppDir/usr/lib
+          cp "$(command -v 7z)" AppDir/usr/bin/
+          cp -r /usr/lib/p7zip AppDir/usr/lib/
+
+          mkdir -p AppDir/usr/share/icons AppDir/usr/share/doc/arkx \
+                   AppDir/usr/share/kio/servicemenus
+          cp -r data/icons/hicolor AppDir/usr/share/icons/
+          cp data/arkx.desktop AppDir/
+          cp data/icons/hicolor/256x256/apps/arkx.png AppDir/arkx.png
+          cp LEGAL.md PRIVACY.md README.md AppDir/usr/share/doc/arkx/
+          # Service menus ship as reference: an AppImage cannot register them
+          # itself. ./scripts/install-menus.sh points Dolphin at the AppImage.
+          cp data/servicemenus/*.desktop AppDir/usr/share/kio/servicemenus/
+
+      - name: Smoke test inside AppDir
+        run: |
+          AppDir/usr/bin/arkx --version
+          test -x AppDir/usr/bin/7z || { echo "7z missing from AppDir!"; exit 1; }
+          test -x AppDir/usr/bin/bsdtar || { echo "bsdtar missing from AppDir!"; exit 1; }
+
+      - name: Bake
+        run: OUTPUT="$ARKX_APPIMAGE" ./linuxdeploy --appdir AppDir --output appimage
+
+      - name: Smoke test
+        run: |
+          ls -la "$ARKX_APPIMAGE"
+          chmod +x "$ARKX_APPIMAGE"
+          ./"$ARKX_APPIMAGE" --version
+          # Exit 0 = current, 10 = newer release available. Both are success:
+          # what we are proving here is that the bundle carries working TLS.
+          ./"$ARKX_APPIMAGE" --check-update || [ $? -eq 10 ]
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ARKX_APPIMAGE }}
+          body_path: /tmp/notes.md
