@@ -139,9 +139,10 @@ jobs:
           ls -la "$ARKX_APPIMAGE"
           chmod +x "$ARKX_APPIMAGE"
           ./"$ARKX_APPIMAGE" --version
-          # Exit 0 = current, 10 = newer release available. Both are success:
-          # what we are proving here is that the bundle carries working TLS.
-          ./"$ARKX_APPIMAGE" --check-update || [ $? -eq 10 ]
+          # Exit 0 = current, 10 = newer release, 1 = no release published yet
+          # or unreachable. A manual run before the first release legitimately
+          # gets 1; what we are proving is that the bundle carries working TLS.
+          ./"$ARKX_APPIMAGE" --check-update || [ $? -le 10 ]
 
       # A workflow_dispatch run publishes nothing, so without this the only
       # way to get the artifact out is to cut a release.
