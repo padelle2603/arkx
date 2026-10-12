@@ -195,7 +195,7 @@ fn appmenu(extract: bool) -> ! {
             eprintln!("error: not running from an AppImage; the menus already point at `arkx`");
             std::process::exit(EXIT_ERROR);
         };
-        match menus::install(&exe, menus::icon_path().as_deref()) {
+        match menus::install(&exe, menus::stable_icon_path().as_deref()) {
             Ok(paths) => {
                 for path in &paths {
                     println!("{}", path.display());

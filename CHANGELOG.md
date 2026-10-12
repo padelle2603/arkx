@@ -12,7 +12,9 @@
   inside a bundle, so until now the entries only existed for people with a git
   checkout and `scripts/install-menus.sh`, which no release downloader had. The
   templates are embedded in the binary. `arkx --appmenu-extract` and
-  `--appmenu-remove` do the same by hand after moving the AppImage.
+  `--appmenu-remove` do the same by hand after moving the AppImage. The icon
+  is copied into `~/.local/share/icons/hicolor/` rather than referenced at its
+  mount point, which changes on every launch.
 - **Fixed**: the generated service menus no longer carry `TryExec`, which
   `desktop-file-validate` rejects in a `Type=Service` file.
 - **Feature**: AppImage builds published from GitHub Actions on every `v*` tag.

@@ -87,21 +87,42 @@ pub fn appimage_path() -> Option<PathBuf> {
     std::env::var_os("APPIMAGE").map(PathBuf::from)
 }
 
-/// Icon inside the mounted bundle, so the menus carry a real icon instead of
-/// relying on a system theme entry that an AppImage-only install will not have.
-pub fn icon_path() -> Option<PathBuf> {
-    let icon = PathBuf::from(std::env::var_os("APPDIR")?).join("arkx.png");
-    icon.is_file().then_some(icon)
+/// Copy the bundle's icon somewhere that outlives the mount.
+///
+/// `$APPDIR` is a `/tmp/.mount_*` directory that a different path on every
+/// launch, so pointing the menus straight at it would leave them with a
+/// broken `Icon=` after the next run — and the menus are only written once.
+/// Copying it into the user's icon theme gives a stable absolute path *and*
+/// makes `arkx` resolvable by name for anything else that asks for it.
+///
+/// Returns `None` when there is no bundle icon or it cannot be copied, which
+/// leaves `Icon=arkx` to the system theme.
+pub fn stable_icon_path() -> Option<PathBuf> {
+    let src = PathBuf::from(std::env::var_os("APPDIR")?).join("arkx.png");
+    if !src.is_file() {
+        return None;
+    }
+    let dest = data_home().join("icons/hicolor/256x256/apps/arkx.png");
+    std::fs::create_dir_all(dest.parent()?).ok()?;
+    if std::fs::copy(&src, &dest).is_ok() {
+        Some(dest)
+    } else {
+        None
+    }
+}
+
+/// `$XDG_DATA_HOME`, with the usual fallback.
+fn data_home() -> PathBuf {
+    std::env::var_os("XDG_DATA_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Where KIO looks for user-local service menus.
 pub fn dest_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_DATA_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("kio").join("servicemenus")
+    data_home().join("kio").join("servicemenus")
 }
 
 /// Install both menus for `exe`. Returns the files written.
@@ -174,7 +195,7 @@ pub fn auto_install() -> bool {
     let Some(exe) = appimage_path() else {
         return false;
     };
-    match install(&exe, icon_path().as_deref()) {
+    match install(&exe, stable_icon_path().as_deref()) {
         Ok(written) => {
             config::set_appmenus_installed(true);
             for path in &written {
