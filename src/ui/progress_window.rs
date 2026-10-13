@@ -73,6 +73,10 @@ impl ProgressWindow {
 
         // Header
         let header = adw::HeaderBar::new();
+        // Own colours rather than the window background: a bare window that only
+        // relies on `window` is the one that goes see-through when GTK decides
+        // not to paint the window itself.
+        header.add_css_class("progress-header");
         header.set_title_widget(Some(&{
             let b = gtk::Box::new(gtk::Orientation::Vertical, 2);
             let t = gtk::Label::new(Some(title));
@@ -87,6 +91,7 @@ impl ProgressWindow {
 
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
+        toolbar.add_css_class("progress-window");
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
         content.set_margin_top(16);

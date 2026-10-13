@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.6.5 — the AppImage hook actually runs
+
+- **Fixed**: the fix that made the AppImage stop forcing X11 and a theme never
+  ran. `linuxdeploy-plugin-gtk` does not glob the AppRun hooks: it writes one
+  `source` line per file, and `99-arkx.sh` sorts before
+  `linuxdeploy-plugin-gtk.sh` because a digit beats a letter. The plugin then
+  put `GDK_BACKEND=x11` and `GTK_THEME` straight back, so v1.6.4 shipped the
+  behaviour it was meant to fix. The hook is `zzz-arkx.sh` now, and the build
+  reads the order out of the AppRun it just produced and fails when ours is not
+  last.
+- **Fixed**: the whole `GDK_BACKEND` switch. Arkx was running on XWayland inside
+  X11 CSD, where GTK stops painting the window background, and the 12px margin
+  around the frame plus the progress window came out see-through. On the
+  session it now runs natively on Wayland, like the installed binary.
+- **Fixed**: `ARK_GDK_BACKEND` and `ARK_GTK_THEME` override what the plugin
+  imposes, which is what makes the difference reproducible:
+  `ARK_GDK_BACKEND=x11 ./Arkx.AppImage` brings the old behaviour back on demand.
+- **Fixed**: surfaces the stylesheet never listed — popover, menu, tooltip,
+  dialog — are painted opaque now. libadwaita paints its own dialogs with
+  `background: none` on purpose and leaves the colour to an inner sheet, so a
+  thinner GTK hands back a panel you can see the desktop through. The progress
+  window carries its own colours too, instead of trusting the window
+  background, which was the first thing to go when GTK stopped painting it.
+- **Fixed**: the frame's rounded corners actually round. GTK has no `overflow`
+  in CSS, so the header bar and the file table carry the radius themselves.
+- **Fixed**: the stylesheet uses nothing newer than GTK 4.14, the version inside
+  the bundle — `opacity` and the `border-color` shorthand need 4.16, where GTK
+  drops those declarations without a word — and it says so on stderr when it
+  cannot parse something, with line and column, instead of dropping the
+  declaration silently.
+
 ## v1.6.4 — the AppImage stops forcing X11 and a theme
 
 - **Fixed**: parts of the bundled GUI were translucent: popovers, dialogs and the

@@ -225,16 +225,19 @@ pub fn build_ui(app: &adw::Application) {
     //    so a thinner stack hands back a panel you can see the desktop through.
     //  - the window carries no `box-shadow`: that is the CSD shadow GTK draws
     //    itself, and on X11 it is an alpha ring around our opaque frame.
+    //  - GTK CSS has no `overflow`, so a rounded frame cannot clip its own
+    //    children: the header and the file table carry the radius instead,
+    //    otherwise they spill over the corners.
     //  - nothing newer than GTK 4.14 (`opacity`, the `border-color` shorthand):
     //    on older GTK the declaration is dropped, silently.
     let css = r#"
         window { background-color: #09090b; box-shadow: none; }
         .app-frame { margin: 12px; border: 1px solid #27272a; border-radius: 12px; background-color: #0f0f0f; box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 1px 3px rgba(0,0,0,0.3); }
-        .app-header { background-color: #1e1e1e; border-bottom: 1px solid #2a2a2a; padding: 6px 8px; }
+        .app-header { background-color: #1e1e1e; border-bottom: 1px solid #2a2a2a; border-top-left-radius: 11px; border-top-right-radius: 11px; padding: 6px 8px; }
         .header-btn { padding: 6px 10px; border-radius: 8px; }
         .header-btn.suggested-action { background-color: #2563eb; color: white; }
         .header-btn.suggested-action:hover { background-color: #1d4ed8; }
-        .file-table { background-color: #0f0f0f; }
+        .file-table { background-color: #0f0f0f; border-bottom-left-radius: 11px; border-bottom-right-radius: 11px; }
         .file-row { padding: 8px 12px; border-bottom: 1px solid #1f1f23; min-height: 44px; }
         .file-row:hover { background-color: #1e1e2e; }
         .file-row:selected { background-color: #2563eb; color: white; }
@@ -262,6 +265,11 @@ pub fn build_ui(app: &adw::Application) {
            sheet, which a theme running on a GTK older than ours never fills. */
         popover, menu, tooltip { background-color: #1e1e1e; color: #e4e4e7; }
         dialog.background, dialog.background sheet { background-color: #1e1e1e; color: #e4e4e7; }
+        /* The progress window carries its own colours: it used to rely on the
+           window background alone, so it was the first thing to go see-through
+           when the window itself stopped being painted. */
+        .progress-window { background-color: #0f0f0f; }
+        .progress-header { background-color: #1e1e1e; border-bottom: 1px solid #27272a; padding: 6px 8px; }
         /* Speed-profile popover */
         .profile-popover { padding: 4px; min-width: 350px; }
         .profile-heading { font-size: 11px; font-weight: 700; letter-spacing: 0.4px; color: #a1a1aa; padding: 6px 8px 2px; }
