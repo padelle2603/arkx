@@ -73,6 +73,38 @@ jobs:
           [ -n "$SEVEN" ] || { echo "no ELF 7z binary found"; exit 1; }
           echo "7z binary: $SEVEN"
 
+          # linuxdeploy-plugin-gtk installs an AppRun hook that forces
+          # GDK_BACKEND=x11, GTK_THEME=Adwaita and REPLACES GSETTINGS_SCHEMA_DIR.
+          # Arkx carries its own palette: none of the three is needed, and all
+          # three make the bundled GUI render differently from the installed
+          # binary.
+          #
+          # It has to exist BEFORE linuxdeploy runs: linuxdeploy writes the
+          # `source` line for every hook it finds in apprun-hooks/ into the
+          # AppRun, at the end of its own run. Create it afterwards and the
+          # AppRun never mentions it, silently, which is what v1.6.4 shipped.
+          mkdir -p AppDir/apprun-hooks
+          cat > AppDir/apprun-hooks/zzz-arkx.sh <<'HOOK'
+          #!/usr/bin/env bash
+          # An explicit override wins over everything, and it is what makes the
+          # difference diagnosable: ARK_GDK_BACKEND=x11 reproduces what the
+          # bundle used to do on every launch.
+          if [ -n "${ARK_GDK_BACKEND:-}" ]; then
+            export GDK_BACKEND="$ARK_GDK_BACKEND"
+          else
+            unset GDK_BACKEND
+          fi
+          if [ -n "${ARK_GTK_THEME:-}" ]; then
+            export GTK_THEME="$ARK_GTK_THEME"
+          else
+            unset GTK_THEME
+          fi
+          if [ -d /usr/share/glib-2.0/schemas ]; then
+            export GSETTINGS_SCHEMA_DIR="${GSETTINGS_SCHEMA_DIR:+$GSETTINGS_SCHEMA_DIR:}/usr/share/glib-2.0/schemas"
+          fi
+          HOOK
+          chmod +x AppDir/apprun-hooks/zzz-arkx.sh
+
           # Every binary goes through linuxdeploy so its shared libraries get
           # resolved. Copying 7z by hand left it without its codecs: on Ubuntu
           # 24.04 p7zip-full is transitional and 7zip 23.01 does not ship
@@ -105,44 +137,14 @@ jobs:
             echo "no separate 7z codec module; assuming it is linked in"
           fi
 
-          # linuxdeploy-plugin-gtk installs an AppRun hook that forces
-          # GDK_BACKEND=x11, GTK_THEME=Adwaita and REPLACES GSETTINGS_SCHEMA_DIR.
-          # Arkx carries its own palette: none of the three is needed, and all
-          # three make the bundled GUI render differently from the installed
-          # binary. Hooks run in the order of the glob, so the name matters
-          # more than it looks: `99-arkx.sh` sorts BEFORE
-          # `linuxdeploy-plugin-gtk.sh` (a digit beats a letter), the plugin
-          # then put GDK_BACKEND=x11 back, and v1.6.4 shipped the exact
-          # behaviour v1.6.3 had. `zzz-` is after any name the plugin can pick.
-          cat > AppDir/apprun-hooks/zzz-arkx.sh <<'HOOK'
-          #!/usr/bin/env bash
-          # An explicit override wins over everything, and it is what makes the
-          # difference diagnosable: ARK_GDK_BACKEND=x11 reproduces what the
-          # bundle used to do on every launch.
-          if [ -n "${ARK_GDK_BACKEND:-}" ]; then
-            export GDK_BACKEND="$ARK_GDK_BACKEND"
-          else
-            unset GDK_BACKEND
-          fi
-          if [ -n "${ARK_GTK_THEME:-}" ]; then
-            export GTK_THEME="$ARK_GTK_THEME"
-          else
-            unset GTK_THEME
-          fi
-          if [ -d /usr/share/glib-2.0/schemas ]; then
-            export GSETTINGS_SCHEMA_DIR="${GSETTINGS_SCHEMA_DIR:+$GSETTINGS_SCHEMA_DIR:}/usr/share/glib-2.0/schemas"
-          fi
-          HOOK
-          chmod +x AppDir/apprun-hooks/zzz-arkx.sh
-
-          # AppRun does not glob: linuxdeploy writes one `source` line per hook, in the
-          # order it found them, and a digit sorts before a letter. So
+          # AppRun does not glob: linuxdeploy writes one `source` line per hook,
+          # in the order it found them, and a digit sorts before a letter. So
           # `99-arkx.sh` ran BEFORE the plugin hook, which put GDK_BACKEND=x11
           # and GTK_THEME straight back, and v1.6.4 shipped the behaviour it
           # was meant to fix. Read the order out of the AppRun we just built
-          # and fail the build when ours is not last: "the name sorts right"
-          # is not something to trust twice. The hook name is quoted inside
-          # those lines, so match on the file name alone.
+          # and fail the build when ours is not last: neither the sort order
+          # nor "create it before linuxdeploy" is worth trusting twice. The
+          # hook name is quoted inside those lines, so match the file name.
           grep -q 'zzz-arkx\.sh' AppDir/AppRun \
             || { echo "::error::AppRun does not source zzz-arkx.sh at all"; exit 1; }
           plugin_at="$(grep -n 'linuxdeploy-plugin-gtk\.sh' AppDir/AppRun | head -1 | cut -d: -f1 || true)"
