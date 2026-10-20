@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.6.6 — avoid failing integrity tests on RAR5 unsupported method warnings
+
+- **Fixed**: avoid failing 7z/RAR integrity tests on RAR5 "Unsupported method" warning messages (false negatives).
+
 ## v1.6.5 — the AppImage hook actually runs
 
 - **Fixed**: the fix that made the AppImage stop forcing X11 and a theme never

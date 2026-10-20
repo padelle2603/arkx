@@ -227,9 +227,11 @@ impl crate::core::archive::ArchiveBackend for SevenZipBackend {
             // Detect errors in 7z output
             if is_password_error(line)
                 || line.contains("Cannot open")
-                || line.contains("CRC")
+                || line.contains("CRC Failed")
                 || line.starts_with("Can't open file")
-                || line.contains("Error")
+                || (line.contains("Error")
+                    && !line.contains("WARNING")
+                    && !line.contains("Unsupported method"))
             {
                 failed += 1;
                 results.push(crate::core::archive::TestResult {
